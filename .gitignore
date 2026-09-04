@@ -1,0 +1,13 @@
+node_modules/
+lib/
+*.tgz
+boot*.log
+.vitest/
+coverage/
+
+# local test artifacts
+smoke
+smoke-*
+
+# local backups
+.bak-*
