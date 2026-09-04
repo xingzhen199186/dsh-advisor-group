@@ -83,12 +83,6 @@ npx @deepseek-ai/dsh web
 - 每日配额（新咨询 50 次）持久化在 `$DSH_HOME/storages/advisor-group/daily-guard.json`（UTC 日切），重启不再归零。
 - 分类器影子模式：每次非强制分类追加一条观测样本（只读 `/advisor-group/shadow`），仅用于阈值调优，绝不干预行为。
 
-## ⚠️ 已知限制
-
-- SSE 断连**不取消在途顾问调用**（以 `discussion.advisorTimeoutMs` 超时兜底）；刷新后咨询后台完成，durable 卡片重建完整内容。
-- 轻量 Markdown 渲染器不支持嵌套列表 / 内联 HTML / 复杂表格。
-- 预设默认模型清单为近似值——任一顾问模型为空时 `ask_advisors` 快速失败（附原因）；用「获取模型列表」拉取权威清单。
-
 ## 🛠️ 开发
 
 ```sh

@@ -83,12 +83,6 @@ npx @deepseek-ai/dsh web
 - Daily quota (50 new consultations) is persisted to `$DSH_HOME/storages/advisor-group/daily-guard.json` (UTC day key), so restarts don't reset it.
 - Classifier shadow mode appends one observation sample per non-forced classification (read-only `/advisor-group/shadow`), used for threshold tuning only — never influences behavior.
 
-## ⚠️ Known limitations
-
-- Disconnecting the SSE stream does not cancel in-flight advisor calls (per-advisor timeout `discussion.advisorTimeoutMs` is the fallback); refreshing keeps the consultation completing in the background.
-- The lightweight Markdown renderer does not support nested lists, inline HTML, or complex tables.
-- Preset default model lists are best-effort approximations — `ask_advisors` refuses to start (with a precise reason) while any advisor has an empty model; use *获取模型列表* for the authoritative list.
-
 ## 🛠️ Development
 
 ```sh
