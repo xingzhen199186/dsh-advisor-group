@@ -25,8 +25,6 @@ interface RepeatTrack {
   count: number
 }
 
-const MAX_DAILY_CONSULTATIONS = 50
-
 function extractUserMessageText(event: { type: string; data?: unknown }): string | null {
   if (event.type !== 'user/message') return null
   const data = event.data as
@@ -161,14 +159,19 @@ export class AdvisorGroupService {
   /**
    * Current daily-guard facts for display (does NOT increment — read-only).
    * Rolls the in-memory counter to a new UTC day view without persisting.
+   * `enabled` reflects the configurable cap; `remaining` is -1 when the cap
+   * is disabled (the counter still accumulates for visibility).
    */
-  getDailyGuard(): { used: number; limit: number; remaining: number } {
+  getDailyGuard(): { used: number; enabled: boolean; limit: number; remaining: number } {
     const today = new Date().toISOString().slice(0, 10)
     const used = this.dailyConsultationDate === today ? this.dailyConsultationCount : 0
+    const enabled = this.config.quota.enabled
+    const limit = this.config.quota.maxPerDay
     return {
       used,
-      limit: MAX_DAILY_CONSULTATIONS,
-      remaining: Math.max(0, MAX_DAILY_CONSULTATIONS - used),
+      enabled,
+      limit,
+      remaining: enabled ? Math.max(0, limit - used) : -1,
     }
   }
 
@@ -176,6 +179,8 @@ export class AdvisorGroupService {
    * Minimal cost guard: atomically check and increment the per-day new
    * consultation counter. Node is single-threaded, so doing both inside one
    * synchronous block closes the TOCTOU window a two-step check would leave.
+   * The cap is configurable (`quota.enabled` / `quota.maxPerDay`); when the
+   * cap is disabled the counter still increments (used for display only).
    * The counter is persisted (UTC day key) so a harness restart does not
    * reset the quota; persistence is fire-and-forget after the sync block.
    */
@@ -185,8 +190,8 @@ export class AdvisorGroupService {
       this.dailyConsultationDate = today
       this.dailyConsultationCount = 0
     }
-    if (this.dailyConsultationCount >= MAX_DAILY_CONSULTATIONS) {
-      return { ok: false, reason: '今日顾问咨询次数已达上限，请明天再试或调整配置。' }
+    if (this.config.quota.enabled && this.dailyConsultationCount >= this.config.quota.maxPerDay) {
+      return { ok: false, reason: '今日顾问咨询次数已达上限，请明天再试，或在设置中调整每日咨询上限。' }
     }
     this.dailyConsultationCount += 1
     this.persistDailyGuard()

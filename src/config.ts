@@ -83,11 +83,19 @@ export interface UiConfig {
   autoExpand: boolean
 }
 
+export interface QuotaConfig {
+  /** Enable the per-UTC-day new-consultation cap (cost safety valve). */
+  enabled: boolean
+  /** Max new consultations per UTC day when enabled (1–100000), default 50. */
+  maxPerDay: number
+}
+
 export interface Config {
   enabled: boolean
   discussion: DiscussionConfig
   trigger: TriggerConfig
   ui: UiConfig
+  quota: QuotaConfig
   advisors: AdvisorConfig[]
 }
 
@@ -151,10 +159,16 @@ const UiConfig: Schema<UiConfig> = Schema.object({
   autoExpand: Schema.boolean().default(true),
 })
 
+const QuotaConfig: Schema<QuotaConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('Enable the daily new-consultation cap (cost safety valve).'),
+  maxPerDay: Schema.natural().min(1).max(100000).default(50).description('Max new consultations per UTC day (1–100000); ignored when enabled is false.'),
+})
+
 export const Config: Schema<Config> = Schema.object({
   enabled: Schema.boolean().default(true),
   discussion: DiscussionConfig,
   trigger: TriggerConfig,
   ui: UiConfig,
+  quota: QuotaConfig,
   advisors: Schema.array(AdvisorConfig).default([]),
 })

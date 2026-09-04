@@ -9,6 +9,7 @@ function sample(): ConfigShape {
     discussion: { maxRounds: 2, maxAdvisorsPerCall: 3, parallel: true, autoDeepen: true, stopOnConsensus: false },
     trigger: { requireClassifier: true, allowWebFallback: true, confidenceThreshold: 0.6 },
     ui: { theme: 'retro-green', showTimestamps: true, autoExpand: true },
+    quota: { enabled: true, maxPerDay: 50 },
     advisors: [
       {
         id: 'advisor-a',

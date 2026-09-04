@@ -858,7 +858,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
   const [error, setError] = useState('')
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [dailyGuard, setDailyGuard] = useState<{ used: number; limit: number; remaining: number } | null>(null)
+  const [dailyGuard, setDailyGuard] = useState<{ used: number; enabled: boolean; limit: number; remaining: number } | null>(null)
   const savedJsonRef = useRef('')
   // SecretField convergence (2026-09-05): the server never returns key
   // material (not even a mask) — per-provider presence facts ride in
@@ -875,7 +875,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
             ok?: boolean
             config?: AdvisorGroupConfig
             revision?: number
-            dailyGuard?: { used: number; limit: number; remaining: number }
+            dailyGuard?: { used: number; enabled: boolean; limit: number; remaining: number }
             error?: string
           }>,
         ),
@@ -1088,22 +1088,58 @@ function AdvisorGroupSettingsTab(): ReactNode {
         }),
         label('启用顾问群'),
       ),
+      createElement(
+        'div',
+        {
+          style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 },
+        },
+        createElement('input', {
+          type: 'checkbox',
+          checked: config.quota.enabled,
+          onChange: (e: { target: { checked: boolean } }) =>
+            setConfig({ ...config, quota: { ...config.quota, enabled: e.target.checked } }),
+        }),
+        label('启用每日咨询上限（成本安全阀）'),
+      ),
+      createElement(
+        'div',
+        { style: { marginTop: 6 } },
+        label(`每日上限次数（${config.quota.enabled ? '生效中' : '已关闭，不拦截'}）`),
+        createElement('input', {
+          type: 'number',
+          min: 1,
+          max: 100000,
+          value: String(config.quota.maxPerDay),
+          disabled: !config.quota.enabled,
+          onChange: (e: { target: { value: string } }) =>
+            setConfig({
+              ...config,
+              quota: { ...config.quota, maxPerDay: Math.max(1, Number(e.target.value)) },
+            }),
+          style: { ...settingsInputStyle, width: 120, marginTop: 4 },
+        }),
+      ),
+    ),
+    createElement(
+      'div',
+      { style: settingsSectionStyle },
       dailyGuard
         ? createElement(
             'div',
             {
               style: {
-                marginTop: 6,
                 fontSize: 12,
                 color:
-                  dailyGuard.remaining > 0
+                  !dailyGuard.enabled || dailyGuard.remaining > 0
                     ? 'var(--dsh-color-muted, #8b90a0)'
                     : '#e11d48',
               },
             },
-            dailyGuard.remaining > 0
-              ? `今日剩余咨询次数：${dailyGuard.remaining} / ${dailyGuard.limit}（UTC 日切）`
-              : `今日咨询次数已用尽（${dailyGuard.used} / ${dailyGuard.limit}），将于 UTC 日切后恢复。`,
+            dailyGuard.enabled
+              ? dailyGuard.remaining > 0
+                ? `今日剩余咨询次数：${dailyGuard.remaining} / ${dailyGuard.limit}（UTC 日切）`
+                : `今日咨询次数已用尽（${dailyGuard.used} / ${dailyGuard.limit}），将于 UTC 日切后恢复。`
+              : `今日已咨询 ${dailyGuard.used} 次（每日上限已关闭）。`,
           )
         : null,
     ),
