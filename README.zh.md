@@ -1,8 +1,6 @@
 # dsh-advisor-group
 
 > [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件：主模型在遇到**专业、长尾世界知识、高风险或不确定**的问题时，召集多位**专家顾问模型**，在复古 CRT 聊天组卡片中真流式对话。
->
-> 顾问回答实时流式返回（双通道：DSH `ctx.llm` + direct-http 兜底），SSE 断连后可 resync 回放。
 
 [![dsh-plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
 

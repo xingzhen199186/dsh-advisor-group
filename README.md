@@ -1,8 +1,6 @@
 # dsh-advisor-group
 
 > A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that lets the main model consult **multiple expert advisor models** in a retro chat-group card — for professional, long-tail world-knowledge, high-risk, or uncertain questions.
->
-> Advisor responses stream in real time (dual channel: DSH `ctx.llm` with a direct-http fallback) and survive disconnects via resumable SSE replay.
 
 [![dsh-plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
 
