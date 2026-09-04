@@ -17,7 +17,7 @@
 - **三种触发方式**：`@顾问群` 提及（强制启动）、同一问题重复 3 次未解决、主模型自评置信度低于阈值。
 - **复古 CRT 聊天组卡片**：绿/琥珀/蓝三主题、扫描线、LIVE/DONE 标题、💭 思考面板默认展开自动滚底；顾问正文走轻量 Markdown 渲染（链接协议白名单，支持标题/列表/代码/引用/链接/表格）。
 - **供应商预设（11 平台 · 26 预设）**：DeepSeek、月之暗面 Kimi、Kimi Code、阿里云百炼、智谱 AI、OpenAI、Claude、Gemini、硅基流动、AIHubMix、OpenRouter（含 OpenAI / Anthropic 兼容变体）。
-- **注重安全**：API Key 采用官方 `SecretField` 语义（浏览器永不回显；`apiKeysByProvider` 供应商密钥档案仅存服务端）；诊断端点 SSRF 加固（仅 https/loopback、拒绝 IP 字面量与重定向）；`/advisor-group/*` 路由启动期 token 鉴权；每日新咨询 50 次**原子配额**，持久化跨重启。
+- **注重安全**：API Key 采用官方 `SecretField` 语义（浏览器永不回显；`apiKeysByProvider` 供应商密钥档案仅存服务端）；诊断端点 SSRF 加固（仅 https/loopback、拒绝 IP 字面量与重定向）；`/advisor-group/*` 路由启动期 token 鉴权；每日新咨询**可配置原子配额**（默认 50，可关闭），持久化跨重启。
 - **运行时开关**：`toggle_advisor_group` 启停插件并持久化到设置。
 
 ## ✅ 兼容性
@@ -82,7 +82,7 @@ npx @deepseek-ai/dsh web
 - 直连 API Key 可存于 DSH `settings.yaml`（标 secret，官方 `describe` 绝不回传浏览器）；不想落盘请用 `apiKeyEnv` 环境变量模式。
 - `/advisor-group/*` 路由为**单机共享 token**（本地单用户使用），不是多用户鉴权；暴露局域网必须外层加反代鉴权。
 - 诊断端点服务端按存档 key 解析真实值再打供应商，并对目标 URL 做 https-only/loopback SSRF 校验；DNS rebinding 记为文档化已知边界。
-- 每日配额（新咨询 50 次）持久化在 `$DSH_HOME/storages/advisor-group/daily-guard.json`（UTC 日切），重启不再归零。
+- 每日咨询上限（`quota.*` 可配置，默认 50、可关闭）持久化在 `$DSH_HOME/storages/advisor-group/daily-guard.json`（UTC 日切），重启不再归零。
 - 分类器影子模式：每次非强制分类追加一条观测样本（只读 `/advisor-group/shadow`），仅用于阈值调优，绝不干预行为。
 
 ## 🛠️ 开发
