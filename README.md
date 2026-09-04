@@ -1,17 +1,20 @@
 # dsh-advisor-group
 
 > A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that lets the main model consult **multiple expert advisor models** in a retro chat-group card — for professional, long-tail world-knowledge, high-risk, or uncertain questions.
+>
+> Advisor responses stream in real time (dual channel: DSH `ctx.llm` with a direct-http fallback) and survive disconnects via resumable SSE replay.
 
 [![dsh-plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
+
+📖 [中文文档 / Chinese: README.zh.md](README.zh.md)
 
 ---
 
 ## ✨ Features
 
 - **Auto-deepen consultation pipeline** — one `ask_advisors` call runs up to `maxRounds` rounds automatically: each round is a *driver deep-question → advisor A → advisor B (sees A) → advisor C (sees A+B) → …* sequential relay, closed by a driver-generated synthesis conclusion.
+- **Zero-config driver model** — the driver formulation of deep follow-ups reuses the current agent's provider/model, so no extra API key or model setup is needed; it falls back to `discussion.driverModel` when the session header is unavailable.
 - **Three ways to activate** — `@顾问群` mention (force-start), same question repeated 3 times without resolution, or main-model self-assessed confidence below the threshold.
-- **Real streaming** — advisors stream thinking chain + Markdown body via the DSH `ctx.llm` channel, with a direct-http fallback (OpenAI / Anthropic / Gemini compatible protocols) and incremental 200ms throttling.
-- **SSE replay with resync** — `/advisor-group/stream` serves `eventId`/`bootId` framed frames, a 500-frame / 5-minute ring buffer, and `event: resync` on restart or gap.
 - **Retro CRT chat cards** — green/amber/blue CRT themes, scanlines, LIVE/DONE headers, auto-expanded thinking panel with auto-scroll; advisor Markdown rendered with a link-protocol whitelist (headings, lists, code, quotes, links, tables).
 - **Provider presets (11 platforms · 26 presets)** — DeepSeek, Moonshot Kimi, Kimi Code, Aliyun Bailian, Zhipu AI, OpenAI, Claude, Gemini, SiliconFlow, AIHubMix, OpenRouter (OpenAI/Anthropic-compatible variants included).
 - **Security-minded by design** — API keys use official `SecretField` semantics (never returned to the browser; `apiKeysByProvider` key history is server-side only), SSRF-guarded diagnostics (https-only / loopback, no IP literals, no redirects), per-boot token auth on `/advisor-group/*` routes, and an atomic 50 consultations/day quota persisted across restarts.

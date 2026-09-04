@@ -1,17 +1,20 @@
 # dsh-advisor-group
 
 > [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件：主模型在遇到**专业、长尾世界知识、高风险或不确定**的问题时，召集多位**专家顾问模型**，在复古 CRT 聊天组卡片中真流式对话。
+>
+> 顾问回答实时流式返回（双通道：DSH `ctx.llm` + direct-http 兜底），SSE 断连后可 resync 回放。
 
 [![dsh-plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
+
+[English: README.md](README.md)
 
 ---
 
 ## ✨ 功能特性
 
 - **自动深挖咨询流水线**：一次 `ask_advisors` 自动跑满 `maxRounds` 轮——每轮 = *驱动模型深挖追问 → 顾问 A → 顾问 B（看到 A）→ 顾问 C（看到 A+B）→ …* 顺序接力，最后驱动模型产出**综合结论**。
+- **驱动模型零配置复用**：深挖追问由驱动模型生成，直接复用会话当前 agent 的 provider/model——无需额外配 Key 或模型；会话头不可读时回退 `discussion.driverModel`。
 - **三种触发方式**：`@顾问群` 提及（强制启动）、同一问题重复 3 次未解决、主模型自评置信度低于阈值。
-- **真流式双通道**：顾问思维链 + Markdown 正文经 DSH `ctx.llm` 实时流式返回（增量 200ms 节流），并提供 direct-http 兜底（OpenAI / Anthropic / Gemini 兼容协议）。
-- **SSE 回放 + 断连恢复**：`/advisor-group/stream` 按 `eventId`/`bootId` 帧推送，每会话 500 条 / 5 分钟环形缓冲，重启或缺口发 `event: resync`。
 - **复古 CRT 聊天组卡片**：绿/琥珀/蓝三主题、扫描线、LIVE/DONE 标题、💭 思考面板默认展开自动滚底；顾问正文走轻量 Markdown 渲染（链接协议白名单，支持标题/列表/代码/引用/链接/表格）。
 - **供应商预设（11 平台 · 26 预设）**：DeepSeek、月之暗面 Kimi、Kimi Code、阿里云百炼、智谱 AI、OpenAI、Claude、Gemini、硅基流动、AIHubMix、OpenRouter（含 OpenAI / Anthropic 兼容变体）。
 - **注重安全**：API Key 采用官方 `SecretField` 语义（浏览器永不回显；`apiKeysByProvider` 供应商密钥档案仅存服务端）；诊断端点 SSRF 加固（仅 https/loopback、拒绝 IP 字面量与重定向）；`/advisor-group/*` 路由启动期 token 鉴权；每日新咨询 50 次**原子配额**，持久化跨重启。
