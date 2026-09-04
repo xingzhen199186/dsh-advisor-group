@@ -1,103 +1,100 @@
 # dsh-advisor-group
 
-A DeepSeek Harness (DSH) plugin that lets the main model consult expert advisor models in a retro chat-group card when the question is professional, long-tail world knowledge, high-risk, or uncertain. It also force-activates when the user `@顾问群`-mentions the group or repeats the same question three times without resolution.
+> A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that lets the main model consult **multiple expert advisor models** in a retro chat-group card — for professional, long-tail world-knowledge, high-risk, or uncertain questions.
 
-Advisor responses stream in real time (thinking chain + Markdown body). The main model drives cross-round discussion through `sessionId + followUp`; `maxRounds` caps the total number of rounds.
+[![dsh-plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
 
-## Compatibility
+---
+
+## ✨ Features
+
+- **Auto-deepen consultation pipeline** — one `ask_advisors` call runs up to `maxRounds` rounds automatically: each round is a *driver deep-question → advisor A → advisor B (sees A) → advisor C (sees A+B) → …* sequential relay, closed by a driver-generated synthesis conclusion.
+- **Three ways to activate** — `@顾问群` mention (force-start), same question repeated 3 times without resolution, or main-model self-assessed confidence below the threshold.
+- **Real streaming** — advisors stream thinking chain + Markdown body via the DSH `ctx.llm` channel, with a direct-http fallback (OpenAI / Anthropic / Gemini compatible protocols) and incremental 200ms throttling.
+- **SSE replay with resync** — `/advisor-group/stream` serves `eventId`/`bootId` framed frames, a 500-frame / 5-minute ring buffer, and `event: resync` on restart or gap.
+- **Retro CRT chat cards** — green/amber/blue CRT themes, scanlines, LIVE/DONE headers, auto-expanded thinking panel with auto-scroll; advisor Markdown rendered with a link-protocol whitelist (headings, lists, code, quotes, links, tables).
+- **Provider presets (11 platforms · 26 presets)** — DeepSeek, Moonshot Kimi, Kimi Code, Aliyun Bailian, Zhipu AI, OpenAI, Claude, Gemini, SiliconFlow, AIHubMix, OpenRouter (OpenAI/Anthropic-compatible variants included).
+- **Security-minded by design** — API keys use official `SecretField` semantics (never returned to the browser; `apiKeysByProvider` key history is server-side only), SSRF-guarded diagnostics (https-only / loopback, no IP literals, no redirects), per-boot token auth on `/advisor-group/*` routes, and an atomic 50 consultations/day quota persisted across restarts.
+- **Runtime toggle** — `toggle_advisor_group` enables/disables the plugin and persists the flag to settings.
+
+## ✅ Compatibility
 
 | Surface | Status |
 |---|---|
-| Harness | DeepSeek Harness `0.1.2-rc.1` (adapted from `0.1.1-rc.2`) |
-| Node | `^22.19.0 || >=24.0.0` |
-| Platforms | DSH Web (client bundle); host logic runs in headless too |
+| Harness | DeepSeek Harness `0.1.2-rc.1` |
+| Node | `^22.19.0 \|\| >=24.0.0` |
+| Platforms | DSH Web (client bundle) + headless host logic |
 
-## What it does
-
-- `ask_advisors`: starts a consultation and runs the **auto-deepen pipeline** (2026-09-05): up to `maxRounds` rounds of `[driver deep-question → advisor A → advisor B (sees A) → advisor C (sees A+B) → …]` in sequential relay, closed by a driver-generated conclusion. Each advisor sees the project background + the main question + every prior answer in the same round; the driver reuses the current agent's provider/model (session `request/header`, fallback `discussion.driverModel`).
-- `toggle_advisor_group`: enables/disables the plugin at runtime and persists the flag to settings.
-- Triggers: `@顾问群` mention, same-question-repeated-3-times escalation, or main-model `confidence` below threshold.
-- Dual streaming path: DSH `ctx.llm` and direct HTTP (OpenAI/Anthropic/Gemini) both publish incremental deltas to SSE and the durable session log.
-- SSE stream `/advisor-group/stream` with `eventId`/`bootId`, a 500-frame / 5-minute replay buffer, and `resync` events on restart or gap.
-- Retro CRT chat card: thinking panel expanded by default with auto-scroll; advisor Markdown rendering (headings, lists, code blocks, quotes, links, **tables**).
-- Settings tab: Settings → Plugins → Advisor Group — a collapsible plugin card (header + chevron, registered into the `settings.plugin.item` keyed slot keyed by the `advisor-group` namespace), at the same level as the built-in Web Search / Bash cards.
-- Security/cost: masked API keys on read, token-auth on `/advisor-group/*` routes, atomic 50-consultations/day guard.
-
-## 0.1.2-rc.1 migration notes
-
-The client bundle was migrated to the 0.1.2-rc.1 conversation contract:
-
-- `@deepseek-ai/dsh-client-runtime` no longer exists at `0.1.2-rc.1`; conversation types (`ConversationNodeDefinition`, `ConversationLocation`, `ConversationStepDataMap`) now come from `@deepseek-ai/dsh-client-ui-conversation/client`, chat renderer types (`ChatNodeDataMap`, `ChatNodeViewProps`) from `@deepseek-ai/dsh-client-ui-chat/client`, and the `slots` service declaration from `@deepseek-ai/dsh-client-ui-renderer/client`.
-- Node registration moved from `ctx.conversationEvents.register(...)` to `ctx.uiConversation.events.register(definition)` (`inject` is now `['uiConversation', 'slots', 'locale']`).
-- The settings card slot changed from `settings.plugins.tab` (list slot, `id`/`order`/`label`) to the keyed `settings.plugin.item` slot (`key: 'advisor-group'`), declared by `@deepseek-ai/dsh-client-ui-settings-plugins`.
-- Host: `settingsNamespace()` was removed — pass the `'advisor-group'` literal (branded as `SettingsNamespace`) directly; `Session.events` was replaced by `Session.snapshotEvents()`.
-- Durable plugin events keep mutating `KNOWN_SESSION_EVENT_TYPES` (see `src/session-events-host.ts`): 0.1.2-rc.1's official mechanism is the `SessionEvent.ignorable` envelope marker, which `Session.append()` still does not expose to plugin writers.
-
-## Install
+## 📦 Installation
 
 ```sh
-npm run build
-npm pack --pack-destination .
-dsh plugin --profile web remove dsh-advisor-group  # if an old version is installed
-dsh plugin --profile web add ./dsh-advisor-group-0.1.0.tgz
+# 1. Install the plugin (one package, everything included)
+dsh plugin --profile web add dsh-advisor-group
+
+# 2. Restart DSH web
+npx @deepseek-ai/dsh web
 ```
 
-Restart DSH web and hard refresh the browser (`Ctrl+Shift+R`) after install.
+> **From source (development)**
+> ```sh
+> npm install --legacy-peer-deps --no-audit --no-fund
+> npm run build
+> dsh plugin --profile web add ./dsh-advisor-group-0.1.0.tgz   # after npm pack
+> ```
 
-## Configuration
+## 🚀 Quick start
+
+1. Restart DSH web and hard-refresh the browser (`Ctrl+Shift+R`).
+2. Go to **Settings → Plugins → Advisor Group**: configure your advisors (provider route + model; use *获取模型列表* to pull the authoritative model list) and tune `maxRounds`, thresholds, and the UI theme.
+3. Just start a conversation:
+   - type `@顾问群` in your question to force a consultation, or
+   - ask a professional/uncertain question — the plugin escalates automatically when appropriate.
+
+`ask_advisors` tools available to the model: `ask_advisors`, `toggle_advisor_group`.
+
+## ⚙️ Configuration
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | boolean | `true` | Enable advisor group |
-| `discussion.maxRounds` | number | `2` | **Total rounds of the auto-deepen pipeline** (each round = driver deep-question + all advisors in relay) |
-| `discussion.maxAdvisorsPerCall` | number | `3` | Max advisors per call (1-10) |
-| `discussion.parallel` | boolean | `true` | **Deprecated** (2026-09-05): rounds are a sequential relay; kept for stored-config compatibility, no longer rendered |
-| `discussion.autoDeepen` | boolean | `true` | Run the auto-deepen pipeline: after each round the driver model asks a deeper follow-up; a final conclusion closes the consultation |
-| `discussion.driverModel` | object | – | Fallback driver model `{provider, model}` used when the session header cannot be read |
-| `discussion.stopOnConsensus` | boolean | `false` | **Deprecated** (2026-09-05): dormant under the auto-deepen pipeline; kept in schema only for stored-config compatibility |
-| `discussion.advisorTimeoutMs` | number | `120000` | Per-advisor call timeout (ms, 1000-600000), applied to both ctx.llm and direct-http |
+| `discussion.maxRounds` | number | `2` | Total rounds of the auto-deepen pipeline (each round = driver question + all advisors in relay) |
+| `discussion.maxAdvisorsPerCall` | number | `3` | Max advisors per call (1–10) |
+| `discussion.autoDeepen` | boolean | `true` | Run the auto-deepen pipeline (driver follow-ups + final synthesis) |
+| `discussion.driverModel` | object | – | Fallback driver model `{provider, model}` when the session header cannot be read |
+| `discussion.advisorTimeoutMs` | number | `120000` | Per-advisor call timeout (ms, 1000–600000), applied to both channels |
 | `trigger.requireClassifier` | boolean | `true` | Run the pre-classifier before starting |
 | `trigger.allowWebFallback` | boolean | `true` | Allow classifier to recommend web search |
 | `trigger.confidenceThreshold` | number | `0.6` | Escalate when main-model confidence is below this |
-| `ui.theme` | string | `retro-green` | Chat card theme |
+| `ui.theme` | string | `retro-green` | Chat card theme (`retro-green` / `retro-amber` / `retro-blue`) |
 | `ui.showTimestamps` | boolean | `true` | Show timestamps |
 | `ui.autoExpand` | boolean | `true` | Auto-expand card |
-| `advisors` | array | `[]` | Advisor list (provider/model/baseURL/apiKey/apiKeyEnv/protocol…) |
+| `advisors` | array | `[]` | Advisor list (provider/model/baseURL/apiKey/apiKeyEnv/protocol…, keys are `role('secret')`) |
 
-Configuration is validated by the Schemastery `Config` schema in `src/config.ts` and persisted through `ctx.settings`.
+> `discussion.parallel` and `discussion.stopOnConsensus` are deprecated leftovers kept only for stored-config compatibility.
 
-## Development
+## 🔒 Security & privacy
+
+- Direct API keys can be stored in the DSH `settings.yaml` (marked secret, never returned to the browser by `describe`); prefer `apiKeyEnv` (env-var mode) if you don't want keys on disk.
+- `/advisor-group/*` routes use a per-boot shared token for local single-user use — **not** multi-user auth. Add a reverse-proxy auth layer before LAN exposure.
+- Diagnostics endpoints resolve the real key server-side and validate the target URL against an https-only / loopback SSRF guard; DNS-rebinding protection is a documented out-of-scope limitation.
+- Daily quota (50 new consultations) is persisted to `$DSH_HOME/storages/advisor-group/daily-guard.json` (UTC day key), so restarts don't reset it.
+- Classifier shadow mode appends one observation sample per non-forced classification (read-only `/advisor-group/shadow`), used for threshold tuning only — never influences behavior.
+
+## ⚠️ Known limitations
+
+- Disconnecting the SSE stream does not cancel in-flight advisor calls (per-advisor timeout `discussion.advisorTimeoutMs` is the fallback); refreshing keeps the consultation completing in the background.
+- The lightweight Markdown renderer does not support nested lists, inline HTML, or complex tables.
+- Preset default model lists are best-effort approximations — `ask_advisors` refuses to start (with a precise reason) while any advisor has an empty model; use *获取模型列表* for the authoritative list.
+
+## 🛠️ Development
 
 ```sh
 npm install --legacy-peer-deps --no-audit --no-fund
 npm run typecheck
-npm test
-npm run build
+npm test        # 64 tests, incl. provider streaming contracts against a local fake LLM server
+npm run build   # tsdown; client bundle must NOT be built with minify: true
 ```
 
-Note: the client bundle must NOT be built with `minify: true`; otherwise `dsh-startup-guard` may mis-detect the bundle registration and auto-disable the plugin. See `开发注意事项.md`.
-
-## Verification
-
-- `typecheck` / `build` pass
-- `vitest`: 64 tests — classifier 4, client round matching 3, Markdown link/table/XSS 5, SSE replay/resync 3, settings API key reconcile 21 (incl. SecretField semantics), diagnostic key resolution 5, diagnostic SSRF guard 6, settings secret redaction 5, session event registration 1, **provider contract 10** (OpenAI/Anthropic/Gemini streaming + faults against a local fake LLM server, configurable timeout, non-stream path, ctx.llm adapter), model validation 2, shadow samples 3, **driver model + relay prompts 5** (auto-deepen pipeline)
-- End-to-end RPC: `start → delta → message(round=1) → end`; after follow-up `main follow-up → message(round=2) → end`
-- Route auth: 401 without token, 200 with the token injected into the index, config key masked
-
-## Security notes
-
-- Direct API keys are stored **in plain text** in the DSH `settings.yaml` (or via `apiKeyEnv` on the host environment). Prefer `apiKeyEnv`; never commit or sync the DSH profile with direct keys inside.
-- The `/advisor-group/*` routes use a per-boot shared token for local single-user use — **not** multi-user auth; add a reverse-proxy auth layer before LAN exposure.
-- Diagnostics endpoints (`/advisor-group/models`, `/advisor-group/test-connection`) resolve the real key server-side, validate the target base URL against an https-only / loopback SSRF guard (no IP literals, no cloud metadata hosts, no redirects), and return only status + count. DNS-rebinding protection is a documented out-of-scope limitation.
-- The daily consultation counter is persisted (UTC day key) to `$DSH_HOME/storages/advisor-group/daily-guard.json`, so a restart no longer resets the quota. The counter's atomicity remains a single synchronous check-and-increment in the host process.
-- **Classifier shadow mode**: every non-forced `ask_advisors` classification appends one sample (question truncated to 200 chars, self-assessed confidence, verdict, reason) to `$DSH_HOME/storages/advisor-group/classifier-shadow.jsonl` for threshold tuning — read-only overview via `GET /advisor-group/shadow` (token-auth: last 200 samples + totals). It never influences behavior.
-
-## Known limitations
-
-- Disconnecting the SSE stream does not abort in-flight advisor calls (per-advisor timeout — configurable via `discussion.advisorTimeoutMs`, default 120s — is the fallback; refreshing keeps the consultation completing in the background so the durable card comes back complete).
-- Lightweight Markdown renderer does not support nested lists, inline HTML, or complex tables.
-- Provider preset default model lists are near-value best guesses from the local knowledge base, NOT verified against each platform's current catalog — `ask_advisors` refuses to start (with a precise reason) while any advisor has an empty model, and the settings card marks such a field red; use "获取模型列表" to pull the authoritative list.
-
-## License
+## 📄 License
 
 [Apache License 2.0](LICENSE) © 2026 dsh-advisor-group contributors.
