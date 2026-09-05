@@ -62,7 +62,7 @@ npx @deepseek-ai/dsh web
 | `discussion.maxAdvisorsPerCall` | number | `3` | Max advisors per call (1–10) |
 | `discussion.autoDeepen` | boolean | `true` | Run the auto-deepen pipeline (driver follow-ups + final synthesis) |
 | `discussion.driverModel` | object | – | Fallback driver model `{provider, model}` when the session header cannot be read |
-| `discussion.advisorTimeoutMs` | number | `120000` | Per-advisor call timeout (ms, 1000–600000), applied to both channels |
+| `discussion.advisorTimeoutMs` | number | `600000` | Per-advisor call timeout (ms, 1000–600000), applied to both channels |
 | `quota.enabled` | boolean | `true` | Enable the daily new-consultation cap (cost safety valve) |
 | `quota.maxPerDay` | number | `50` | Max new consultations per UTC day (1–100000); ignored when `quota.enabled` is `false` |
 | `trigger.requireClassifier` | boolean | `true` | Run the pre-classifier before starting |

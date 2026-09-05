@@ -1257,7 +1257,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
             min: 1000,
             max: 600000,
             step: 1000,
-            value: String(config.discussion.advisorTimeoutMs ?? 240000),
+            value: String(config.discussion.advisorTimeoutMs ?? 600000),
             onChange: (e: { target: { value: string } }) =>
               setConfig({
                 ...config,

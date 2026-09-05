@@ -62,7 +62,7 @@ npx @deepseek-ai/dsh web
 | `discussion.maxAdvisorsPerCall` | number | `3` | 单次咨询最大顾问数（1–10） |
 | `discussion.autoDeepen` | boolean | `true` | 启用自动深挖流水线（驱动追问 + 综合结论） |
 | `discussion.driverModel` | object | – | 兜底驱动模型 `{provider, model}`（会话头信息不可读时） |
-| `discussion.advisorTimeoutMs` | number | `120000` | 单顾问调用超时（毫秒，1000–600000），双通道均生效 |
+| `discussion.advisorTimeoutMs` | number | `600000` | 单顾问调用超时（毫秒，1000–600000），双通道均生效 |
 | `quota.enabled` | boolean | `true` | 启用每日咨询上限（成本安全阀） |
 | `quota.maxPerDay` | number | `50` | 每日 UTC 日周期内最多新咨询次数（1–100000）；`quota.enabled=false` 时不生效 |
 | `trigger.requireClassifier` | boolean | `true` | 发起前先跑前置分类器 |
