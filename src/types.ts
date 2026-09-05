@@ -1,5 +1,10 @@
 import type { AdvisorConfig } from './config'
 
+export interface DriverSource {
+  provider: string
+  model: string
+}
+
 export type ChatRole = 'main' | 'advisor' | 'system'
 
 /** Why an advisor stream ended before producing a complete answer body. */
@@ -33,6 +38,9 @@ export interface ConsultSession {
   /** The agent's DSH session id: resume rebuilds THIS session so the card
    *  (assembled from the agent session log) keeps receiving events. */
   dshSessionId?: string
+  /** Driver model source captured at first run; resume reuses it because the
+   *  rebuilt session has no request/header event to read the agent model from. */
+  driverSource?: DriverSource
   createdAt: number
   updatedAt: number
 }
@@ -51,6 +59,7 @@ export interface PersistedSession {
   context?: string
   cwd?: string
   dshSessionId?: string
+  driverSource?: DriverSource
   advisorIds: string[]
   maxRounds: number
   createdAt: number

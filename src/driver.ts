@@ -18,7 +18,7 @@ export const FALLBACK_DEEPEN_QUESTION =
   '请基于以上全部讨论，针对仍然存在的分歧、未验证的假设与主要风险，提出一个有深度的后续问题。'
 
 export const FALLBACK_CONCLUSION =
-  '请综合以上全部讨论，给出结论：各位顾问的共识、分歧，以及最可靠的行动建议。'
+  '（⚠ 驱动模型未能生成综合结论：请主模型以上述顾问讨论为基础，自行总结共识、分歧与最可靠的行动建议。）'
 
 export const DRIVER_SYSTEM_PROMPT = `
 你是顾问群的主持人（驱动模型）。你的职责：

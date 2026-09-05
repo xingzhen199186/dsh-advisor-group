@@ -165,6 +165,7 @@ export class AdvisorGroupService {
           })),
           cwd: raw.cwd,
           dshSessionId: raw.dshSessionId,
+          driverSource: raw.driverSource,
           createdAt: raw.createdAt,
           updatedAt: raw.updatedAt,
         }
@@ -185,6 +186,7 @@ export class AdvisorGroupService {
       ...(session.context === undefined ? {} : { context: session.context }),
       ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
       ...(session.dshSessionId === undefined ? {} : { dshSessionId: session.dshSessionId }),
+      ...(session.driverSource === undefined ? {} : { driverSource: session.driverSource }),
       advisorIds: session.advisors.map((advisor) => advisor.id),
       maxRounds: session.maxRounds,
       createdAt: session.createdAt,
@@ -589,6 +591,16 @@ export class AdvisorGroupService {
     const stop = new AbortController()
     this.activeAborts.set(session.id, stop)
     const combined = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal
+    // Capture the driver source at FIRST run: a resume runs on a rebuilt
+    // session (no request/header event), so the conclusion would otherwise
+    // degrade to the static fallback text.
+    if (!session.driverSource) {
+      const source = resolveDriverSource(sessionLog, this.config.discussion.driverModel)
+      if (source) {
+        session.driverSource = source
+        this.persistSession(session)
+      }
+    }
     try {
       while (true) {
         const pending = this.nextPendingRound(session)
@@ -598,7 +610,7 @@ export class AdvisorGroupService {
           const question = await generateDeepenQuestion(
             this.ctx,
             session,
-            resolveDriverSource(sessionLog, this.config.discussion.driverModel),
+            session.driverSource ?? resolveDriverSource(sessionLog, this.config.discussion.driverModel),
             combined,
           )
           this.appendMainMessage(session, question, sessionLog)
@@ -682,7 +694,7 @@ export class AdvisorGroupService {
       : await generateConclusion(
           this.ctx,
           session,
-          resolveDriverSource(sessionLog, this.config.discussion.driverModel),
+          session.driverSource ?? resolveDriverSource(sessionLog, this.config.discussion.driverModel),
           signal,
         )
     const finalSummary: ConsultSummary = stopped
