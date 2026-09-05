@@ -12,8 +12,8 @@ import { advisorJoinPrompt, ADVISOR_TOOL_GUIDANCE } from './providers/advisor-pr
 import { generateConclusion, generateDeepenQuestion, resolveDriverSource } from './driver'
 import { appendAdvisorDelta, appendAdvisorEnd, appendAdvisorMessage, appendAdvisorResume } from './session-log'
 import { publish } from './stream-channel'
-import { executeAdvisorTool, resolveAdvisorToolSchemas, runAdvisorToolLoop, type AdvisorAgent } from './advisor-tools'
-import type { ChatMessage, ConsultSession, ConsultSummary, AdvisorSummary, TruncationInfo, PersistedSession } from './types'
+import { executeAdvisorTool, resolveAdvisorToolSchemas, runAdvisorToolLoop, type AdvisorAgent, type AdvisorToolStepEvent } from './advisor-tools'
+import type { ChatMessage, ConsultSession, ConsultSummary, AdvisorSummary, TruncationInfo, PersistedSession, AdvisorToolStep } from './types'
 import './events'
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
@@ -993,7 +993,8 @@ export class AdvisorGroupService {
         // channel is in use and the configured scope resolves session-visible
         // tools, run the tool loop — the model may call read/grep/web_search etc.
         // before answering; every invocation runs through the official pipeline
-        // (scoped dispatch via `agent`), recorded in the 💭 thinking panel.
+        // (scoped dispatch via `agent`); every invocation surfaces as its own
+        // agent-loop-style row (`toolStep`), NOT inside the thinking panel.
         // Per-advisor override wins; otherwise the global default applies.
         const toolMode = advisor.tools ?? this.config.discussion.advisorTools ?? 'readonly'
         const toolSchemas = resolveAdvisorToolSchemas(this.ctx, agent, toolMode)
@@ -1001,8 +1002,29 @@ export class AdvisorGroupService {
           // The advisor actually has tools: fold the usage guidance into the
           // runtime system prompt (never persisted into advisor.systemPrompt).
           relational.systemPrompt = `${relational.systemPrompt}${ADVISOR_TOOL_GUIDANCE}`
-          // Tell the human what this advisor received (verifiable in 💭 panel).
-          emitDelta({ thinking: `🧰 本次可用工具：${toolSchemas.map((t) => t.name).join('、')}` })
+          // Own row stream: call/result steps are appended to the message in
+          // order and published + durably logged immediately (no 200ms batch).
+          const messageToolSteps: AdvisorToolStep[] = []
+          const emitToolStep = (step: AdvisorToolStepEvent) => {
+            const full: AdvisorToolStep = { ...step, atMs: Date.now() }
+            messageToolSteps.push(full)
+            if (sessionLog) {
+              appendAdvisorDelta(sessionLog, session.id, {
+                sessionId: session.id,
+                advisorId: advisor.id,
+                advisorName: advisor.name,
+                round,
+                toolStep: full,
+              })
+            }
+            publish(session.id, {
+              advisorId: advisor.id,
+              advisorName: advisor.name,
+              round,
+              toolStep: full,
+            })
+          }
+          emitToolStep({ kind: 'call', name: '⚙️ tools', text: `本次可用：${toolSchemas.map((t) => t.name).join('、')}` })
           const streamOnce = (tools: typeof toolSchemas, extra: string) => {
             const withExtra = extra.trim()
               ? [...transcript, { role: 'main' as const, name: '已执行工具', content: extra.trim() }]
@@ -1018,11 +1040,12 @@ export class AdvisorGroupService {
             toolSchemas,
             streamOnce,
             (call) => executeAdvisorTool(this.ctx, agent, call, signal),
-            (text) => emitDelta({ thinking: text }),
+            (step) => emitToolStep(step),
           )
           flush()
           content = loop.content
           truncated = loop.truncated
+          message.toolSteps = messageToolSteps
         } else {
           const streamResult = await streamDirectHttp(relational, transcript, emitDelta, signal, advisorTimeoutMs)
           flush()

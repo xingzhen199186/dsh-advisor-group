@@ -31,6 +31,13 @@ export interface AdvisorGroupMessageData {
   readonly content: string
   readonly thinking?: string
   readonly round?: number
+  /** Tool-calling steps (agent-loop style, rendered as independent rows). */
+  readonly toolSteps?: ReadonlyArray<{
+    readonly kind: 'call' | 'result'
+    readonly name: string
+    readonly text: string
+    readonly atMs: number
+  }>
   /** Stream was cut before a complete body (advisor timeout / network drop). */
   readonly truncated?: { readonly reason: 'timeout' | 'network'; readonly atMs: number }
 }
@@ -44,6 +51,13 @@ export interface AdvisorGroupDeltaData {
   readonly round?: number
   readonly contentDelta?: string
   readonly thinkingDelta?: string
+  /** One tool step appended to the advisor's row stream. */
+  readonly toolStep?: {
+    readonly kind: 'call' | 'result'
+    readonly name: string
+    readonly text: string
+    readonly atMs: number
+  }
   readonly done?: boolean
 }
 

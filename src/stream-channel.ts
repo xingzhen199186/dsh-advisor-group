@@ -1,5 +1,14 @@
 import type { ServerResponse } from 'node:http'
 
+/** One tool-call step shown as its own line in the card (agent-loop style). */
+export interface ToolStep {
+  kind: 'call' | 'result'
+  name: string
+  /** Preview of the call arguments (call) or the result preview (result). */
+  text: string
+  atMs: number
+}
+
 export interface StreamChannelDelta {
   advisorId: string
   advisorName?: string
@@ -7,6 +16,8 @@ export interface StreamChannelDelta {
   round?: number
   contentDelta?: string
   thinkingDelta?: string
+  /** One tool step appended to the advisor's tool-trace row stream. */
+  toolStep?: ToolStep
   done?: boolean
   eventId?: number
   bootId?: string

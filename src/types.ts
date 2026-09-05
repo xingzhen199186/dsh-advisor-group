@@ -13,6 +13,14 @@ export interface TruncationInfo {
   atMs: number
 }
 
+/** One tool step (agent-loop style) attached to the advisor message. */
+export interface AdvisorToolStep {
+  kind: 'call' | 'result'
+  name: string
+  text: string
+  atMs: number
+}
+
 export interface ChatMessage {
   role: ChatRole
   advisorId?: string
@@ -20,6 +28,8 @@ export interface ChatMessage {
   content: string
   thinking?: string
   round?: number
+  /** Tool-calling steps streamed as independent rows (not part of thinking). */
+  toolSteps?: AdvisorToolStep[]
   /** Set when the stream was cut before a complete body (e.g. advisor timeout). */
   truncated?: TruncationInfo
   ts: number
@@ -76,6 +86,7 @@ export interface PersistedSession {
     content: string
     thinking?: string
     round?: number
+    toolSteps?: AdvisorToolStep[]
     truncated?: TruncationInfo
     ts: number
   }>

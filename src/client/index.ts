@@ -480,6 +480,36 @@ function MessageBubble({ message }: { message: AdvisorGroupMessageData }): React
               : null,
           )
         : null,
+      (message.toolSteps ?? []).length > 0 && !isMain && !isSystem
+        ? createElement(
+            'div',
+            {
+              style: {
+                borderLeft: '2px solid rgba(56,189,248,0.4)',
+                padding: '2px 6px',
+                margin: '2px 0 4px',
+                fontSize: 12,
+              },
+            },
+            (message.toolSteps ?? []).map((step, index) =>
+              createElement(
+                'div',
+                {
+                  key: index,
+                  style: {
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    marginBottom: 1,
+                    color: step.kind === 'call' ? '#38bdf8' : 'var(--dsh-color-muted, #8b90a0)',
+                  },
+                },
+                step.kind === 'call'
+                  ? `⛭ ${step.name} · ${step.text}`
+                  : `↳ ${step.text}`,
+              ),
+            ),
+          )
+        : null,
       isMain || isSystem
         ? createElement(
             'div',
@@ -520,7 +550,9 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
   // SSE live overlay bucketed by `advisorId::round` so multi-round relays never
   // leak a later round's deltas into an earlier round's bubble (see the
   // sequential auto-deepen pipeline). Durable messages stay the base of truth.
-  const [live, setLive] = useState<Record<string, { content: string; thinking: string }>>({})
+  const [live, setLive] = useState<
+    Record<string, { content: string; thinking: string; toolSteps: Array<{ kind: string; name: string; text: string; atMs?: number }> }>
+  >({})
   const [contextCollapsed, setContextCollapsed] = useState(true)
   const lastEventIdRef = useRef(0)
   const lastBootIdRef = useRef('')
@@ -540,6 +572,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
           round?: number
           contentDelta?: string
           thinkingDelta?: string
+          toolStep?: { kind: string; name: string; text: string; atMs?: number }
           eventId?: number
           bootId?: string
         }
@@ -557,12 +590,13 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
         if (eventId > 0) lastEventIdRef.current = eventId
         const bucket = `${delta.advisorId}::${delta.round ?? 1}`
         setLive((prev) => {
-          const current = prev[bucket] ?? { content: '', thinking: '' }
+          const current = prev[bucket] ?? { content: '', thinking: '', toolSteps: [] }
           return {
             ...prev,
             [bucket]: {
               content: current.content + (delta.contentDelta ?? ''),
               thinking: current.thinking + (delta.thinkingDelta ?? ''),
+              toolSteps: delta.toolStep ? [...current.toolSteps, delta.toolStep] : current.toolSteps,
             },
           }
         })
@@ -596,7 +630,11 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
       (streamed.thinking?.length ?? 0) > (message.thinking?.length ?? 0)
         ? streamed.thinking
         : message.thinking
-    return { ...message, content, thinking }
+    const toolSteps =
+      (streamed.toolSteps?.length ?? 0) > (message.toolSteps?.length ?? 0)
+        ? streamed.toolSteps
+        : message.toolSteps ?? []
+    return { ...message, content, thinking, toolSteps } as typeof message
   })
 
   const shortId = data.sessionId.length > 8 ? data.sessionId.slice(0, 8) : data.sessionId

@@ -265,10 +265,16 @@ function formatConversation(session: ConsultSession): string {
         message.truncated === undefined
           ? ''
           : `（顾问输出在流式过程中被截断：${message.truncated.reason === 'timeout' ? '超时' : '网络中断'}，正文可能不完整）\n`
+      const toolNote =
+        message.toolSteps && message.toolSteps.length > 0
+          ? `${message.toolSteps
+              .map((step) => (step.kind === 'call' ? `  ⛭ 调用 ${step.name} · ${step.text}` : `  ↳ ${step.text}`))
+              .join('\n')}\n`
+          : ''
       const body =
         message.content && message.content.trim()
-          ? truncatedNote + message.content
-          : truncatedNote + (message.thinking && message.thinking.trim()
+          ? truncatedNote + toolNote + message.content
+          : truncatedNote + toolNote + (message.thinking && message.thinking.trim()
             ? `（思维链）\n${message.thinking}`
             : '（顾问未返回正文）')
       lines.push(`【${message.advisorName ?? message.advisorId ?? '顾问'}】：${body}`)

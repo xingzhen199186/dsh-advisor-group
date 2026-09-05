@@ -61,6 +61,7 @@ export function appendAdvisorMessage(
     ...(message.advisorName === undefined ? {} : { advisorName: message.advisorName }),
     ...(message.round === undefined ? {} : { round: message.round }),
     ...(message.thinking === undefined ? {} : { thinking: message.thinking }),
+    ...(message.toolSteps === undefined ? {} : { toolSteps: message.toolSteps }),
     ...(message.truncated === undefined ? {} : { truncated: message.truncated }),
   }
   log.append('advisor-group/message', data)
@@ -84,6 +85,7 @@ export function appendAdvisorDelta(
     ...(delta.round === undefined ? {} : { round: delta.round }),
     ...(delta.contentDelta === undefined ? {} : { contentDelta: delta.contentDelta }),
     ...(delta.thinkingDelta === undefined ? {} : { thinkingDelta: delta.thinkingDelta }),
+    ...(delta.toolStep === undefined ? {} : { toolStep: delta.toolStep }),
     ...(delta.done === undefined ? {} : { done: delta.done }),
   }
   log.append('advisor-group/delta', data)

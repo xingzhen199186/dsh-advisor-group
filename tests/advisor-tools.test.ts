@@ -66,7 +66,7 @@ describe('tool result formatting', () => {
 
 describe('advisor tool loop', () => {
   it('executes the requested tool, feeds the result back and finishes with the final text', async () => {
-    const thinking: string[] = []
+    const steps: Array<{ kind: string; name: string; text: string }> = []
     let execCount = 0
     let round = 0
     const streamOnce = async (_tools: unknown[], extra: string) => {
@@ -87,12 +87,15 @@ describe('advisor tool loop', () => {
       [{ name: 'read' }],
       streamOnce,
       executeTool,
-      (text) => thinking.push(text),
+      (step) => steps.push(step),
     )
     expect(execCount).toBe(1)
     expect(result.content).toBe('最终回答')
-    expect(thinking.some((t) => t.includes('🔧 模型请求调用工具 read'))).toBe(true)
-    expect(thinking.some((t) => t.includes('FILE: hello'))).toBe(true)
+    // Agent-loop style rows: a call row then a result row, in order.
+    expect(steps).toEqual([
+      { kind: 'call', name: 'read', text: '{"path":"a.txt"}' },
+      { kind: 'result', name: 'read', text: 'FILE: hello' },
+    ])
   })
 
   it('stops after MAX_TOOL_ROUNDS with a final no-tools round', async () => {

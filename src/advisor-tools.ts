@@ -151,17 +151,25 @@ export async function executeAdvisorTool(
   }
 }
 
+/** One tool step surfaced as its own row (agent-loop style). */
+export interface AdvisorToolStepEvent {
+  kind: 'call' | 'result'
+  name: string
+  text: string
+}
+
 /**
  * Drive the tool-calling loop: stream with `tools` → execute every
- * model-requested call (recorded into the thinking panel) → feed a compact
- * "already executed" block back → repeat until the model answers (or
- * MAX_TOOL_ROUNDS, then one final no-tools round to force a text answer).
+ * model-requested call (each step surfaced via `onToolStep` as its own row) →
+ * feed a compact "already executed" block back → repeat until the model
+ * answers (or MAX_TOOL_ROUNDS, then one final no-tools round to force a text
+ * answer).
  */
 export async function runAdvisorToolLoop(
   tools: AdvisorToolSchema[],
   streamOnce: (tools: AdvisorToolSchema[], extraContext: string) => Promise<StreamOnceResult>,
   executeTool: (call: AdvisorToolCall) => Promise<string>,
-  onThinking: (text: string) => void,
+  onToolStep: (step: AdvisorToolStepEvent) => void,
 ): Promise<{ content: string; truncated: StreamOnceResult['truncated'] }> {
   let extraContext = ''
   let truncated: StreamOnceResult['truncated']
@@ -174,10 +182,10 @@ export async function runAdvisorToolLoop(
     const executed: string[] = []
     for (const call of result.toolCalls) {
       const argsPreview = call.argumentsJson.length > 120 ? `${call.argumentsJson.slice(0, 120)}…` : call.argumentsJson
-      onThinking(`🔧 模型请求调用工具 ${call.name}(${argsPreview || '无参数'})…`)
+      onToolStep({ kind: 'call', name: call.name, text: argsPreview || '无参数' })
       const outcome = await executeTool(call)
       if (outcome.trim()) {
-        onThinking(`  ↳ ${outcome.replace(/\n+/g, ' ').slice(0, 240)}${outcome.length > 240 ? '…' : ''}`)
+        onToolStep({ kind: 'result', name: call.name, text: outcome.replace(/\n+/g, ' ').slice(0, 240).trim() })
       }
       executed.push(`- ${call.name}${call.argumentsJson ? ` 参数：${call.argumentsJson.slice(0, 200)}` : ''}\n结果：${outcome}`)
     }
