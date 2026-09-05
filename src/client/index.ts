@@ -1301,7 +1301,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
         createElement(
           'div',
           null,
-          label('驱动模型生成超时（毫秒，追问/综合结论用）'),
+          label('驱动模型生成超时（毫秒）'),
           createElement('input', {
             type: 'number',
             min: 1000,
