@@ -1724,11 +1724,16 @@ function AdvisorGroupSettingsTab(): ReactNode {
             const isBuiltin = providers.some((p) => p.id === advisor.provider && p.kind === 'llm')
             const supportsTools = !isBuiltin || Boolean(advisor.baseURL || advisor.apiKeyEnv)
             const globalDefault = config.discussion.advisorTools ?? 'readonly'
+            const mode = advisor.tools ?? globalDefault
             const modeLabel: Record<string, string> = {
               readonly: '只读工具',
               all: '全部会话工具（含可写，慎用）',
               off: '关闭',
             }
+            // Mirrors the server-side ADVISOR_TOOL_GUIDANCE (runtime injection,
+            // never persisted into advisor.systemPrompt).
+            const toolPromptNote =
+              '工具启用时，系统提示词会自动追加：『对于你不了解、不熟悉的内容，尤其是项目背景、代码细节、仓库状态等不在知识范围内的情况，请优先使用联网工具（如 web_search、web_fetch）搜索核实后再作答，不要编造未核实的事实。』'
             if (supportsTools) {
               return [
                 label(
@@ -1738,7 +1743,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
                   'select',
                   {
                     'aria-label': '顾问工具调用范围',
-                    value: advisor.tools ?? globalDefault,
+                    value: mode,
                     onChange: (e: { target: { value: string } }) =>
                       updateAdvisor(index, { tools: e.target.value as 'readonly' | 'all' | 'off' }),
                     style: settingsInputStyle,
@@ -1747,6 +1752,22 @@ function AdvisorGroupSettingsTab(): ReactNode {
                   createElement('option', { value: 'all' }, '全部会话工具（含可写，慎用）'),
                   createElement('option', { value: 'off' }, '关闭'),
                 ),
+                mode === 'off'
+                  ? null
+                  : createElement(
+                      'div',
+                      {
+                        style: {
+                          fontSize: 12,
+                          color: 'var(--dsh-color-muted, #8b90a0)',
+                          border: '1px dashed var(--dsh-color-border, #3a3f4b)',
+                          borderRadius: 4,
+                          padding: '4px 6px',
+                          marginTop: 4,
+                        },
+                      },
+                      toolPromptNote,
+                    ),
               ]
             }
             return [
@@ -1762,7 +1783,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
                     padding: '4px 6px',
                   },
                 },
-                '❌ 当前为 DSH 内置通道（复用 DSH 凭据），不支持工具调用；为其配置 API 地址 / Key / 环境变量以走直连通道后即可启用。',
+                '❌ 当前为 DSH 内置通道（复用 DSH 凭据），不支持工具调用；为其配置 API 地址 / Key / 环境变量以走直连通道后即可启用（工具指引提示词也会随之生效）。',
               ),
             ]
           })(),
