@@ -999,6 +999,8 @@ export class AdvisorGroupService {
           // The advisor actually has tools: fold the usage guidance into the
           // runtime system prompt (never persisted into advisor.systemPrompt).
           relational.systemPrompt = `${relational.systemPrompt}${ADVISOR_TOOL_GUIDANCE}`
+          // Tell the human what this advisor received (verifiable in 💭 panel).
+          emitDelta({ thinking: `🧰 本次可用工具：${toolSchemas.map((t) => t.name).join('、')}` })
           const streamOnce = (tools: typeof toolSchemas, extra: string) => {
             const withExtra = extra.trim()
               ? [...transcript, { role: 'main' as const, name: '已执行工具', content: extra.trim() }]
