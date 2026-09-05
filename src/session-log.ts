@@ -116,6 +116,11 @@ export function appendAdvisorEnd(
         corePoints,
       })),
       ...(summary.riskNotes.length > 0 ? { riskNotes: summary.riskNotes } : {}),
+      // stopped / conclusion MUST reach the client: the card flips to STOPPED
+      // (showing the ▶ 继续聊天 button) only when `summary.stopped` is true,
+      // and the 📌 综合结论 section renders `summary.conclusion`.
+      ...(summary.stopped === undefined ? {} : { stopped: summary.stopped }),
+      ...(summary.conclusion === undefined ? {} : { conclusion: summary.conclusion }),
     },
   }
   log.append('advisor-group/end', data)
