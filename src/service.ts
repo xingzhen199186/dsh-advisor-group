@@ -8,7 +8,7 @@ import { Session, type SessionId } from '@deepseek-ai/dsh-session'
 import type { AdvisorConfig, Config } from './config'
 import { callViaCtxLlm, type TranscriptEntry } from './providers/ctx-llm'
 import { streamDirectHttp } from './providers/direct-http'
-import { advisorJoinPrompt } from './providers/advisor-prompt'
+import { advisorJoinPrompt, ADVISOR_TOOL_GUIDANCE } from './providers/advisor-prompt'
 import { generateConclusion, generateDeepenQuestion, resolveDriverSource } from './driver'
 import { appendAdvisorDelta, appendAdvisorEnd, appendAdvisorMessage, appendAdvisorResume } from './session-log'
 import { publish } from './stream-channel'
@@ -996,6 +996,9 @@ export class AdvisorGroupService {
         const toolMode = advisor.tools ?? this.config.discussion.advisorTools ?? 'readonly'
         const toolSchemas = resolveAdvisorToolSchemas(this.ctx, agent, toolMode)
         if (toolSchemas.length > 0) {
+          // The advisor actually has tools: fold the usage guidance into the
+          // runtime system prompt (never persisted into advisor.systemPrompt).
+          relational.systemPrompt = `${relational.systemPrompt}${ADVISOR_TOOL_GUIDANCE}`
           const streamOnce = (tools: typeof toolSchemas, extra: string) => {
             const withExtra = extra.trim()
               ? [...transcript, { role: 'main' as const, name: '已执行工具', content: extra.trim() }]

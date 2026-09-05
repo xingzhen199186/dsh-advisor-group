@@ -14,6 +14,19 @@ export const ADVISOR_OUTPUT_POLICY = `
 `
 
 /**
+ * Tool-calling guidance appended to an advisor's system prompt ONLY when the
+ * advisor actually has tools configured and the session-visible set resolved
+ * (callAdvisor adds it on the direct-http tool loop path).
+ */
+export const ADVISOR_TOOL_GUIDANCE = `
+
+工具使用指引：
+- 你可以调用当前会话提供的工具（检索/读取/搜索等）来辅助回答；
+- 对于你不了解、不熟悉的内容，尤其是项目背景、代码细节、仓库状态等不在你知识范围内的情况，请优先使用联网工具（如 web_search、web_fetch）搜索核实，再基于实际信息给出意见；
+- 仅在确有必要时调用工具：先了解现状，再下结论；不要编造你未核实的事实。
+`
+
+/**
  * Sequential-relay role hint appended to one advisor's system prompt.
  *
  * The first advisor answers the (main-model) question directly; every later

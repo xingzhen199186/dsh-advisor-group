@@ -5,7 +5,7 @@ import {
   generateDeepenQuestion,
   resolveDriverSource,
 } from '../src/driver'
-import { advisorJoinPrompt } from '../src/providers/advisor-prompt'
+import { advisorJoinPrompt, ADVISOR_TOOL_GUIDANCE } from '../src/providers/advisor-prompt'
 import type { Session, EpochHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 
@@ -53,6 +53,13 @@ describe('advisor join relay prompts', () => {
     expect(prompt).toContain('第 1 至第 2 位')
     expect(prompt).toContain('独立见解')
     expect(prompt).toContain('不要简单复述')
+  })
+
+  it('guidance for tool-enabled advisors prioritizes web search over unknown knowledge', () => {
+    expect(ADVISOR_TOOL_GUIDANCE).toContain('优先使用联网工具')
+    expect(ADVISOR_TOOL_GUIDANCE).toContain('web_search')
+    expect(ADVISOR_TOOL_GUIDANCE).toContain('web_fetch')
+    expect(ADVISOR_TOOL_GUIDANCE).toContain('不要编造')
   })
 })
 
