@@ -1349,7 +1349,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
                 advisorTools: e.target.value as 'readonly' | 'all' | 'off',
               },
             }),
-          style: { background: '#0b1120', color: '#a3e635', border: '1px solid #334155', borderRadius: 4, padding: '2px 6px', fontSize: 12 },
+          style: { ...settingsInputStyle, width: 'auto', fontSize: 12, marginTop: 4 },
         },
         createElement('option', { value: 'readonly' }, '只读工具（默认）'),
         createElement('option', { value: 'all' }, '全部会话工具（含可写，慎用）'),
