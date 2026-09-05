@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **SSE live overlay now buckets deltas by `(advisorId, round)`** instead of `advisorId` alone. Previously a second-round advisor's deltas were applied to the first-round bubble of the same advisor, which made thinking appear in the wrong panel and deferred text until the live buffer outgrew the durable message. With the sequential auto-deepen pipeline (A → B → C relay per round) this now streams exactly in order.
+- **User-initiated stop**: the running consultation card shows a `⏹ 停止` button (running state only) that calls `POST /advisor-group/stop` with the consultation `sessionId`; the host aborts the pipeline's combined signal and degrades to a graceful partial summary (`status: cancelled`, card title `STOPPED`, no synthesized conclusion). Refreshing the page still does NOT cancel the run (background completion is preserved), the stop is an explicit user action. `exec.signal` cancellation continues to work as before.
+
 ## [0.1.1] - 2026-09-04
 
 ### Added

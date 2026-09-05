@@ -638,6 +638,31 @@ function handleConfigRequest(
     }
 
     if (
+      req.method === 'POST' &&
+      (pathname === '/advisor-group/stop' || pathname === '/advisor-group/stop/')
+    ) {
+      // User-initiated stop of the running auto-deepen pipeline. The abort
+      // degrades to a graceful partial summary on the server; the tool call
+      // resolves normally with a "stopped" note.
+      try {
+        const raw = await readBody(req)
+        const parsed = JSON.parse(raw) as { sessionId?: unknown }
+        if (typeof parsed.sessionId !== 'string' || !parsed.sessionId) {
+          sendJson(res, 400, { ok: false, error: '缺少 sessionId' })
+          return
+        }
+        const stopped = service.stopConsultation(parsed.sessionId)
+        sendJson(res, 200, { ok: true, stopped })
+      } catch (error) {
+        sendJson(res, 400, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+      return
+    }
+
+    if (
       req.method === 'GET' &&
       (pathname === '/advisor-group/shadow' || pathname === '/advisor-group/shadow/')
     ) {

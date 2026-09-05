@@ -48,6 +48,8 @@ export class AdvisorGroupService {
   /** Durable daily-guard counter fixture under the DSH home storage area. */
   private readonly dailyGuardPath: string
   private dailyWriteChain: Promise<void> = Promise.resolve()
+  /** Per-session stop controllers for the auto-deepen pipeline. */
+  private readonly activeAborts = new Map<string, AbortController>()
   private enabled: boolean
   private config: Config
 
@@ -286,36 +288,77 @@ export class AdvisorGroupService {
    *   [driver deep-question (after the first)] → advisor A → advisor B (sees A)
    *   → advisor C (sees A+B) → …
    * and closes with a driver-generated conclusion. The pipeline is synchronous
-   * (SSE keeps the card streaming); `exec.signal` aborts the whole run.
+   * (SSE keeps the card streaming); `exec.signal` aborts the whole run and the
+   * user may stop it explicitly via `stopConsultation(sessionId)` (POST
+   * /advisor-group/stop) — a stop degrades to a graceful partial summary.
    */
   async runAutoPipeline(
     session: ConsultSession,
     signal?: AbortSignal,
     sessionLog?: Session,
   ): Promise<ConsultSummary> {
-    while (!this.hasReachedMaxRounds(session)) {
-      const nextRound = this.getRoundCount(session) + 1
-      if (nextRound > 1 && this.config.discussion.autoDeepen) {
-        const question = await generateDeepenQuestion(
+    const stop = new AbortController()
+    this.activeAborts.set(session.id, stop)
+    const combined = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal
+    try {
+      while (!this.hasReachedMaxRounds(session)) {
+        const nextRound = this.getRoundCount(session) + 1
+        if (nextRound > 1 && this.config.discussion.autoDeepen) {
+          const question = await generateDeepenQuestion(
+            this.ctx,
+            session,
+            resolveDriverSource(sessionLog, this.config.discussion.driverModel),
+            combined,
+          )
+          this.appendMainMessage(session, question, sessionLog)
+        }
+        await this.runOneRound(session, combined, sessionLog)
+      }
+      session.status = 'completed'
+      const summary = await this.generateFinalSummary(session, combined, sessionLog, false)
+      return summary
+    } catch (error) {
+      if (isAbortError(error, combined) || stop.signal.aborted) {
+        session.status = 'cancelled'
+        const summary = await this.generateFinalSummary(session, undefined, sessionLog, true)
+        return summary
+      }
+      throw error
+    } finally {
+      this.activeAborts.delete(session.id)
+    }
+  }
+
+  /**
+   * User-initiated stop: aborts the in-flight consultation pipeline. Returns
+   * whether a running consultation was found and aborted.
+   */
+  stopConsultation(sessionId: string): boolean {
+    const stop = this.activeAborts.get(sessionId)
+    if (!stop) return false
+    stop.abort()
+    return true
+  }
+
+  private async generateFinalSummary(
+    session: ConsultSession,
+    signal: AbortSignal | undefined,
+    sessionLog: Session | undefined,
+    stopped: boolean,
+  ): Promise<ConsultSummary> {
+    session.updatedAt = Date.now()
+    const summary = this.buildSummary(session, stopped)
+    const conclusion = stopped
+      ? ''
+      : await generateConclusion(
           this.ctx,
           session,
           resolveDriverSource(sessionLog, this.config.discussion.driverModel),
           signal,
         )
-        this.appendMainMessage(session, question, sessionLog)
-      }
-      await this.runOneRound(session, signal, sessionLog)
-    }
-    session.status = 'completed'
-    session.updatedAt = Date.now()
-    const summary = this.buildSummary(session, false)
-    const conclusion = await generateConclusion(
-      this.ctx,
-      session,
-      resolveDriverSource(sessionLog, this.config.discussion.driverModel),
-      signal,
-    )
-    const finalSummary: ConsultSummary = { ...summary, conclusion }
+    const finalSummary: ConsultSummary = stopped
+      ? { ...summary, stopped: true }
+      : { ...summary, conclusion }
     if (sessionLog) appendAdvisorEnd(sessionLog, session, finalSummary)
     this.ctx.emit('advisor-group/session-end', { sessionId: session.id, summary: finalSummary })
     return finalSummary
@@ -459,6 +502,7 @@ export class AdvisorGroupService {
         publish(session.id, {
           advisorId: advisor.id,
           advisorName: advisor.name,
+          round,
           contentDelta: delta.text,
           thinkingDelta: delta.thinking,
           done: false,
@@ -487,6 +531,7 @@ export class AdvisorGroupService {
     publish(session.id, {
       advisorId: advisor.id,
       advisorName: advisor.name,
+      round,
       done: true,
     })
 

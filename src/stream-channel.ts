@@ -3,6 +3,8 @@ import type { ServerResponse } from 'node:http'
 export interface StreamChannelDelta {
   advisorId: string
   advisorName?: string
+  /** Discussion round this delta belongs to — the client buckets live deltas by (advisorId, round). */
+  round?: number
   contentDelta?: string
   thinkingDelta?: string
   done?: boolean

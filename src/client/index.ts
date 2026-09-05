@@ -62,13 +62,13 @@ export interface AdvisorGroupState {
   readonly context?: string
   readonly advisors: readonly AdvisorGroupAdvisorInfo[]
   readonly messages: readonly AdvisorGroupMessageData[]
-  readonly status: 'running' | 'completed'
+  readonly status: 'running' | 'completed' | 'cancelled'
   readonly summary?: AdvisorGroupEndData['summary']
 }
 
 interface AdvisorGroupChatData {
   readonly sessionId: string
-  readonly status: 'running' | 'completed'
+  readonly status: 'running' | 'completed' | 'cancelled'
   readonly question: string
   readonly context?: string
   readonly advisors: readonly AdvisorGroupAdvisorInfo[]
@@ -208,7 +208,7 @@ export const advisorGroupDefinition: ConversationNodeDefinition<AdvisorGroupStat
     if (match.event.type === 'advisor-group/end') {
       return {
         ...context.state,
-        status: 'completed',
+        status: match.event.data.summary.stopped ? 'cancelled' : 'completed',
         summary: match.event.data.summary,
       }
     }
@@ -493,6 +493,9 @@ function MessageBubble({ message }: { message: AdvisorGroupMessageData }): React
 function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactNode {
   const data = props.node.data
   const sessionId = data.sessionId
+  // SSE live overlay bucketed by `advisorId::round` so multi-round relays never
+  // leak a later round's deltas into an earlier round's bubble (see the
+  // sequential auto-deepen pipeline). Durable messages stay the base of truth.
   const [live, setLive] = useState<Record<string, { content: string; thinking: string }>>({})
   const [contextCollapsed, setContextCollapsed] = useState(true)
   const lastEventIdRef = useRef(0)
@@ -510,6 +513,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
       try {
         const delta = JSON.parse(event.data as string) as {
           advisorId: string
+          round?: number
           contentDelta?: string
           thinkingDelta?: string
           eventId?: number
@@ -527,11 +531,12 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
         const eventId = Number(delta.eventId ?? 0)
         if (eventId > 0 && eventId <= lastEventIdRef.current) return
         if (eventId > 0) lastEventIdRef.current = eventId
+        const bucket = `${delta.advisorId}::${delta.round ?? 1}`
         setLive((prev) => {
-          const current = prev[delta.advisorId] ?? { content: '', thinking: '' }
+          const current = prev[bucket] ?? { content: '', thinking: '' }
           return {
             ...prev,
-            [delta.advisorId]: {
+            [bucket]: {
               content: current.content + (delta.contentDelta ?? ''),
               thinking: current.thinking + (delta.thinkingDelta ?? ''),
             },
@@ -554,7 +559,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
   const mergedMessages = data.messages.map((message) => {
     if (message.role !== 'advisor') return message
     const advisorId = message.advisorId ?? ''
-    const streamed = live[advisorId]
+    const streamed = live[`${advisorId}::${message.round ?? 1}`]
     if (!streamed) return message
     // Durable log content is the base of truth. Prefer the SSE live buffer only
     // when it is actually ahead; otherwise a late/reconnected EventSource would
@@ -571,7 +576,12 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
   })
 
   const shortId = data.sessionId.length > 8 ? data.sessionId.slice(0, 8) : data.sessionId
-  const title = data.status === 'completed' ? 'ADVISOR GROUP · DONE' : 'ADVISOR GROUP · LIVE'
+  const title =
+    data.status === 'completed'
+      ? 'ADVISOR GROUP · DONE'
+      : data.status === 'cancelled'
+        ? 'ADVISOR GROUP · STOPPED'
+        : 'ADVISOR GROUP · LIVE'
 
   return createElement(
     'div',
@@ -581,7 +591,39 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
       'div',
       { style: headerStyle },
       createElement('span', { key: 'title' }, title),
-      createElement('span', { key: 'id' }, `#${shortId}`),
+      createElement(
+        'span',
+        {
+          key: 'stop',
+          style: { display: 'flex', alignItems: 'center', gap: 8 },
+        },
+        data.status === 'running'
+          ? createElement(
+              'button',
+              {
+                type: 'button',
+                onClick: () => {
+                  void fetch('/advisor-group/stop', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', ...authHeaders() },
+                    body: JSON.stringify({ sessionId }),
+                  }).catch(() => {})
+                },
+                style: {
+                  cursor: 'pointer',
+                  border: '1px solid #e11d48',
+                  background: 'transparent',
+                  color: '#fda4af',
+                  borderRadius: 4,
+                  padding: '2px 8px',
+                  fontSize: 11,
+                },
+              },
+              '⏹ 停止',
+            )
+          : null,
+        createElement('span', { key: 'id' }, `#${shortId}`),
+      ),
     ),
     createElement('div', { style: questionStyle }, `> ${data.question}`),
     data.context

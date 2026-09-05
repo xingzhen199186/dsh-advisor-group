@@ -58,6 +58,8 @@ export interface AdvisorGroupEndData {
     }>
     readonly riskNotes?: string[]
     readonly conclusion?: string
+    /** True when the consultation was stopped by the user (partial content). */
+    readonly stopped?: boolean
   }
 }
 

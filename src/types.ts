@@ -47,4 +47,6 @@ export interface ConsultSummary {
   riskNotes: string[]
   /** Driver-model synthesis appended after all auto-deepen rounds (2026-09-05). */
   conclusion?: string
+  /** True when the consultation was stopped by the user (partial content). */
+  stopped?: boolean
 }
