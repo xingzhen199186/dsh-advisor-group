@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readFileSync, readdirSync, unlinkSync } from 'node:fs'
+import { readFileSync, readdirSync, unlinkSync, mkdirSync, writeFileSync, rmSync, statSync } from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, isAbsolute } from 'node:path'
@@ -714,6 +714,16 @@ export class AdvisorGroupService {
     if (session.advisors.length === 0) {
       return { ok: false, reason: '恢复失败：当前配置无法匹配该咨询的原顾问（顾问配置可能已被修改）。' }
     }
+    // Cross-instance lock: a second dsh (or headless) process sharing the same
+    // DSH_HOME must not run the same resume concurrently (double writes,
+    // duplicate events, snapshot races). Stale locks (crashed holder) are
+    // taken over after 10 minutes.
+    if (!this.acquireResumeLock(session.id)) {
+      return {
+        ok: false,
+        reason: '该咨询正在另一实例中恢复，请稍后再试（若确认无其他实例运行，10 分钟后会自动接管该锁）。',
+      }
+    }
     const dshSession = this.resolveSessionHandle(session)
     session.status = 'active'
     session.stopReason = undefined
@@ -721,11 +731,52 @@ export class AdvisorGroupService {
     this.persistSession(session)
     if (dshSession) appendAdvisorResume(dshSession, session.id)
     this.ctx.emit('advisor-group/resume', { sessionId: session.id })
-    void this.runAutoPipeline(session, undefined, dshSession).catch(() => {
-      // The pipeline degrades silently per its own contract; the snapshot and
-      // SSE channel already captured everything it produced.
-    })
+    void this.runAutoPipeline(session, undefined, dshSession)
+      .catch(() => {
+        // The pipeline degrades silently per its own contract; the snapshot
+        // and SSE channel already captured everything it produced.
+      })
+      .finally(() => this.releaseResumeLock(session.id))
     return { ok: true }
+  }
+
+  /** Atomic cross-instance lock (mkdir-based, with stale takeover). */
+  private acquireResumeLock(sessionId: string): boolean {
+    const lockDir = join(this.sessionsDir, `${sessionId}.lock`)
+    try {
+      // Ensure the parent exists, then a NON-recursive mkdir: it is atomic and
+      // throws when the lock already exists (a recursive mkdir would silently
+      // succeed and defeat the mutual exclusion).
+      mkdirSync(this.sessionsDir, { recursive: true })
+      mkdirSync(lockDir)
+      try {
+        writeFileSync(join(lockDir, 'owner'), String(process.pid), 'utf8')
+      } catch {
+        // Best effort; possession is the lock.
+      }
+      return true
+    } catch {
+      // Lock exists: check staleness (owner crashed or process gone).
+      try {
+        const stat = statSync(lockDir)
+        if (Date.now() - stat.mtimeMs > 10 * 60_000) {
+          rmSync(lockDir, { recursive: true, force: true })
+          mkdirSync(lockDir)
+          return true
+        }
+      } catch {
+        // Raced with the holder releasing; fall through to refusal.
+      }
+      return false
+    }
+  }
+
+  private releaseResumeLock(sessionId: string): void {
+    try {
+      rmSync(join(this.sessionsDir, `${sessionId}.lock`), { recursive: true, force: true })
+    } catch {
+      // Already gone: nothing to release.
+    }
   }
 
   private async generateFinalSummary(
