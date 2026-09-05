@@ -47,6 +47,12 @@ export interface AdvisorGroupDeltaData {
   readonly done?: boolean
 }
 
+export interface AdvisorGroupResumeData {
+  readonly sessionId: string
+  readonly turn: number
+  readonly step: number
+}
+
 export interface AdvisorGroupEndData {
   readonly sessionId: string
   readonly turn: number
@@ -85,6 +91,13 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param data - same session id and advisor identity plus text deltas.
      */
     'advisor-group/delta': AdvisorGroupDeltaData
+    /**
+     * Marks a stopped consultation as resumed (the card returns to LIVE and
+     * the remaining rounds continue from the interruption point).
+     * @mode emit
+     * @param data - same session id and location.
+     */
+    'advisor-group/resume': AdvisorGroupResumeData
     /**
      * Closes one advisor-group consultation with its final summary.
      * @mode emit

@@ -1,18 +1,18 @@
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, unlinkSync } from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Session } from '@deepseek-ai/dsh-session'
+import { Session, type SessionId } from '@deepseek-ai/dsh-session'
 import type { AdvisorConfig, Config } from './config'
 import { callViaCtxLlm, type TranscriptEntry } from './providers/ctx-llm'
 import { streamDirectHttp } from './providers/direct-http'
 import { advisorJoinPrompt } from './providers/advisor-prompt'
 import { generateConclusion, generateDeepenQuestion, resolveDriverSource } from './driver'
-import { appendAdvisorDelta, appendAdvisorEnd, appendAdvisorMessage } from './session-log'
+import { appendAdvisorDelta, appendAdvisorEnd, appendAdvisorMessage, appendAdvisorResume } from './session-log'
 import { publish } from './stream-channel'
-import type { ChatMessage, ConsultSession, ConsultSummary, AdvisorSummary, TruncationInfo } from './types'
+import type { ChatMessage, ConsultSession, ConsultSummary, AdvisorSummary, TruncationInfo, PersistedSession } from './types'
 import './events'
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
@@ -50,6 +50,9 @@ export class AdvisorGroupService {
   private dailyWriteChain: Promise<void> = Promise.resolve()
   /** Per-session stop controllers for the auto-deepen pipeline. */
   private readonly activeAborts = new Map<string, AbortController>()
+  /** Durable consultation snapshots (usable after a dsh restart). */
+  private readonly sessionsDir: string
+  private sessionWriteChain: Promise<void> = Promise.resolve()
   private enabled: boolean
   private config: Config
 
@@ -64,7 +67,9 @@ export class AdvisorGroupService {
     // were trivially bypassed by restarting the harness).
     const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
     this.dailyGuardPath = join(dshHome, 'storages', 'advisor-group', 'daily-guard.json')
+    this.sessionsDir = join(dshHome, 'storages', 'advisor-group', 'sessions')
     this.loadDailyGuard()
+    this.loadStoredSessions()
     // Track repeated user questions per session. The injected system-prompt
     // section reads this through getRepeatPressure() so the main model is told
     // to escalate when the same question has been asked repeatedly.
@@ -115,6 +120,226 @@ export class AdvisorGroupService {
           error instanceof Error ? error.message : String(error),
         )
       })
+  }
+
+  /**
+   * Restore interrupted consultations from durable snapshots so the card's
+   * 「▶ 继续聊天」 button still works after a dsh restart. Completed sessions
+   * are not restored (they cannot resume) and their snapshot is cleaned up.
+   */
+  private loadStoredSessions(): void {
+    let files: string[]
+    try {
+      files = readdirSync(this.sessionsDir).filter((name) => name.endsWith('.json'))
+    } catch {
+      return
+    }
+    for (const file of files) {
+      try {
+        const raw = JSON.parse(readFileSync(join(this.sessionsDir, file), 'utf8')) as PersistedSession
+        if (raw.version !== 1 || typeof raw.id !== 'string' || typeof raw.question !== 'string') continue
+        if (raw.status === 'completed') {
+          unlinkSync(join(this.sessionsDir, file))
+          continue
+        }
+        const advisors = this.resolveAdvisors(raw.advisorIds)
+        if (advisors.length === 0) continue
+        const session: ConsultSession = {
+          id: raw.id,
+          // Any interrupted state (stop or crash) is resumable; the card shows
+          // STOPPED until resume flips it back to LIVE.
+          status: 'cancelled',
+          question: raw.question,
+          context: raw.context,
+          advisors,
+          maxRounds: raw.maxRounds,
+          messages: raw.messages.map((message) => ({
+            role: message.role,
+            advisorId: message.advisorId,
+            advisorName: message.advisorName,
+            content: message.content,
+            thinking: message.thinking,
+            round: message.round,
+            truncated: message.truncated,
+            ts: message.ts,
+          })),
+          cwd: raw.cwd,
+          createdAt: raw.createdAt,
+          updatedAt: raw.updatedAt,
+        }
+        this.sessions.set(session.id, session)
+      } catch {
+        // Corrupt snapshot: skip it, the durable session log still has history.
+      }
+    }
+  }
+
+  /** Serialization-safe snapshot: advisor identity only, NEVER credentials. */
+  private snapshotPayload(session: ConsultSession): PersistedSession {
+    return {
+      version: 1,
+      id: session.id,
+      status: session.status,
+      question: session.question,
+      ...(session.context === undefined ? {} : { context: session.context }),
+      ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
+      advisorIds: session.advisors.map((advisor) => advisor.id),
+      maxRounds: session.maxRounds,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      messages: session.messages.map((message) => ({
+        role: message.role,
+        ...(message.advisorId === undefined ? {} : { advisorId: message.advisorId }),
+        ...(message.advisorName === undefined ? {} : { advisorName: message.advisorName }),
+        content: message.content,
+        ...(message.thinking === undefined ? {} : { thinking: message.thinking }),
+        ...(message.round === undefined ? {} : { round: message.round }),
+        ...(message.truncated === undefined ? {} : { truncated: message.truncated }),
+        ts: message.ts,
+      })),
+    }
+  }
+
+  /** Serialized, atomic (tmp + rename) consultation snapshot persistence. */
+  private persistSession(session: ConsultSession): void {
+    const payload = JSON.stringify(this.snapshotPayload(session))
+    const target = join(this.sessionsDir, `${session.id}.json`)
+    this.sessionWriteChain = this.sessionWriteChain
+      .then(async () => {
+        await fsp.mkdir(this.sessionsDir, { recursive: true })
+        const tmp = `${target}.tmp`
+        await fsp.writeFile(tmp, payload, 'utf8')
+        await fsp.rename(tmp, target)
+      })
+      .catch((error) => {
+        console.warn(
+          '[dsh-advisor-group] 咨询快照持久化失败：',
+          error instanceof Error ? error.message : String(error),
+        )
+      })
+  }
+
+  /** Structural view of the DSH in-memory session store (may be absent). */
+  private get sessionStore(): {
+    get(id: string): Session | undefined
+    prepare(id: string, options: unknown): Session
+    enter(session: Session): () => void
+    flush(session: Session): Promise<boolean>
+  } | undefined {
+    const store = (this.ctx as unknown as { sessions?: unknown }).sessions
+    if (!store || typeof store !== 'object') return undefined
+    const typed = store as {
+      get?: unknown
+      prepare?: unknown
+      enter?: unknown
+      flush?: unknown
+    }
+    if (
+      typeof typed.get !== 'function' ||
+      typeof typed.prepare !== 'function' ||
+      typeof typed.enter !== 'function' ||
+      typeof typed.flush !== 'function'
+    ) {
+      return undefined
+    }
+    return store as {
+      get(id: string): Session | undefined
+      prepare(id: string, options: unknown): Session
+      enter(session: Session): () => void
+      flush(session: Session): Promise<boolean>
+    }
+  }
+
+  /** Best-effort durability barrier for the advisor-group log events. */
+  private async flushLog(sessionLog?: Session): Promise<void> {
+    if (!sessionLog) return
+    const store = this.sessionStore
+    if (!store) return
+    try {
+      await store.flush(sessionLog)
+    } catch {
+      // Best effort: the snapshot already covers resumability.
+    }
+  }
+
+  /** Build a contiguous seed log from the snapshot (cross-restart resume). */
+  private buildSeedEvents(session: ConsultSession): Array<{ type: string; seq: number; time: number; data: Record<string, unknown> }> {
+    const events: Array<{ type: string; seq: number; time: number; data: Record<string, unknown> }> = []
+    let seq = 0
+    events.push({
+      type: 'advisor-group/start',
+      seq: seq++,
+      time: session.createdAt,
+      data: {
+        sessionId: session.id,
+        turn: 0,
+        step: 0,
+        question: session.question,
+        ...(session.context === undefined ? {} : { context: session.context }),
+        advisors: session.advisors.map(({ id, name, avatar }) => (avatar === undefined ? { id, name } : { id, name, avatar })),
+      },
+    })
+    for (const message of session.messages) {
+      if (message.role === 'system') continue
+      events.push({
+        type: 'advisor-group/message',
+        seq: seq++,
+        time: message.ts || Date.now(),
+        data: {
+          sessionId: session.id,
+          turn: 0,
+          step: 0,
+          role: message.role,
+          content: message.content,
+          ...(message.advisorId === undefined ? {} : { advisorId: message.advisorId }),
+          ...(message.advisorName === undefined ? {} : { advisorName: message.advisorName }),
+          ...(message.thinking === undefined ? {} : { thinking: message.thinking }),
+          ...(message.round === undefined ? {} : { round: message.round }),
+          ...(message.truncated === undefined ? {} : { truncated: message.truncated }),
+        },
+      })
+    }
+    return events
+  }
+
+  /**
+   * Obtain the DSH Session handle for durable log events. Prefers the live
+   * store entry (same process). After a restart the store is empty, so the
+   * session is rebuilt with `prepare` + `enter` (append hooks publish events
+   * and the persistence layer picks them up; the session is NOT announced, so
+   * no agent lifecycle reactivation is triggered). Falls back to a detached
+   * `Session.create` (live SSE + snapshot only, no durable log) when neither
+   * works.
+   */
+  private resolveSessionHandle(session: ConsultSession): Session | undefined {
+    const store = this.sessionStore
+    const live = store?.get(session.id)
+    if (live) return live
+    if (!store) {
+      return this.buildDetachedSession(session)
+    }
+    try {
+      const meta: Record<string, unknown> = { cwd: session.cwd ?? process.cwd() }
+      const prepared = store.prepare(session.id, { seed: this.buildSeedEvents(session), meta })
+      store.enter(prepared)
+      return prepared
+    } catch (error) {
+      console.warn(
+        '[dsh-advisor-group] 重建会话句柄失败（降级为 detached）：',
+        error instanceof Error ? error.message : String(error),
+      )
+      const again = store.get(session.id)
+      if (again) return again
+      return this.buildDetachedSession(session)
+    }
+  }
+
+  private buildDetachedSession(session: ConsultSession): Session | undefined {
+    try {
+      return Session.create(session.id as SessionId, this.buildSeedEvents(session) as never, undefined, 0 as never)
+    } catch {
+      return undefined
+    }
   }
 
   getRepeatPressure(sessionId?: string): { count: number; text: string } | undefined {
@@ -208,9 +433,11 @@ export class AdvisorGroupService {
     question: string,
     context: string | undefined,
     advisorIds: string[] = [],
+    cwd?: string,
   ): ConsultSession {
     const maxAdvisors = this.config.discussion.maxAdvisorsPerCall
     const advisors = this.resolveAdvisors(advisorIds).slice(0, maxAdvisors)
+    const now = Date.now()
     const session: ConsultSession = {
       id: randomUUID(),
       status: 'active',
@@ -222,16 +449,17 @@ export class AdvisorGroupService {
         {
           role: 'system',
           content: `顾问群已建立，共 ${advisors.length} 位顾问。`,
-          ts: Date.now(),
+          ts: now,
         },
         {
           role: 'main',
           content: context ? `${context}\n\n${question}` : question,
-          ts: Date.now(),
+          ts: now,
         },
       ],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+      cwd,
+      createdAt: now,
+      updatedAt: now,
     }
     // Bound in-memory session cache: keep at most 100 sessions.
     if (this.sessions.size >= 100) {
@@ -240,6 +468,7 @@ export class AdvisorGroupService {
     }
 
     this.sessions.set(session.id, session)
+    this.persistSession(session)
     this.ctx.emit('advisor-group/session-start', session)
     return session
   }
@@ -255,8 +484,58 @@ export class AdvisorGroupService {
     session.messages.push(message)
     session.updatedAt = Date.now()
     if (sessionLog) appendAdvisorMessage(sessionLog, session.id, message)
+    this.persistSession(session)
     this.ctx.emit('advisor-group/message', { sessionId: session.id, message })
     return session
+  }
+
+  /**
+   * The next round that still needs work, derived from the durable messages:
+   * when the last round is incomplete (an advisor answered, a later one was
+   * cut by a stop), that round resumes with ONLY the missing advisors; when
+   * it is complete, the next round is fresh. `undefined` means finished.
+   */
+  private nextPendingRound(session: ConsultSession): { round: number; answeredIds: string[] } | undefined {
+    const advisorMessages = session.messages.filter((message) => message.role === 'advisor')
+    const maxRound = advisorMessages.reduce((max, message) => Math.max(max, message.round ?? 1), 0)
+    const advisorCount = Math.max(1, session.advisors.length)
+    if (maxRound === 0) {
+      return { round: 1, answeredIds: [] }
+    }
+    if (maxRound > session.maxRounds) return undefined
+    const answeredInMax = advisorMessages
+      .filter((message) => (message.round ?? 1) === maxRound)
+      .map((message) => message.advisorId ?? '')
+      .filter((id) => id !== '') as string[]
+    const unique = [...new Set(answeredInMax)]
+    if (unique.length < advisorCount) {
+      return { round: maxRound, answeredIds: unique }
+    }
+    if (maxRound + 1 > session.maxRounds) return undefined
+    return { round: maxRound + 1, answeredIds: [] }
+  }
+
+  /** Run exactly one round: every advisor that has NOT answered this round. */
+  async runRoundFrom(
+    session: ConsultSession,
+    round: number,
+    answeredIds: string[],
+    signal?: AbortSignal,
+    sessionLog?: Session,
+  ): Promise<void> {
+    // Sequential relay: each advisor sees the project background + the main
+    // question + every answer from the advisors that joined BEFORE it in this
+    // same round, and is prompted to give its own view (agree / complement /
+    // rebut). The transcript is rebuilt per advisor, so B sees A's fresh reply.
+    for (let index = 0; index < session.advisors.length; index++) {
+      const advisor = session.advisors[index]
+      if (answeredIds.includes(advisor.id)) continue
+      const transcript = this.buildTranscript(session)
+      await this.callAdvisor(session, advisor, transcript, round, index + 1, signal, sessionLog)
+    }
+    session.status = 'active'
+    session.updatedAt = Date.now()
+    this.persistSession(session)
   }
 
   async runOneRound(
@@ -264,22 +543,9 @@ export class AdvisorGroupService {
     signal?: AbortSignal,
     sessionLog?: Session,
   ): Promise<void> {
-    const advisorCount = Math.max(1, session.advisors.length)
-    const round =
-      Math.floor(
-        session.messages.filter((message) => message.role === 'advisor').length / advisorCount,
-      ) + 1
-    // Sequential relay: each advisor sees the project background + the main
-    // question + every answer from the advisors that joined BEFORE it in this
-    // same round, and is prompted to give its own view (agree / complement /
-    // rebut). The transcript is rebuilt per advisor, so B sees A's fresh reply.
-    for (let index = 0; index < session.advisors.length; index++) {
-      const advisor = session.advisors[index]
-      const transcript = this.buildTranscript(session)
-      await this.callAdvisor(session, advisor, transcript, round, index + 1, signal, sessionLog)
-    }
-    session.status = 'active'
-    session.updatedAt = Date.now()
+    const pending = this.nextPendingRound(session)
+    if (!pending) return
+    await this.runRoundFrom(session, pending.round, pending.answeredIds, signal, sessionLog)
   }
 
   /**
@@ -291,6 +557,12 @@ export class AdvisorGroupService {
    * (SSE keeps the card streaming); `exec.signal` aborts the whole run and the
    * user may stop it explicitly via `stopConsultation(sessionId)` (POST
    * /advisor-group/stop) — a stop degrades to a graceful partial summary.
+   *
+   * Resumption: after a stop (or a dsh restart that restored the snapshot)
+   * `resumeConsultation()` re-enters the SAME pipeline; `nextPendingRound()`
+   * detects the interruption point — a partially-answered round is completed
+   * with only the missing advisors (the deep-question is NOT regenerated for
+   * that round), then remaining rounds run as usual.
    */
   async runAutoPipeline(
     session: ConsultSession,
@@ -301,9 +573,11 @@ export class AdvisorGroupService {
     this.activeAborts.set(session.id, stop)
     const combined = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal
     try {
-      while (!this.hasReachedMaxRounds(session)) {
-        const nextRound = this.getRoundCount(session) + 1
-        if (nextRound > 1 && this.config.discussion.autoDeepen) {
+      while (true) {
+        const pending = this.nextPendingRound(session)
+        if (!pending) break
+        const freshRound = pending.answeredIds.length === 0
+        if (pending.round > 1 && freshRound && this.config.discussion.autoDeepen) {
           const question = await generateDeepenQuestion(
             this.ctx,
             session,
@@ -312,15 +586,19 @@ export class AdvisorGroupService {
           )
           this.appendMainMessage(session, question, sessionLog)
         }
-        await this.runOneRound(session, combined, sessionLog)
+        await this.runRoundFrom(session, pending.round, pending.answeredIds, combined, sessionLog)
       }
       session.status = 'completed'
       const summary = await this.generateFinalSummary(session, combined, sessionLog, false)
+      this.persistSession(session)
+      await this.flushLog(sessionLog)
       return summary
     } catch (error) {
       if (isAbortError(error, combined) || stop.signal.aborted) {
         session.status = 'cancelled'
+        this.persistSession(session)
         const summary = await this.generateFinalSummary(session, undefined, sessionLog, true)
+        await this.flushLog(sessionLog)
         return summary
       }
       throw error
@@ -338,6 +616,40 @@ export class AdvisorGroupService {
     if (!stop) return false
     stop.abort()
     return true
+  }
+
+  /**
+   * Resume a stopped/interrupted consultation from its interruption point.
+   * Works for a user stop (live session) and after a dsh restart (snapshot
+   * restored; the DSH session handle is rebuilt via `prepare` + `enter`).
+   * Returns immediately; the pipeline runs in the background and streams over
+   * the existing SSE channel, then closes with a fresh `advisor-group/end`.
+   */
+  resumeConsultation(sessionId: string): { ok: boolean; reason?: string } {
+    const session = this.sessions.get(sessionId)
+    if (!session) {
+      return { ok: false, reason: '咨询会话不存在或已过期，请重新发起咨询。' }
+    }
+    if (this.activeAborts.has(sessionId)) {
+      return { ok: false, reason: '该咨询正在运行中，无需继续。' }
+    }
+    if (session.status === 'completed' || this.nextPendingRound(session) === undefined) {
+      return { ok: false, reason: '该咨询已完成，无需继续。' }
+    }
+    if (session.advisors.length === 0) {
+      return { ok: false, reason: '恢复失败：当前配置无法匹配该咨询的原顾问（顾问配置可能已被修改）。' }
+    }
+    const dshSession = this.resolveSessionHandle(session)
+    session.status = 'active'
+    session.updatedAt = Date.now()
+    this.persistSession(session)
+    if (dshSession) appendAdvisorResume(dshSession, session.id)
+    this.ctx.emit('advisor-group/resume', { sessionId: session.id })
+    void this.runAutoPipeline(session, undefined, dshSession).catch(() => {
+      // The pipeline degrades silently per its own contract; the snapshot and
+      // SSE channel already captured everything it produced.
+    })
+    return { ok: true }
   }
 
   private async generateFinalSummary(
@@ -368,6 +680,7 @@ export class AdvisorGroupService {
     const message: ChatMessage = { role: 'main', content, ts: Date.now() }
     session.messages.push(message)
     if (sessionLog) appendAdvisorMessage(sessionLog, session.id, message)
+    this.persistSession(session)
     this.ctx.emit('advisor-group/message', { sessionId: session.id, message })
   }
 
@@ -387,6 +700,8 @@ export class AdvisorGroupService {
     session.updatedAt = Date.now()
     const summary = this.buildSummary(session, false)
     if (sessionLog) appendAdvisorEnd(sessionLog, session, summary)
+    this.persistSession(session)
+    await this.flushLog(sessionLog)
     this.ctx.emit('advisor-group/session-end', { sessionId: session.id, summary })
     // Keep the session in memory: ask_advisors returns the session id so the
     // main model can continue with a follow-up question in a later call.
@@ -546,6 +861,7 @@ export class AdvisorGroupService {
     session.messages.push(message)
     if (sessionLog) appendAdvisorMessage(sessionLog, session.id, message)
     session.updatedAt = Date.now()
+    this.persistSession(session)
     this.ctx.emit('advisor-group/message', { sessionId: session.id, message })
   }
 

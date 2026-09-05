@@ -663,6 +663,31 @@ function handleConfigRequest(
     }
 
     if (
+      req.method === 'POST' &&
+      (pathname === '/advisor-group/resume' || pathname === '/advisor-group/resume/')
+    ) {
+      // Resume a stopped consultation from its interruption point (also works
+      // after a dsh restart via the durable snapshot). The pipeline continues
+      // in the background; the card flips back to LIVE on the resume event.
+      try {
+        const raw = await readBody(req)
+        const parsed = JSON.parse(raw) as { sessionId?: unknown }
+        if (typeof parsed.sessionId !== 'string' || !parsed.sessionId) {
+          sendJson(res, 400, { ok: false, error: '缺少 sessionId' })
+          return
+        }
+        const result = service.resumeConsultation(parsed.sessionId)
+        sendJson(res, result.ok ? 200 : 400, { ok: result.ok, ...(result.reason ? { error: result.reason } : {}) })
+      } catch (error) {
+        sendJson(res, 400, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+      return
+    }
+
+    if (
       req.method === 'GET' &&
       (pathname === '/advisor-group/shadow' || pathname === '/advisor-group/shadow/')
     ) {

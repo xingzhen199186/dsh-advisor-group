@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Stop → resume (「▶ 继续聊天」)**: after a user stop (or a dsh restart) the card's `⏹ 停止` button becomes `▶ 继续聊天` in the same spot; clicking it calls `POST /advisor-group/resume {sessionId}` and the pipeline continues from the interruption point — a partially-answered round is completed with ONLY the missing advisors (no regenerated deep-question, no re-asking answered advisors), remaining rounds run, and the card closes with a regular `end` + conclusion. Durability: each consultation is snapshotted (advisor ids + messages + status, **never credentials**) to `$DSH_HOME/storages/advisor-group/sessions/<id>.json`; after a restart the service restores interrupted snapshots (status normalized to `cancelled`) and rebuilds the DSH session handle via `ctx.sessions.prepare` + `enter` (log-only events, no agent reactivation; falls back to a detached session and then to SSE+snapshot only). A new `advisor-group/resume` log-only event flips the card back to LIVE; `resume` is rejected while running or once completed; it does not consume a daily consultation.
+
 ### Fixed
 
 - **SSE live overlay now buckets deltas by `(advisorId, round)`** instead of `advisorId` alone. Previously a second-round advisor's deltas were applied to the first-round bubble of the same advisor, which made thinking appear in the wrong panel and deferred text until the live buffer outgrew the durable message. With the sequential auto-deepen pipeline (A → B → C relay per round) this now streams exactly in order.

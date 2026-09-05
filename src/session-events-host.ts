@@ -21,6 +21,7 @@ const ADVISOR_GROUP_EVENT_TYPES = [
   'advisor-group/message',
   'advisor-group/delta',
   'advisor-group/end',
+  'advisor-group/resume',
 ] as const
 
 export function ensureAdvisorGroupSessionEventTypes(): void {

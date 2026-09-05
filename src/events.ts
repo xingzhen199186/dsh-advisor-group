@@ -15,6 +15,7 @@ declare module '@deepseek-ai/cordis' {
       done?: boolean
     }): void
     'advisor-group/session-end'(payload: { sessionId: string; summary: ConsultSummary }): void
+    'advisor-group/resume'(payload: { sessionId: string }): void
   }
 }
 

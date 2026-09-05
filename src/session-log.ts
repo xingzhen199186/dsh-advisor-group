@@ -89,6 +89,15 @@ export function appendAdvisorDelta(
   log.append('advisor-group/delta', data)
 }
 
+export function appendAdvisorResume(log: Session, sessionId: string): void {
+  const { turn, step } = latestTurnStep(log)
+  log.append('advisor-group/resume', {
+    sessionId,
+    turn,
+    step,
+  })
+}
+
 export function appendAdvisorEnd(
   log: Session,
   session: ConsultSession,

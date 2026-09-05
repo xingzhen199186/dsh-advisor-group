@@ -199,7 +199,12 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
         }
       }
 
-      const session = service.createSession(args.question, args.context, args.advisorIds)
+      const session = service.createSession(
+        args.question,
+        args.context,
+        args.advisorIds,
+        sessionLog ? sessionLog.header.cwd : undefined,
+      )
       if (sessionLog) appendAdvisorStart(sessionLog, session)
       // Auto-deepen pipeline (2026-09-05): one call runs the whole consultation
       // — up to maxRounds rounds of [driver deep-question → A → B(sees A) →

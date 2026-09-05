@@ -28,8 +28,39 @@ export interface ConsultSession {
   advisors: AdvisorConfig[]
   maxRounds: number
   messages: ChatMessage[]
+  /** Working directory of the agent session (for cross-restart recovery). */
+  cwd?: string
   createdAt: number
   updatedAt: number
+}
+
+/**
+ * Durable snapshot of a consultation (one file under
+ * `storages/advisor-group/sessions/<id>.json`). Deliberately stores NO
+ * credentials: advisors are referenced by id and resolved from the live
+ * configuration on resume, so an API key change or removal is honored.
+ */
+export interface PersistedSession {
+  version: 1
+  id: string
+  status: 'active' | 'completed' | 'cancelled'
+  question: string
+  context?: string
+  cwd?: string
+  advisorIds: string[]
+  maxRounds: number
+  createdAt: number
+  updatedAt: number
+  messages: Array<{
+    role: ChatRole
+    advisorId?: string
+    advisorName?: string
+    content: string
+    thinking?: string
+    round?: number
+    truncated?: TruncationInfo
+    ts: number
+  }>
 }
 
 export interface ClassifierResult {

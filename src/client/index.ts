@@ -114,7 +114,8 @@ export const advisorGroupDefinition: ConversationNodeDefinition<AdvisorGroupStat
     if (
       event.type === 'advisor-group/message' ||
       event.type === 'advisor-group/delta' ||
-      event.type === 'advisor-group/end'
+      event.type === 'advisor-group/end' ||
+      event.type === 'advisor-group/resume'
     ) {
       return { id: event.data.sessionId, role: 'update' }
     }
@@ -211,6 +212,10 @@ export const advisorGroupDefinition: ConversationNodeDefinition<AdvisorGroupStat
         status: match.event.data.summary.stopped ? 'cancelled' : 'completed',
         summary: match.event.data.summary,
       }
+    }
+    if (match.event.type === 'advisor-group/resume') {
+      // Stopped -> resumed: the card returns to LIVE until the next end event.
+      return { ...context.state, status: 'running' }
     }
     return context.state
   },
@@ -640,7 +645,31 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
               },
               '⏹ 停止',
             )
-          : null,
+          : data.status === 'cancelled'
+            ? createElement(
+                'button',
+                {
+                  type: 'button',
+                  onClick: () => {
+                    void fetch('/advisor-group/resume', {
+                      method: 'POST',
+                      headers: { 'content-type': 'application/json', ...authHeaders() },
+                      body: JSON.stringify({ sessionId }),
+                    }).catch(() => {})
+                  },
+                  style: {
+                    cursor: 'pointer',
+                    border: '1px solid #22c55e',
+                    background: 'transparent',
+                    color: '#86efac',
+                    borderRadius: 4,
+                    padding: '2px 8px',
+                    fontSize: 11,
+                  },
+                },
+                '▶ 继续聊天',
+              )
+            : null,
         createElement('span', { key: 'id' }, `#${shortId}`),
       ),
     ),
