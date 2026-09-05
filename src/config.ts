@@ -82,6 +82,11 @@ export interface DiscussionConfig {
    * supports tool calling (ctx.llm / dsh-llm 0.1.2-rc.1 does not).
    */
   advisorTools?: 'readonly' | 'all' | 'off'
+  /**
+   * Driver (deep-question / conclusion) generation timeout in milliseconds
+   * (default 600000 = 10 min).
+   */
+  driverTimeoutMs?: number
 }
 
 export interface TriggerConfig {
@@ -159,6 +164,7 @@ const DiscussionConfig: Schema<DiscussionConfig> = Schema.object({
   driverModel: Schema.union([DriverModel, Schema.const(undefined)]).description('Fallback driver model (provider/model) used when the session header cannot be read.'),
   stopOnConsensus: Schema.boolean().default(false).description('Deprecated: dormant under the auto-deepen pipeline; kept for stored-config compatibility.'),
   advisorTimeoutMs: Schema.number().min(1000).max(600000).default(600000).description('Per-advisor call timeout in milliseconds (default 600000 = 10 min). Long-reasoning models can exhaust shorter budgets on the thinking chain and lose the answer body; a timeout keeps the partial thinking chain and marks the message as truncated.'),
+  driverTimeoutMs: Schema.number().min(1000).max(1200000).default(600000).description('Driver generation timeout in milliseconds (deep-question / conclusion; default 600000 = 10 min). Long discussions with many tool results need a real budget.'),
   advisorTools: Schema.union([
     Schema.const('readonly'),
     Schema.const('all'),

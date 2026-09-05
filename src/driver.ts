@@ -75,6 +75,7 @@ async function generateWith(
   system: string,
   prompt: string,
   signal?: AbortSignal,
+  timeoutMs = 600_000,
 ): Promise<string | undefined> {
   try {
     const options: GenerateOptions = {
@@ -90,8 +91,9 @@ async function generateWith(
       temperature: 0.7,
       maxTokens: 600,
       // Long discussions (24k-char transcript + accumulated tool results)
-      // need a real budget: 10 minutes, matching the advisor timeout.
-      signal: withTimeout(600_000, signal),
+      // need a real budget: default 10 min (configurable via
+      // `discussion.driverTimeoutMs`).
+      signal: withTimeout(timeoutMs, signal),
     }
     let text = ''
     for await (const chunk of ctx.llm.stream(options)) {
@@ -114,6 +116,7 @@ export async function generateDeepenQuestion(
   session: ConsultSession,
   source: DriverSource | undefined,
   signal?: AbortSignal,
+  timeoutMs?: number,
 ): Promise<string> {
   if (!source) return FALLBACK_DEEPEN_QUESTION
   const produced = await generateWith(
@@ -122,6 +125,7 @@ export async function generateDeepenQuestion(
     DRIVER_SYSTEM_PROMPT,
     `以下是一轮顾问群的讨论记录：\n\n${transcriptOf(session)}\n\n请给出下一步的深入追问。`,
     signal,
+    timeoutMs,
   )
   return produced || FALLBACK_DEEPEN_QUESTION
 }
@@ -132,6 +136,7 @@ export async function generateConclusion(
   session: ConsultSession,
   source: DriverSource | undefined,
   signal?: AbortSignal,
+  timeoutMs?: number,
 ): Promise<string> {
   if (!source) return FALLBACK_CONCLUSION
   const produced = await generateWith(
@@ -140,6 +145,7 @@ export async function generateConclusion(
     CONCLUSION_SYSTEM_PROMPT,
     `以下是顾问群全部 ${session.messages.filter((m) => m.role === 'advisor').length} 条顾问回答的讨论记录：\n\n${transcriptOf(session)}\n\n请给出综合结论。`,
     signal,
+    timeoutMs,
   )
   return produced || FALLBACK_CONCLUSION
 }

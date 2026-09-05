@@ -1298,6 +1298,27 @@ function AdvisorGroupSettingsTab(): ReactNode {
             style: settingsInputStyle,
           }),
         ),
+        createElement(
+          'div',
+          null,
+          label('驱动模型生成超时（毫秒，追问/综合结论用）'),
+          createElement('input', {
+            type: 'number',
+            min: 1000,
+            max: 1200000,
+            step: 1000,
+            value: String(config.discussion.driverTimeoutMs ?? 600000),
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({
+                ...config,
+                discussion: {
+                  ...config.discussion,
+                  driverTimeoutMs: Math.max(1000, Number(e.target.value)),
+                },
+              }),
+            style: settingsInputStyle,
+          }),
+        ),
       ),
       createElement(
         'div',

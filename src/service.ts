@@ -666,6 +666,7 @@ export class AdvisorGroupService {
             session,
             session.driverSource ?? resolveDriverSource(sessionLog, this.config.discussion.driverModel),
             combined,
+            this.config.discussion.driverTimeoutMs,
           )
           this.appendMainMessage(session, question, sessionLog)
         }
@@ -819,6 +820,7 @@ export class AdvisorGroupService {
           session,
           session.driverSource ?? resolveDriverSource(sessionLog, this.config.discussion.driverModel),
           signal,
+          this.config.discussion.driverTimeoutMs,
         )
     const finalSummary: ConsultSummary = stopped
       ? { ...summary, stopped: true }
