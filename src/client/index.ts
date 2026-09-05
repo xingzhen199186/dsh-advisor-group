@@ -1338,27 +1338,6 @@ function AdvisorGroupSettingsTab(): ReactNode {
       createElement(
         'div',
         { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 } },
-        label('顾问工具调用范围'),
-        createElement('select', {
-          value: config.discussion.advisorTools ?? 'readonly',
-          onChange: (e: { target: { value: string } }) =>
-            setConfig({
-              ...config,
-              discussion: {
-                ...config.discussion,
-                advisorTools: e.target.value as 'readonly' | 'all' | 'off',
-              },
-            }),
-          style: { ...settingsInputStyle, width: 'auto', fontSize: 12, marginTop: 4 },
-        },
-        createElement('option', { value: 'readonly' }, '只读工具（默认）'),
-        createElement('option', { value: 'all' }, '全部会话工具（含可写，慎用）'),
-        createElement('option', { value: 'off' }, '关闭'),
-        ),
-      ),
-      createElement(
-        'div',
-        { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 } },
         createElement('input', {
           type: 'checkbox',
           checked: config.trigger.requireClassifier,
@@ -1738,6 +1717,55 @@ function AdvisorGroupSettingsTab(): ReactNode {
             onChange: (e: { target: { value: string } }) => updateAdvisor(index, { systemPrompt: e.target.value }),
             style: { ...settingsInputStyle, marginTop: 4, resize: 'vertical' },
           }),
+          (() => {
+            // Tool calling scope, per advisor: only the direct-http channel
+            // supports it, so an advisor on a DSH built-in provider (without a
+            // direct baseURL/apiKeyEnv) shows an explicit "cannot configure".
+            const isBuiltin = providers.some((p) => p.id === advisor.provider && p.kind === 'llm')
+            const supportsTools = !isBuiltin || Boolean(advisor.baseURL || advisor.apiKeyEnv)
+            const globalDefault = config.discussion.advisorTools ?? 'readonly'
+            const modeLabel: Record<string, string> = {
+              readonly: '只读工具',
+              all: '全部会话工具（含可写，慎用）',
+              off: '关闭',
+            }
+            if (supportsTools) {
+              return [
+                label(
+                  `顾问工具调用范围（未单独设置时跟随全局默认：${modeLabel[globalDefault] ?? globalDefault}）`,
+                ),
+                createElement(
+                  'select',
+                  {
+                    'aria-label': '顾问工具调用范围',
+                    value: advisor.tools ?? globalDefault,
+                    onChange: (e: { target: { value: string } }) =>
+                      updateAdvisor(index, { tools: e.target.value as 'readonly' | 'all' | 'off' }),
+                    style: settingsInputStyle,
+                  },
+                  createElement('option', { value: 'readonly' }, '只读工具'),
+                  createElement('option', { value: 'all' }, '全部会话工具（含可写，慎用）'),
+                  createElement('option', { value: 'off' }, '关闭'),
+                ),
+              ]
+            }
+            return [
+              label('顾问工具调用范围'),
+              createElement(
+                'div',
+                {
+                  style: {
+                    fontSize: 12,
+                    color: 'var(--dsh-color-muted, #8b90a0)',
+                    border: '1px solid var(--dsh-color-border, #3a3f4b)',
+                    borderRadius: 4,
+                    padding: '4px 6px',
+                  },
+                },
+                '❌ 当前为 DSH 内置通道（复用 DSH 凭据），不支持工具调用；为其配置 API 地址 / Key / 环境变量以走直连通道后即可启用。',
+              ),
+            ]
+          })(),
           createElement(
             'div',
             { style: { display: 'flex', gap: 8, marginTop: 4 } },

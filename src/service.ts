@@ -992,7 +992,9 @@ export class AdvisorGroupService {
         // tools, run the tool loop — the model may call read/grep/web_search etc.
         // before answering; every invocation runs through the official pipeline
         // (scoped dispatch via `agent`), recorded in the 💭 thinking panel.
-        const toolSchemas = resolveAdvisorToolSchemas(this.ctx, agent, this.config.discussion.advisorTools ?? 'readonly')
+        // Per-advisor override wins; otherwise the global default applies.
+        const toolMode = advisor.tools ?? this.config.discussion.advisorTools ?? 'readonly'
+        const toolSchemas = resolveAdvisorToolSchemas(this.ctx, agent, toolMode)
         if (toolSchemas.length > 0) {
           const streamOnce = (tools: typeof toolSchemas, extra: string) => {
             const withExtra = extra.trim()

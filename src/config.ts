@@ -19,6 +19,11 @@ export interface AdvisorConfig {
   protocol?: ProviderProtocol
   authMode?: ProviderAuthMode
   /**
+   * Per-advisor tool calling scope override; unset = the global default
+   * (`discussion.advisorTools`). Only meaningful on the direct-http channel.
+   */
+  tools?: 'readonly' | 'all' | 'off'
+  /**
    * Server-side per-provider direct-key history for one advisor.
    * Keys are never returned to the browser; they let a user switch back to a
    * previously used provider without losing that provider's API key.
@@ -134,6 +139,11 @@ const AdvisorConfig: Schema<AdvisorConfig> = Schema.object({
   apiKeyEnv: Schema.string().description('Optional env var name for direct-http fallback.'),
   protocol: ProviderProtocol,
   authMode: ProviderAuthMode.description('Anthropic auth header style: x-api-key or bearer.'),
+  tools: Schema.union([
+    Schema.const('readonly'),
+    Schema.const('all'),
+    Schema.const('off'),
+  ]).description('Per-advisor tool calling scope override; unset = follow the global discussion.advisorTools default.'),
 })
 
 const DriverModel: Schema<{ provider: string; model: string }> = Schema.object({
@@ -153,7 +163,7 @@ const DiscussionConfig: Schema<DiscussionConfig> = Schema.object({
     Schema.const('readonly'),
     Schema.const('all'),
     Schema.const('off'),
-  ]).default('readonly').description('Advisor tool calling scope: readonly (default; read-only session tools), all (every session-visible tool incl. writable ones), off (disabled). Only the direct-http OpenAI/Anthropic channel supports tool calling.'),
+  ]).default('readonly').description('Global default advisor tool calling scope for advisors that do not set their own `tools` field: readonly (default; read-only session tools), all (every session-visible tool incl. writable ones), off (disabled). Only the direct-http OpenAI/Anthropic channel supports tool calling.'),
 })
 
 const TriggerConfig: Schema<TriggerConfig> = Schema.object({
