@@ -96,7 +96,12 @@ async function generateWith(
       if (chunk.type === 'text-delta') text += chunk.text
     }
     return text.trim() || undefined
-  } catch {
+  } catch (error) {
+    // A caller abort (stop / host signal) must PROPAGATE as cancellation: the
+    // follow-up was never really generated, so nothing should be pushed and a
+    // resume must regenerate it fresh. Only REAL failures (timeout / provider
+    // errors) degrade to the static fallback text.
+    if (signal?.aborted) throw error
     return undefined
   }
 }

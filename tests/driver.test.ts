@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import {
   FALLBACK_CONCLUSION,
   FALLBACK_DEEPEN_QUESTION,
+  generateDeepenQuestion,
   resolveDriverSource,
 } from '../src/driver'
 import { advisorJoinPrompt } from '../src/providers/advisor-prompt'
 import type { Session, EpochHeader } from '@deepseek-ai/dsh-session'
+import type { Context } from '@deepseek-ai/cordis'
 
 function sessionLogWith(header: Partial<EpochHeader> | undefined): Session {
   return {
@@ -60,5 +62,50 @@ describe('driver fallback texts', () => {
   })
   it('synthesizes the conclusion', () => {
     expect(FALLBACK_CONCLUSION).toContain('共识')
+  })
+})
+
+describe('driver cancellation semantics (stop during generation)', () => {
+  it('propagates the caller abort instead of pushing a static fallback question', async () => {
+    const controller = new AbortController()
+    const fakeCtx = {
+      llm: {
+        async *stream(options: { signal?: AbortSignal }) {
+          yield { type: 'reasoning-delta', text: '想' } as never
+          await new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError')),
+            )
+          })
+        },
+      },
+    } as unknown as Context
+    const session = {
+      messages: [{ role: 'main', content: '问题', ts: 0 }],
+    } as never
+    setTimeout(() => controller.abort(), 20)
+    await expect(
+      generateDeepenQuestion(fakeCtx, session, { provider: 'fake-provider', model: 'fake-model' }, controller.signal),
+    ).rejects.toThrow()
+  })
+
+  it('still falls back to the static text on a real failure (no abort)', async () => {
+    const fakeCtx = {
+      llm: {
+        async *stream() {
+          throw new Error('provider exploded')
+        },
+      },
+    } as unknown as Context
+    const session = {
+      messages: [{ role: 'main', content: '问题', ts: 0 }],
+    } as never
+    const question = await generateDeepenQuestion(
+      fakeCtx,
+      session,
+      { provider: 'fake-provider', model: 'fake-model' },
+      undefined,
+    )
+    expect(question).toBe(FALLBACK_DEEPEN_QUESTION)
   })
 })

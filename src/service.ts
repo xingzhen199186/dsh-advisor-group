@@ -569,6 +569,11 @@ export class AdvisorGroupService {
     return { round: maxRound + 1, answeredIds: [] }
   }
 
+  /** Number of main-model messages: the opening question + all deep-questions. */
+  private mainMessageCount(session: ConsultSession): number {
+    return session.messages.filter((message) => message.role === 'main').length
+  }
+
   /** Run exactly one round: every advisor that has NOT answered this round. */
   async runRoundFrom(
     session: ConsultSession,
@@ -641,7 +646,17 @@ export class AdvisorGroupService {
         const pending = this.nextPendingRound(session)
         if (!pending) break
         const freshRound = pending.answeredIds.length === 0
-        if (pending.round > 1 && freshRound && this.config.discussion.autoDeepen) {
+        // Generate the deep-question only when this round does not already
+        // have one: a resume that was stopped BETWEEN rounds finds the
+        // follow-up already in the message log (the question was pushed before
+        // the first advisor of the round started), and must not ask it twice.
+        const questionAlreadyAsked = this.mainMessageCount(session) >= pending.round
+        if (
+          pending.round > 1 &&
+          freshRound &&
+          this.config.discussion.autoDeepen &&
+          !questionAlreadyAsked
+        ) {
           const question = await generateDeepenQuestion(
             this.ctx,
             session,
