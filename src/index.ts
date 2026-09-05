@@ -8,7 +8,7 @@ import './events'
 import './session-events-host'
 
 export const name = 'dsh-advisor-group'
-export const inject = ['tools', 'llm', 'systemPrompt']
+export const inject = ['tools', 'llm', 'systemPrompt', 'sessions']
 
 export { Config }
 

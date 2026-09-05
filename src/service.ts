@@ -226,7 +226,15 @@ export class AdvisorGroupService {
     enter(session: Session): () => void
     flush(session: Session): Promise<boolean>
   } | undefined {
-    const store = (this.ctx as unknown as { sessions?: unknown }).sessions
+    // Cordis's context proxy throws on keys that were not declared in `inject`
+    // ("cannot get property ... without inject"). The service must keep working
+    // (SSE + snapshot only) when the store is unavailable, so probe guarded.
+    let store: unknown
+    try {
+      store = (this.ctx as unknown as { sessions?: unknown }).sessions
+    } catch {
+      return undefined
+    }
     if (!store || typeof store !== 'object') return undefined
     const typed = store as {
       get?: unknown
