@@ -124,11 +124,16 @@ describe('stop → resume (继续聊天)', () => {
     const stoppedSummary = await pipeline
     expect(stoppedSummary.stopped).toBe(true)
     expect(session.status).toBe('cancelled')
+    // The stop reason must be recorded (user stop vs host/stream abort) so a
+    // future auto-retry NEVER retries a user-initiated stop.
+    expect(session.stopReason).toBe('user-stop')
 
     // Resume: B must answer (A must NOT be re-asked), then close completed.
     const resumed = service.resumeConsultation(session.id)
     expect(resumed).toEqual({ ok: true })
     await waitFor(() => service.getSession(session.id)?.status === 'completed')
+    // A completed resume clears the stop reason.
+    expect(service.getSession(session.id)?.stopReason).toBeUndefined()
 
     const advisorMessages = session.messages.filter((m) => m.role === 'advisor')
     expect(advisorMessages).toHaveLength(2)
@@ -162,7 +167,13 @@ describe('stop → resume (继续聊天)', () => {
     try {
       const cfg = config({ advisors: [ADVISOR_A], discussion: { ...config().discussion, maxRounds: 1, maxAdvisorsPerCall: 1 } })
       const serviceA = new AdvisorGroupService(streamStub(), cfg)
-      const session = serviceA.createSession('快照问题', undefined, [], 'C:\\work', 'dsh-sess-1')
+      const session = serviceA.createSession(
+        '快照问题',
+        undefined,
+        [],
+        'C:\\work',
+        'session-00000000-0000-4000-8000-000000000001',
+      )
       // Wait for the snapshot file to land.
       const snapshotPath = join(dshHome, 'storages', 'advisor-group', 'sessions', `${session.id}.json`)
       await waitFor(() => existsSync(snapshotPath))
@@ -176,7 +187,7 @@ describe('stop → resume (继续聊天)', () => {
       expect(restored?.cwd).toBe('C:\\work')
       // The DSH session id survives the snapshot round-trip so resume rebuilds
       // the AGENT session (card data source), not a detached consult session.
-      expect(restored?.dshSessionId).toBe('dsh-sess-1')
+      expect(restored?.dshSessionId).toBe('session-00000000-0000-4000-8000-000000000001')
       expect(serviceB.resumeConsultation(session.id)).toEqual({ ok: true })
       await waitFor(() => serviceB.getSession(session.id)?.status === 'completed')
       const advisorMessages = restored?.messages.filter((m) => m.role === 'advisor') ?? []

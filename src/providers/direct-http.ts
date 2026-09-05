@@ -142,6 +142,16 @@ async function streamOpenAICompatible(
       done = read.done
       value = read.value
     } catch (error) {
+      // Diagnostics for the mysterious mid-stream abort (~90s, provider B):
+      // record the exact error name/message so the next reproduction can be
+      // traced (curl vs adapter vs fetch) from the web log.
+      const errName = (error as { name?: string })?.name ?? 'UnknownError'
+      const errMessage = error instanceof Error ? error.message : String(error)
+      console.warn(
+        `[dsh-advisor-group] direct-http stream read error: name=${errName} msg=${errMessage} ` +
+          `isTimeout=${pair.isTimeout()} signalAborted=${signal?.aborted ?? false} ` +
+          `collectedChars=${content.length + thinking.length}`,
+      )
       // Timeout: keep the partial thinking chain and mark the truncation so
       // the caller can surface it (the stream "just stops" otherwise).
       if (pair.isTimeout()) {
@@ -248,6 +258,13 @@ async function streamAnthropic(
       done = read.done
       value = read.value
     } catch (error) {
+      const errName = (error as { name?: string })?.name ?? 'UnknownError'
+      const errMessage = error instanceof Error ? error.message : String(error)
+      console.warn(
+        `[dsh-advisor-group] anthropic stream read error: name=${errName} msg=${errMessage} ` +
+          `isTimeout=${pair.isTimeout()} signalAborted=${signal?.aborted ?? false} ` +
+          `collectedChars=${content.length + thinking.length}`,
+      )
       if (pair.isTimeout()) {
         return { content, thinking, truncated: { reason: 'timeout', atMs: Date.now() } }
       }

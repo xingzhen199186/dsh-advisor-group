@@ -276,6 +276,19 @@ function formatConversation(session: ConsultSession): string {
     lines.push('')
   }
 
+  const stopNote =
+    session.status === 'cancelled' && session.stopReason
+      ? `（注意：本次咨询被中断（${STOP_REASON_TEXT[session.stopReason] ?? session.stopReason}）；可在对话卡片点击「▶ 继续聊天」从断点续跑。）`
+      : ''
+  lines.push(stopNote)
   lines.push('（以上是顾问模型与主模型的对话记录，主模型可直接基于其中内容继续思考或追问。）')
   return lines.join('\n')
+}
+
+const STOP_REASON_TEXT: Record<string, string> = {
+  'user-stop': '用户主动停止',
+  'exec-cancel': '宿主取消',
+  'abort-error': '流异常中断',
+  timeout: '顾问响应超时',
+  network: '网络中断',
 }

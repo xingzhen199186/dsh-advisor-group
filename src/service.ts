@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync, readdirSync, unlinkSync } from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Session, type SessionId } from '@deepseek-ai/dsh-session'
 import type { AdvisorConfig, Config } from './config'
@@ -18,6 +18,18 @@ import './events'
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return true
   return error instanceof Error && error.name === 'AbortError'
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Real consult ids are server-minted uuids; anything else is rejected. */
+function isSafeConsultId(id: string): boolean {
+  return UUID_RE.test(id)
+}
+
+/** Agent DSH session ids look like `session-<uuid>` or a plain uuid. */
+function isSafeDshSessionId(id: string): boolean {
+  return UUID_RE.test(id) || UUID_RE.test(id.replace(/^session-/i, ''))
 }
 
 interface RepeatTrack {
@@ -138,6 +150,11 @@ export class AdvisorGroupService {
       try {
         const raw = JSON.parse(readFileSync(join(this.sessionsDir, file), 'utf8')) as PersistedSession
         if (raw.version !== 1 || typeof raw.id !== 'string' || typeof raw.question !== 'string') continue
+        // Path-injection hardening: only real consult uuids are accepted as
+        // session identity (the id is used for file lookup and store prepare);
+        // anything else is treated as a corrupt/foreign snapshot.
+        if (!isSafeConsultId(raw.id)) continue
+        if (raw.dshSessionId !== undefined && !isSafeDshSessionId(raw.dshSessionId)) continue
         if (raw.status === 'completed') {
           unlinkSync(join(this.sessionsDir, file))
           continue
@@ -166,6 +183,7 @@ export class AdvisorGroupService {
           cwd: raw.cwd,
           dshSessionId: raw.dshSessionId,
           driverSource: raw.driverSource,
+          stopReason: raw.stopReason,
           createdAt: raw.createdAt,
           updatedAt: raw.updatedAt,
         }
@@ -187,6 +205,7 @@ export class AdvisorGroupService {
       ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
       ...(session.dshSessionId === undefined ? {} : { dshSessionId: session.dshSessionId }),
       ...(session.driverSource === undefined ? {} : { driverSource: session.driverSource }),
+      ...(session.stopReason === undefined ? {} : { stopReason: session.stopReason }),
       advisorIds: session.advisors.map((advisor) => advisor.id),
       maxRounds: session.maxRounds,
       createdAt: session.createdAt,
@@ -206,6 +225,12 @@ export class AdvisorGroupService {
 
   /** Serialized, atomic (tmp + rename) consultation snapshot persistence. */
   private persistSession(session: ConsultSession): void {
+    // Defense-in-depth: never write outside the sessions dir (the id is a
+    // server-minted uuid, but a corrupted in-memory session must not escape).
+    if (!isSafeConsultId(session.id)) {
+      console.warn('[dsh-advisor-group] 拒绝持久化非法会话 id：', session.id)
+      return
+    }
     const payload = JSON.stringify(this.snapshotPayload(session))
     const target = join(this.sessionsDir, `${session.id}.json`)
     this.sessionWriteChain = this.sessionWriteChain
@@ -328,15 +353,25 @@ export class AdvisorGroupService {
     // Rebuild under the AGENT's DSH session id (not the consult id): the card
     // is assembled from the agent session log, so resume events must land in
     // THAT session to be visible. Falls back to the consult id when the agent
-    // session id was never recorded.
-    const resumeId = session.dshSessionId || session.id
+    // session id was never recorded. Both are whitelisted (uuid-shaped) so a
+    // tampered snapshot cannot name an arbitrary store key.
+    const resumeId =
+      session.dshSessionId !== undefined && isSafeDshSessionId(session.dshSessionId)
+        ? session.dshSessionId
+        : isSafeConsultId(session.id)
+          ? session.id
+          : ''
+    if (!resumeId) return undefined
     const live = store?.get(resumeId)
     if (live) return live
     if (!store) {
       return this.buildDetachedSession(session, resumeId)
     }
     try {
-      const meta: Record<string, unknown> = { cwd: session.cwd ?? process.cwd() }
+      // cwd from the snapshot is untrusted: only absolute paths are honored,
+      // anything else falls back to the process working directory.
+      const cwd = session.cwd !== undefined && isAbsolute(session.cwd) ? session.cwd : process.cwd()
+      const meta: Record<string, unknown> = { cwd }
       const prepared = store.prepare(resumeId, { seed: this.buildSeedEvents(session), meta })
       store.enter(prepared)
       return prepared
@@ -618,12 +653,23 @@ export class AdvisorGroupService {
         await this.runRoundFrom(session, pending.round, pending.answeredIds, combined, sessionLog)
       }
       session.status = 'completed'
+      session.stopReason = undefined
       const summary = await this.generateFinalSummary(session, combined, sessionLog, false)
       this.persistSession(session)
       await this.flushLog(sessionLog)
       return summary
     } catch (error) {
       if (isAbortError(error, combined) || stop.signal.aborted) {
+        // Distinguish the interruption cause: an explicit user stop vs a host
+        // signal vs an unclassified AbortError (e.g. the mysterious ~90s
+        // mid-stream abort). Future auto-retry MUST NOT retry a user stop.
+        if (stop.signal.aborted) {
+          session.stopReason = 'user-stop'
+        } else if (signal?.aborted) {
+          session.stopReason = 'exec-cancel'
+        } else {
+          session.stopReason = 'abort-error'
+        }
         session.status = 'cancelled'
         this.persistSession(session)
         const summary = await this.generateFinalSummary(session, undefined, sessionLog, true)
@@ -670,6 +716,7 @@ export class AdvisorGroupService {
     }
     const dshSession = this.resolveSessionHandle(session)
     session.status = 'active'
+    session.stopReason = undefined
     session.updatedAt = Date.now()
     this.persistSession(session)
     if (dshSession) appendAdvisorResume(dshSession, session.id)

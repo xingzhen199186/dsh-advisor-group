@@ -41,6 +41,10 @@ export interface ConsultSession {
   /** Driver model source captured at first run; resume reuses it because the
    *  rebuilt session has no request/header event to read the agent model from. */
   driverSource?: DriverSource
+  /** Why the consultation was interrupted: 'user-stop' (explicit stop button),
+   *  'exec-cancel' (host signal), 'abort-error' (unclassified AbortError),
+   *  or an advisor-level reason mirrored from truncated (timeout/network). */
+  stopReason?: string
   createdAt: number
   updatedAt: number
 }
@@ -60,6 +64,7 @@ export interface PersistedSession {
   cwd?: string
   dshSessionId?: string
   driverSource?: DriverSource
+  stopReason?: string
   advisorIds: string[]
   maxRounds: number
   createdAt: number
