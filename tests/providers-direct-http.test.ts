@@ -22,6 +22,8 @@ function advisor(overrides: Partial<AdvisorConfig> = {}): AdvisorConfig {
 describe('direct-http provider contract', () => {
   let server: Server
   let baseURL: string
+  let lastOpenAiBody: unknown
+  let lastAnthropicBody: unknown
 
   beforeAll(async () => {
     server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -31,6 +33,16 @@ describe('direct-http provider contract', () => {
         req.on('data', (chunk: Buffer) => chunks.push(chunk))
         req.on('end', () => {
           const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { stream?: boolean }
+          if (path.includes('tools-openai')) {
+            lastOpenAiBody = body
+            res.writeHead(200, { 'content-type': 'text/event-stream' })
+            res.write('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\"path\\":"}}]}}]}\n\n')
+            res.write('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"a.txt\\"}"}}]}}]}\n\n')
+            res.write('data: {"choices":[{"delta":{"content":"正文"}}]}\n\n')
+            res.write('data: [DONE]\n\n')
+            res.end()
+            return
+          }
           if (body.stream === false) {
             res.writeHead(200, { 'content-type': 'application/json' })
             res.end(JSON.stringify({ choices: [{ message: { content: '非流式答复' } }] }))
@@ -82,6 +94,22 @@ describe('direct-http provider contract', () => {
         return
       }
       if (path.includes('/v1/messages') && req.method === 'POST') {
+        if (path.includes('tools-anthropic')) {
+          const chunks: Buffer[] = []
+          req.on('data', (chunk: Buffer) => chunks.push(chunk))
+          req.on('end', () => {
+            // eslint-disable-next-line no-console
+            lastAnthropicBody = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+          })
+          res.writeHead(200, { 'content-type': 'text/event-stream' })
+          const frame = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`
+          res.write(frame({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'read' } }))
+          res.write(frame({ type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '{"path":"a"}' } }))
+          res.write(frame({ type: 'content_block_stop', index: 0 }))
+          res.write(frame({ type: 'message_delta', delta: { stop_reason: 'tool_use' } }))
+          res.end()
+          return
+        }
         res.writeHead(200, { 'content-type': 'text/event-stream' })
         res.write('data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"推演"}}\n\n')
         res.write('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"结论"}}\n\n')
@@ -173,6 +201,44 @@ describe('direct-http provider contract', () => {
     )
     expect(result.content).toBe('结论')
     expect(result.thinking).toBe('推演')
+  })
+
+  it('supports OpenAI tool-calling: tools in body, tool_calls parsed, final text streamed', async () => {
+    const tools = [{ name: 'read', description: '读文件', parameters: { type: 'object', properties: { path: { type: 'string' } } } }]
+    const result = await streamDirectHttp(
+      advisor({ baseURL: `${baseURL}/tools-openai`, protocol: 'openai', apiKey: 'sk-contract-key' }),
+      transcript,
+      () => {},
+      undefined,
+      undefined,
+      tools,
+    )
+    const body = lastOpenAiBody as { tools?: Array<{ type: string; function: { name: string; parameters: unknown } }> }
+    expect(body.tools).toEqual([
+      { type: 'function', function: { name: 'read', description: '读文件', parameters: { type: 'object', properties: { path: { type: 'string' } } } } },
+    ])
+    expect(result.toolCalls).toEqual([
+      { id: 'call_1', name: 'read', argumentsJson: '{"path":"a.txt"}' },
+    ])
+    expect(result.content).toBe('正文')
+  })
+
+  it('supports Anthropic tool-calling: tool_use blocks parsed with input_json_delta', async () => {
+    const tools = [{ name: 'read', description: '读文件', parameters: { type: 'object' } }]
+    const result = await streamDirectHttp(
+      advisor({ baseURL: `${baseURL}/tools-anthropic`, protocol: 'anthropic', authMode: 'x-api-key', apiKey: 'sk-contract-key' }),
+      transcript,
+      () => {},
+      undefined,
+      undefined,
+      tools,
+    )
+    const body = lastAnthropicBody as { tools?: Array<{ name: string; description?: string; input_schema: unknown }> }
+    expect(body.tools).toEqual([{ name: 'read', description: '读文件', input_schema: { type: 'object' } }])
+    expect(result.toolCalls).toEqual([
+      { id: 'toolu_1', name: 'read', argumentsJson: '{"path":"a"}' },
+    ])
+    expect(result.content).toBe('')
   })
 
   it('uses the Gemini generateContent endpoint and returns the answer', async () => {

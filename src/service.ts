@@ -12,6 +12,7 @@ import { advisorJoinPrompt } from './providers/advisor-prompt'
 import { generateConclusion, generateDeepenQuestion, resolveDriverSource } from './driver'
 import { appendAdvisorDelta, appendAdvisorEnd, appendAdvisorMessage, appendAdvisorResume } from './session-log'
 import { publish } from './stream-channel'
+import { executeAdvisorTool, resolveAdvisorToolSchemas, runAdvisorToolLoop, type AdvisorAgent } from './advisor-tools'
 import type { ChatMessage, ConsultSession, ConsultSummary, AdvisorSummary, TruncationInfo, PersistedSession } from './types'
 import './events'
 
@@ -581,6 +582,7 @@ export class AdvisorGroupService {
     answeredIds: string[],
     signal?: AbortSignal,
     sessionLog?: Session,
+    agent?: AdvisorAgent,
   ): Promise<void> {
     // Sequential relay: each advisor sees the project background + the main
     // question + every answer from the advisors that joined BEFORE it in this
@@ -590,7 +592,7 @@ export class AdvisorGroupService {
       const advisor = session.advisors[index]
       if (answeredIds.includes(advisor.id)) continue
       const transcript = this.buildTranscript(session)
-      await this.callAdvisor(session, advisor, transcript, round, index + 1, signal, sessionLog)
+      await this.callAdvisor(session, advisor, transcript, round, index + 1, signal, sessionLog, agent)
     }
     session.status = 'active'
     session.updatedAt = Date.now()
@@ -601,10 +603,11 @@ export class AdvisorGroupService {
     session: ConsultSession,
     signal?: AbortSignal,
     sessionLog?: Session,
+    agent?: AdvisorAgent,
   ): Promise<void> {
     const pending = this.nextPendingRound(session)
     if (!pending) return
-    await this.runRoundFrom(session, pending.round, pending.answeredIds, signal, sessionLog)
+    await this.runRoundFrom(session, pending.round, pending.answeredIds, signal, sessionLog, agent)
   }
 
   /**
@@ -627,6 +630,7 @@ export class AdvisorGroupService {
     session: ConsultSession,
     signal?: AbortSignal,
     sessionLog?: Session,
+    agent?: AdvisorAgent,
   ): Promise<ConsultSummary> {
     const stop = new AbortController()
     this.activeAborts.set(session.id, stop)
@@ -665,7 +669,7 @@ export class AdvisorGroupService {
           )
           this.appendMainMessage(session, question, sessionLog)
         }
-        await this.runRoundFrom(session, pending.round, pending.answeredIds, combined, sessionLog)
+        await this.runRoundFrom(session, pending.round, pending.answeredIds, combined, sessionLog, agent)
       }
       session.status = 'completed'
       session.stopReason = undefined
@@ -740,13 +744,19 @@ export class AdvisorGroupService {
       }
     }
     const dshSession = this.resolveSessionHandle(session)
+    // Resolve the live agent for tool scoping (session tools) when available.
+    const agentRegistry = (this.ctx as unknown as { agents?: { get?: (id: string) => AdvisorAgent | undefined } }).agents
+    const resumeAgent =
+      session.dshSessionId !== undefined && agentRegistry?.get
+        ? (agentRegistry.get as (id: string) => AdvisorAgent | undefined)(session.dshSessionId)
+        : undefined
     session.status = 'active'
     session.stopReason = undefined
     session.updatedAt = Date.now()
     this.persistSession(session)
     if (dshSession) appendAdvisorResume(dshSession, session.id)
     this.ctx.emit('advisor-group/resume', { sessionId: session.id })
-    void this.runAutoPipeline(session, undefined, dshSession)
+    void this.runAutoPipeline(session, undefined, dshSession, resumeAgent)
       .catch(() => {
         // The pipeline degrades silently per its own contract; the snapshot
         // and SSE channel already captured everything it produced.
@@ -836,8 +846,9 @@ export class AdvisorGroupService {
     session: ConsultSession,
     signal?: AbortSignal,
     sessionLog?: Session,
+    agent?: AdvisorAgent,
   ): Promise<ConsultSummary> {
-    await this.runOneRound(session, signal, sessionLog)
+    await this.runOneRound(session, signal, sessionLog, agent)
     session.status = 'completed'
     session.updatedAt = Date.now()
     const summary = this.buildSummary(session, false)
@@ -900,6 +911,7 @@ export class AdvisorGroupService {
     joinIndex: number,
     signal?: AbortSignal,
     sessionLog?: Session,
+    agent?: AdvisorAgent,
   ): Promise<void> {
     // Sequential-relay role hint is folded into the advisor's system prompt;
     // the provider functions append ADVISOR_OUTPUT_POLICY after it.
@@ -975,11 +987,40 @@ export class AdvisorGroupService {
       const advisorTimeoutMs = this.config.discussion.advisorTimeoutMs
       let truncated: TruncationInfo | undefined
       if (!isDshLlmProvider || advisor.baseURL || advisor.apiKey || advisor.apiKeyEnv) {
-        const streamResult = await streamDirectHttp(relational, transcript, emitDelta, signal, advisorTimeoutMs)
-        flush()
-        content = streamResult.content
-        message.thinking = streamResult.thinking
-        truncated = streamResult.truncated
+        // Advisor tool calling (2026-09-05): when the direct-http OpenAI/Anthropic
+        // channel is in use and the configured scope resolves session-visible
+        // tools, run the tool loop — the model may call read/grep/web_search etc.
+        // before answering; every invocation runs through the official pipeline
+        // (scoped dispatch via `agent`), recorded in the 💭 thinking panel.
+        const toolSchemas = resolveAdvisorToolSchemas(this.ctx, agent, this.config.discussion.advisorTools ?? 'readonly')
+        if (toolSchemas.length > 0) {
+          const streamOnce = (tools: typeof toolSchemas, extra: string) => {
+            const withExtra = extra.trim()
+              ? [...transcript, { role: 'main' as const, name: '已执行工具', content: extra.trim() }]
+              : transcript
+            return streamDirectHttp(relational, withExtra, emitDelta, signal, advisorTimeoutMs, tools).then((result) => ({
+              content: result.content,
+              thinking: result.thinking,
+              toolCalls: result.toolCalls ?? [],
+              truncated: result.truncated,
+            }))
+          }
+          const loop = await runAdvisorToolLoop(
+            toolSchemas,
+            streamOnce,
+            (call) => executeAdvisorTool(this.ctx, agent, call, signal),
+            (text) => emitDelta({ thinking: text }),
+          )
+          flush()
+          content = loop.content
+          truncated = loop.truncated
+        } else {
+          const streamResult = await streamDirectHttp(relational, transcript, emitDelta, signal, advisorTimeoutMs)
+          flush()
+          content = streamResult.content
+          message.thinking = streamResult.thinking
+          truncated = streamResult.truncated
+        }
       } else {
         const result = await callViaCtxLlm(this.ctx, relational, transcript, signal, emitDelta, advisorTimeoutMs)
         flush()

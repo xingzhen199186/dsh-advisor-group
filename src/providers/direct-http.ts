@@ -2,8 +2,9 @@ import type { AdvisorConfig } from '../config'
 import type { TruncationInfo } from '../types'
 import { getProviderPreset } from './presets'
 import { ADVISOR_OUTPUT_POLICY } from './advisor-prompt'
-import { ADVISOR_CALL_TIMEOUT_MS, withTimeout, timeoutSignalPair } from './timeout'
+import { ADVISOR_CALL_TIMEOUT_MS, timeoutSignalPair, withTimeout } from './timeout'
 import type { TranscriptEntry } from './ctx-llm'
+import type { AdvisorToolCall, AdvisorToolSchema } from '../advisor-tools'
 
 /**
  * Fallback direct HTTP client for providers that are not (yet) configured in
@@ -51,6 +52,8 @@ export interface StreamDelta {
 export interface StreamResult {
   content: string
   thinking: string
+  /** Model-requested tool calls (tool-calling round). */
+  toolCalls?: AdvisorToolCall[]
   /** Set when timeout/network cut the stream before a complete body. */
   truncated?: TruncationInfo
 }
@@ -62,6 +65,7 @@ export async function streamDirectHttp(
   onDelta: (delta: StreamDelta) => void,
   signal?: AbortSignal,
   timeoutMs?: number,
+  tools?: AdvisorToolSchema[],
 ): Promise<StreamResult> {
   const preset = advisor.provider ? getProviderPreset(advisor.provider) : undefined
   const baseURL = (advisor.baseURL ?? preset?.baseURL ?? '').replace(/\/+$/, '')
@@ -79,9 +83,9 @@ export async function streamDirectHttp(
 
   switch (protocol) {
     case 'openai':
-      return streamOpenAICompatible(baseURL, advisor, apiKey, transcriptText, onDelta, signal, timeoutMs)
+      return streamOpenAICompatible(baseURL, advisor, apiKey, transcriptText, onDelta, signal, timeoutMs, tools)
     case 'anthropic':
-      return streamAnthropic(baseURL, advisor, apiKey, transcriptText, authMode, onDelta, signal, timeoutMs)
+      return streamAnthropic(baseURL, advisor, apiKey, transcriptText, authMode, onDelta, signal, timeoutMs, tools)
     case 'gemini': {
       const content = await callGemini(baseURL, advisor, apiKey, transcriptText, signal, timeoutMs)
       onDelta({ text: content })
@@ -100,27 +104,39 @@ async function streamOpenAICompatible(
   onDelta: (delta: StreamDelta) => void,
   signal?: AbortSignal,
   timeoutMs?: number,
+  tools?: AdvisorToolSchema[],
 ): Promise<StreamResult> {
   const endpoint = baseURL.endsWith('/chat/completions')
     ? baseURL
     : `${baseURL.replace(/\/+$/, '')}/chat/completions`
   const pair = timeoutSignalPair(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal)
+  const body: Record<string, unknown> = {
+    model: advisor.model,
+    messages: [
+      { role: 'system', content: advisor.systemPrompt + ADVISOR_OUTPUT_POLICY },
+      { role: 'user', content: transcriptText },
+    ],
+    temperature: advisor.temperature ?? 0.3,
+    max_tokens: advisor.maxTokens ?? 16384,
+    stream: true,
+  }
+  if (tools && tools.length > 0) {
+    body.tools = tools.map((tool) => ({
+      type: 'function',
+      function: {
+        name: tool.name,
+        ...(tool.description === undefined ? {} : { description: tool.description }),
+        parameters: tool.parameters ?? { type: 'object' },
+      },
+    }))
+  }
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model: advisor.model,
-      messages: [
-        { role: 'system', content: advisor.systemPrompt + ADVISOR_OUTPUT_POLICY },
-        { role: 'user', content: transcriptText },
-      ],
-      temperature: advisor.temperature ?? 0.3,
-      max_tokens: advisor.maxTokens ?? 16384,
-      stream: true,
-    }),
+    body: JSON.stringify(body),
     signal: pair.signal,
   })
   if (!response.ok) {
@@ -133,6 +149,8 @@ async function streamOpenAICompatible(
   let buffer = ''
   let content = ''
   let thinking = ''
+  // Tool calls: streamed per index (id/name/arguments fragments).
+  const toolCalls = new Map<number, { id: string; name: string; args: string }>()
 
   while (true) {
     let done: boolean
@@ -155,12 +173,12 @@ async function streamOpenAICompatible(
       // Timeout: keep the partial thinking chain and mark the truncation so
       // the caller can surface it (the stream "just stops" otherwise).
       if (pair.isTimeout()) {
-        return { content, thinking, truncated: { reason: 'timeout', atMs: Date.now() } }
+        return { content, thinking, toolCalls: collectToolCalls(toolCalls), truncated: { reason: 'timeout', atMs: Date.now() } }
       }
       // Caller signal (user stop / exec.signal): propagate as cancellation.
       if (signal?.aborted || (error as { name?: string })?.name === 'AbortError') throw error
       // Mid-stream network drop: keep the partial content, mark truncation.
-      return { content, thinking, truncated: { reason: 'network', atMs: Date.now() } }
+      return { content, thinking, toolCalls: collectToolCalls(toolCalls), truncated: { reason: 'network', atMs: Date.now() } }
     }
     if (done) break
     buffer += decoder.decode(value, { stream: true })
@@ -174,7 +192,7 @@ async function streamOpenAICompatible(
         if (!data || data === '[DONE]') continue
         try {
           const json = JSON.parse(data) as {
-            choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string } }>
+            choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }>
           }
           const delta = json.choices?.[0]?.delta ?? {}
           const text = typeof delta.content === 'string' ? delta.content : ''
@@ -184,6 +202,16 @@ async function streamOpenAICompatible(
               : typeof delta.reasoning === 'string'
                 ? delta.reasoning
                 : ''
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index ?? 0
+              const current = toolCalls.get(idx) ?? { id: '', name: '', args: '' }
+              if (tc.id) current.id = tc.id
+              if (tc.function?.name) current.name = tc.function.name
+              if (tc.function?.arguments) current.args += tc.function.arguments
+              toolCalls.set(idx, current)
+            }
+          }
           if (text) {
             content += text
             onDelta({ text })
@@ -198,7 +226,19 @@ async function streamOpenAICompatible(
       }
     }
   }
-  return { content, thinking }
+  return { content, thinking, toolCalls: collectToolCalls(toolCalls) }
+}
+
+/** Map<index, {id,name,args}> → model-facing tool call list. */
+function collectToolCalls(
+  byIndex: Map<number, { id: string; name: string; args: string }>,
+): AdvisorToolCall[] | undefined {
+  const calls: AdvisorToolCall[] = []
+  for (const [, current] of byIndex) {
+    if (!current.name) continue
+    calls.push({ id: current.id || `tool-${calls.length}`, name: current.name, argumentsJson: current.args })
+  }
+  return calls.length > 0 ? calls : undefined
 }
 
 async function streamAnthropic(
@@ -210,6 +250,7 @@ async function streamAnthropic(
   onDelta: (delta: StreamDelta) => void,
   signal?: AbortSignal,
   timeoutMs?: number,
+  tools?: AdvisorToolSchema[],
 ): Promise<StreamResult> {
   const endpoint = baseURL.endsWith('/v1/messages')
     ? baseURL
@@ -225,18 +266,26 @@ async function streamAnthropic(
   } else {
     headers['x-api-key'] = apiKey
   }
+  const body: Record<string, unknown> = {
+    model: advisor.model,
+    system: advisor.systemPrompt + ADVISOR_OUTPUT_POLICY,
+    messages: [{ role: 'user', content: transcriptText }],
+    temperature: advisor.temperature ?? 0.3,
+    max_tokens: advisor.maxTokens ?? 16384,
+    stream: true,
+  }
+  if (tools && tools.length > 0) {
+    body.tools = tools.map((tool) => ({
+      name: tool.name,
+      ...(tool.description === undefined ? {} : { description: tool.description }),
+      input_schema: tool.parameters ?? { type: 'object' },
+    }))
+  }
   const pair = timeoutSignalPair(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal)
   const response = await fetch(endpoint, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      model: advisor.model,
-      system: advisor.systemPrompt + ADVISOR_OUTPUT_POLICY,
-      messages: [{ role: 'user', content: transcriptText }],
-      temperature: advisor.temperature ?? 0.3,
-      max_tokens: advisor.maxTokens ?? 16384,
-      stream: true,
-    }),
+    body: JSON.stringify(body),
     signal: pair.signal,
   })
   if (!response.ok) {
@@ -249,6 +298,9 @@ async function streamAnthropic(
   let buffer = ''
   let content = ''
   let thinking = ''
+  let currentTool: { id: string; name: string; args: string } | null = null
+  let activeTool = false
+  const toolCalls: AdvisorToolCall[] = []
 
   while (true) {
     let done: boolean
@@ -266,10 +318,10 @@ async function streamAnthropic(
           `collectedChars=${content.length + thinking.length}`,
       )
       if (pair.isTimeout()) {
-        return { content, thinking, truncated: { reason: 'timeout', atMs: Date.now() } }
+        return { content, thinking, toolCalls: toolCalls.length > 0 ? toolCalls : undefined, truncated: { reason: 'timeout', atMs: Date.now() } }
       }
       if (signal?.aborted || (error as { name?: string })?.name === 'AbortError') throw error
-      return { content, thinking, truncated: { reason: 'network', atMs: Date.now() } }
+      return { content, thinking, toolCalls: toolCalls.length > 0 ? toolCalls : undefined, truncated: { reason: 'network', atMs: Date.now() } }
     }
     if (done) break
     buffer += decoder.decode(value, { stream: true })
@@ -284,15 +336,31 @@ async function streamAnthropic(
         try {
           const json = JSON.parse(data) as {
             type?: string
-            delta?: { type?: string; text?: string; thinking?: string }
+            index?: number
+            content_block?: { type?: string; id?: string; name?: string }
+            delta?: { type?: string; text?: string; thinking?: string; partial_json?: string }
           }
-          if (json.type === 'content_block_delta' && json.delta) {
+          if (json.type === 'content_block_start' && json.content_block?.type === 'tool_use') {
+            currentTool =
+              currentTool === null
+                ? { id: json.content_block.id ?? '', name: json.content_block.name ?? '', args: '' }
+                : currentTool
+            activeTool = true
+          } else if (json.type === 'content_block_delta' && json.delta) {
             if (json.delta.type === 'text_delta' && typeof json.delta.text === 'string') {
               content += json.delta.text
               onDelta({ text: json.delta.text })
             } else if (json.delta.type === 'thinking_delta' && typeof json.delta.thinking === 'string') {
               thinking += json.delta.thinking
               onDelta({ thinking: json.delta.thinking })
+            } else if (json.delta.type === 'input_json_delta' && typeof json.delta.partial_json === 'string') {
+              if (currentTool) currentTool.args += json.delta.partial_json
+            }
+          } else if (json.type === 'content_block_stop') {
+            if (activeTool && currentTool) {
+              toolCalls.push({ id: currentTool.id, name: currentTool.name, argumentsJson: currentTool.args })
+              currentTool = null
+              activeTool = false
             }
           }
         } catch {
@@ -301,7 +369,7 @@ async function streamAnthropic(
       }
     }
   }
-  return { content, thinking }
+  return { content, thinking, toolCalls: toolCalls.length > 0 ? toolCalls : undefined }
 }
 
 async function callOpenAICompatible(

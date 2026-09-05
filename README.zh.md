@@ -11,6 +11,7 @@
 ## ✨ 功能特性
 
 - **自动深挖咨询流水线**：一次 `ask_advisors` 自动跑满 `maxRounds` 轮——每轮 = *驱动模型深挖追问 → 顾问 A → 顾问 B（看到 A）→ 顾问 C（看到 A+B）→ …* 顺序接力，最后驱动模型产出**综合结论**。
+- **顾问可调用会话工具（2026-09-05）**：顾问模型回答前可调用**当前 DSH 会话可见的工具**（默认只读白名单：read/grep/glob/web_search/web_fetch…）——走官方 `ctx.tools` 完整管线（作用域分发、守卫、前置/后置策略），循环上限 4 轮后强制文字作答；每次调用在卡片 💭 面板实时播报（`🔧 模型请求调用工具…`+结果摘要）。可在设置中切到「全部会话工具」或「关闭」。
 - **停止后可继续**：用户停止或 dsh 重启后，卡片「⏹ 停止」原位变为「▶ 继续聊天」→ `POST /advisor-group/resume` → 从断点续跑（本轮未答的顾问补答、已答的不重问、剩余轮次照常、最终照常生成综合结论）；会话快照持久化到 `storages/advisor-group/sessions/<id>.json`（仅存顾问 id/消息/状态，不含任何凭据），跨重启自动恢复。
 - **驱动模型零配置复用**：深挖追问由驱动模型生成，直接复用会话当前 agent 的 provider/model——无需额外配 Key 或模型；会话头不可读时回退 `discussion.driverModel`。
 - **三种触发方式**：`@顾问群` 提及（强制启动）、同一问题重复 3 次未解决、主模型自评置信度低于阈值。
@@ -64,6 +65,7 @@ npx @deepseek-ai/dsh web
 | `discussion.autoDeepen` | boolean | `true` | 启用自动深挖流水线（驱动追问 + 综合结论） |
 | `discussion.driverModel` | object | – | 兜底驱动模型 `{provider, model}`（会话头信息不可读时） |
 | `discussion.advisorTimeoutMs` | number | `600000` | 单顾问调用超时（毫秒，1000–600000），双通道均生效 |
+| `discussion.advisorTools` | string | `'readonly'` | 顾问工具调用范围：`readonly`（默认，只读白名单 read/grep/glob/web_search/web_fetch…）｜`all`（全部会话可见工具，含可写，慎用）｜`off`（关闭）。注意：仅直连通道（OpenAI/Anthropic）支持工具调用，纯 ctx.llm 通道的顾问需配 `baseURL`/`apiKey` 直连后才能用工具 |
 | `quota.enabled` | boolean | `true` | 启用每日咨询上限（成本安全阀） |
 | `quota.maxPerDay` | number | `50` | 每日 UTC 日周期内最多新咨询次数（1–100000）；`quota.enabled=false` 时不生效 |
 | `trigger.requireClassifier` | boolean | `true` | 发起前先跑前置分类器 |

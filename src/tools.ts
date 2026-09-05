@@ -117,7 +117,7 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
           }
         }
         service.appendFollowUp(session.id, args.followUp, sessionLog)
-        await service.runOneRoundAndSummarize(session, exec.signal, sessionLog)
+        await service.runOneRoundAndSummarize(session, exec.signal, sessionLog, exec.agent)
         const canContinue = !service.hasReachedMaxRounds(session)
         return {
           sessionId: session.id,
@@ -210,7 +210,7 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
       // Auto-deepen pipeline (2026-09-05): one call runs the whole consultation
       // — up to maxRounds rounds of [driver deep-question → A → B(sees A) →
       // C(sees A+B) …], closed by a driver-generated conclusion.
-      const summary = await service.runAutoPipeline(session, exec.signal, sessionLog)
+      const summary = await service.runAutoPipeline(session, exec.signal, sessionLog, exec.agent)
       return {
         sessionId: session.id,
         advice:

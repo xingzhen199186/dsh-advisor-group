@@ -1338,6 +1338,27 @@ function AdvisorGroupSettingsTab(): ReactNode {
       createElement(
         'div',
         { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 } },
+        label('顾问工具调用范围'),
+        createElement('select', {
+          value: config.discussion.advisorTools ?? 'readonly',
+          onChange: (e: { target: { value: string } }) =>
+            setConfig({
+              ...config,
+              discussion: {
+                ...config.discussion,
+                advisorTools: e.target.value as 'readonly' | 'all' | 'off',
+              },
+            }),
+          style: { background: '#0b1120', color: '#a3e635', border: '1px solid #334155', borderRadius: 4, padding: '2px 6px', fontSize: 12 },
+        },
+        createElement('option', { value: 'readonly' }, '只读工具（默认）'),
+        createElement('option', { value: 'all' }, '全部会话工具（含可写，慎用）'),
+        createElement('option', { value: 'off' }, '关闭'),
+        ),
+      ),
+      createElement(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 } },
         createElement('input', {
           type: 'checkbox',
           checked: config.trigger.requireClassifier,

@@ -69,6 +69,14 @@ export interface DiscussionConfig {
    * Applied to both the ctx.llm and direct-http channels.
    */
   advisorTimeoutMs?: number
+  /**
+   * Advisor tool calling scope (2026-09-05): 'readonly' (default) exposes only
+   * a read-only whitelist of the session's tools (read/grep/glob/web_search…);
+   * 'all' exposes every session-visible tool (incl. writable ones); 'off'
+   * disables tool calling. Only the direct-http OpenAI/Anthropic channel
+   * supports tool calling (ctx.llm / dsh-llm 0.1.2-rc.1 does not).
+   */
+  advisorTools?: 'readonly' | 'all' | 'off'
 }
 
 export interface TriggerConfig {
@@ -141,6 +149,11 @@ const DiscussionConfig: Schema<DiscussionConfig> = Schema.object({
   driverModel: Schema.union([DriverModel, Schema.const(undefined)]).description('Fallback driver model (provider/model) used when the session header cannot be read.'),
   stopOnConsensus: Schema.boolean().default(false).description('Deprecated: dormant under the auto-deepen pipeline; kept for stored-config compatibility.'),
   advisorTimeoutMs: Schema.number().min(1000).max(600000).default(600000).description('Per-advisor call timeout in milliseconds (default 600000 = 10 min). Long-reasoning models can exhaust shorter budgets on the thinking chain and lose the answer body; a timeout keeps the partial thinking chain and marks the message as truncated.'),
+  advisorTools: Schema.union([
+    Schema.const('readonly'),
+    Schema.const('all'),
+    Schema.const('off'),
+  ]).default('readonly').description('Advisor tool calling scope: readonly (default; read-only session tools), all (every session-visible tool incl. writable ones), off (disabled). Only the direct-http OpenAI/Anthropic channel supports tool calling.'),
 })
 
 const TriggerConfig: Schema<TriggerConfig> = Schema.object({

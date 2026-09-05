@@ -1,0 +1,150 @@
+import { describe, expect, it } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
+import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import {
+  resolveAdvisorToolSchemas,
+  runAdvisorToolLoop,
+  summarizeToolResult,
+  executeAdvisorTool,
+} from '../src/advisor-tools'
+
+/** Advisor tool calling: scope policies (readonly/all/off), the tool loop,
+ *  result formatting and the official-pipeline execution bridge. */
+
+const SCHEMAS = [
+  { name: 'read', description: '读文件', parameters: { type: 'object' } },
+  { name: 'grep', description: '搜索', parameters: { type: 'object' } },
+  { name: 'write', description: '写文件', parameters: { type: 'object' } },
+  { name: 'pwsh', description: '执行命令', parameters: { type: 'object' } },
+] as unknown[]
+
+function ctxWithSchemas(execute?: () => Promise<ToolExecutionResult>): Context {
+  return {
+    tools: {
+      schemas: () => SCHEMAS,
+      ...(execute ? { execute } : {}),
+    },
+  } as unknown as Context
+}
+
+describe('advisor tool scope resolution', () => {
+  it('readonly keeps only the whitelisted read-only tools', () => {
+    const schemas = resolveAdvisorToolSchemas(ctxWithSchemas(), undefined, 'readonly')
+    expect(schemas.map((s) => s.name)).toEqual(['read', 'grep'])
+  })
+
+  it('all keeps every session-visible tool', () => {
+    const schemas = resolveAdvisorToolSchemas(ctxWithSchemas(), undefined, 'all')
+    expect(schemas).toHaveLength(4)
+  })
+
+  it('off disables tool calling entirely', () => {
+    expect(resolveAdvisorToolSchemas(ctxWithSchemas(), undefined, 'off')).toEqual([])
+  })
+
+  it('treats an unavailable registry as no tools', () => {
+    expect(resolveAdvisorToolSchemas({} as Context, undefined, 'readonly')).toEqual([])
+  })
+})
+
+describe('tool result formatting', () => {
+  it('prefers content text and truncates at the cap', () => {
+    const result = {
+      isError: false,
+      content: [{ type: 'text', text: `内容${'x'.repeat(9_000)}` }],
+    } as ToolExecutionResult
+    const text = summarizeToolResult(result)
+    expect(text).toContain('已截断')
+    expect(text.length).toBeLessThan(8_100)
+  })
+
+  it('falls back to the canonical value and reports failures', () => {
+    expect(summarizeToolResult({ isError: false, content: [], value: { ok: 1 } } as ToolExecutionResult)).toContain('ok')
+    expect(summarizeToolResult({ isError: true, content: [], error: { message: 'nope' } } as ToolExecutionResult)).toContain('nope')
+  })
+})
+
+describe('advisor tool loop', () => {
+  it('executes the requested tool, feeds the result back and finishes with the final text', async () => {
+    const thinking: string[] = []
+    let execCount = 0
+    let round = 0
+    const streamOnce = async (_tools: unknown[], extra: string) => {
+      round += 1
+      if (round === 1) {
+        expect(extra).toBe('')
+        return { content: '', thinking: '', toolCalls: [{ id: 't1', name: 'read', argumentsJson: '{"path":"a.txt"}' }] }
+      }
+      expect(extra).toContain('【顾问已执行工具】')
+      expect(extra).toContain('- read')
+      return { content: '最终回答', thinking: '', toolCalls: [] }
+    }
+    const executeTool = async () => {
+      execCount += 1
+      return 'FILE: hello'
+    }
+    const result = await runAdvisorToolLoop(
+      [{ name: 'read' }],
+      streamOnce,
+      executeTool,
+      (text) => thinking.push(text),
+    )
+    expect(execCount).toBe(1)
+    expect(result.content).toBe('最终回答')
+    expect(thinking.some((t) => t.includes('🔧 模型请求调用工具 read'))).toBe(true)
+    expect(thinking.some((t) => t.includes('FILE: hello'))).toBe(true)
+  })
+
+  it('stops after MAX_TOOL_ROUNDS with a final no-tools round', async () => {
+    let round = 0
+    const seenToolSets: number[] = []
+    const streamOnce = async (tools: unknown[], _extra: string) => {
+      round += 1
+      seenToolSets.push((tools as unknown[]).length)
+      return { content: '', thinking: '', toolCalls: [{ id: `t${round}`, name: 'read', argumentsJson: '{}' }] }
+    }
+    const result = await runAdvisorToolLoop([{ name: 'read' }], streamOnce, async () => 'x', () => {})
+    // 4 tool rounds + 1 forced no-tools round.
+    expect(seenToolSets).toEqual([1, 1, 1, 1, 0])
+    expect(result.content).toBe('')
+  })
+})
+
+describe('advisor tool execution bridge', () => {
+  it('executes through the official pipeline with parsed args and returns the text', async () => {
+    let received: unknown
+    const ctx = ctxWithSchemas(async () => {
+      // Capture the input via closure set below (single-shot).
+      return {
+        isError: false,
+        content: [{ type: 'text', text: '文件内容' }],
+        value: null,
+      } as ToolExecutionResult
+    })
+    ;(ctx as unknown as { tools: { execute: (input: unknown) => Promise<ToolExecutionResult> } }).tools.execute = async (input) => {
+      received = input
+      return { isError: false, content: [{ type: 'text', text: '文件内容' }], value: null } as ToolExecutionResult
+    }
+    const text = await executeAdvisorTool(
+      ctx,
+      undefined,
+      { id: 'call_1', name: 'read', argumentsJson: '{"path":"a.txt"}' },
+      new AbortController().signal,
+    )
+    expect(text).toBe('文件内容')
+    const input = received as { name: string; arguments: unknown; signal: AbortSignal }
+    expect(input.name).toBe('read')
+    expect(input.arguments).toEqual({ path: 'a.txt' })
+    expect(input.signal).toBeDefined()
+  })
+
+  it('returns a readable error for invalid JSON arguments and for execution failures', async () => {
+    const text = await executeAdvisorTool(
+      ctxWithSchemas(async () => ({ isError: false, content: [], value: null }) as unknown as ToolExecutionResult),
+      undefined,
+      { id: 'c', name: 'read', argumentsJson: '{broken' },
+      undefined,
+    )
+    expect(text).toContain('不是合法 JSON')
+  })
+})
