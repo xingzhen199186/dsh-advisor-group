@@ -44,7 +44,7 @@ describe('appendAdvisorEnd carries stopped/conclusion', () => {
       stopped: true,
     } as ConsultSummary
     appendAdvisorEnd(log, session, summary)
-    const data = (captured as { summary?: Record<string, unknown> }).summary ?? {}
+    const data = (captured as { data?: { summary?: Record<string, unknown> } }).data?.summary ?? {}
     expect(data.stopped).toBe(true)
     expect(data.conclusion).toBeUndefined()
   })
@@ -61,7 +61,7 @@ describe('appendAdvisorEnd carries stopped/conclusion', () => {
       conclusion: '综合结论正文',
     } as ConsultSummary
     appendAdvisorEnd(log, session, summary)
-    const data = (captured as { summary?: Record<string, unknown> }).summary ?? {}
+    const data = (captured as { data?: { summary?: Record<string, unknown> } }).data?.summary ?? {}
     expect(data.conclusion).toBe('综合结论正文')
     expect(data.stopped).toBeUndefined()
   })
