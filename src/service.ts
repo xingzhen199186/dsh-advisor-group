@@ -164,6 +164,7 @@ export class AdvisorGroupService {
             ts: message.ts,
           })),
           cwd: raw.cwd,
+          dshSessionId: raw.dshSessionId,
           createdAt: raw.createdAt,
           updatedAt: raw.updatedAt,
         }
@@ -183,6 +184,7 @@ export class AdvisorGroupService {
       question: session.question,
       ...(session.context === undefined ? {} : { context: session.context }),
       ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
+      ...(session.dshSessionId === undefined ? {} : { dshSessionId: session.dshSessionId }),
       advisorIds: session.advisors.map((advisor) => advisor.id),
       maxRounds: session.maxRounds,
       createdAt: session.createdAt,
@@ -321,14 +323,19 @@ export class AdvisorGroupService {
    */
   private resolveSessionHandle(session: ConsultSession): Session | undefined {
     const store = this.sessionStore
-    const live = store?.get(session.id)
+    // Rebuild under the AGENT's DSH session id (not the consult id): the card
+    // is assembled from the agent session log, so resume events must land in
+    // THAT session to be visible. Falls back to the consult id when the agent
+    // session id was never recorded.
+    const resumeId = session.dshSessionId || session.id
+    const live = store?.get(resumeId)
     if (live) return live
     if (!store) {
-      return this.buildDetachedSession(session)
+      return this.buildDetachedSession(session, resumeId)
     }
     try {
       const meta: Record<string, unknown> = { cwd: session.cwd ?? process.cwd() }
-      const prepared = store.prepare(session.id, { seed: this.buildSeedEvents(session), meta })
+      const prepared = store.prepare(resumeId, { seed: this.buildSeedEvents(session), meta })
       store.enter(prepared)
       return prepared
     } catch (error) {
@@ -336,15 +343,15 @@ export class AdvisorGroupService {
         '[dsh-advisor-group] 重建会话句柄失败（降级为 detached）：',
         error instanceof Error ? error.message : String(error),
       )
-      const again = store.get(session.id)
+      const again = store.get(resumeId)
       if (again) return again
-      return this.buildDetachedSession(session)
+      return this.buildDetachedSession(session, resumeId)
     }
   }
 
-  private buildDetachedSession(session: ConsultSession): Session | undefined {
+  private buildDetachedSession(session: ConsultSession, sessionId = session.id): Session | undefined {
     try {
-      return Session.create(session.id as SessionId, this.buildSeedEvents(session) as never, undefined, 0 as never)
+      return Session.create(sessionId as SessionId, this.buildSeedEvents(session) as never, undefined, 0 as never)
     } catch {
       return undefined
     }
@@ -442,6 +449,7 @@ export class AdvisorGroupService {
     context: string | undefined,
     advisorIds: string[] = [],
     cwd?: string,
+    dshSessionId?: string,
   ): ConsultSession {
     const maxAdvisors = this.config.discussion.maxAdvisorsPerCall
     const advisors = this.resolveAdvisors(advisorIds).slice(0, maxAdvisors)
@@ -466,6 +474,7 @@ export class AdvisorGroupService {
         },
       ],
       cwd,
+      dshSessionId,
       createdAt: now,
       updatedAt: now,
     }

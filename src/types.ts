@@ -30,6 +30,9 @@ export interface ConsultSession {
   messages: ChatMessage[]
   /** Working directory of the agent session (for cross-restart recovery). */
   cwd?: string
+  /** The agent's DSH session id: resume rebuilds THIS session so the card
+   *  (assembled from the agent session log) keeps receiving events. */
+  dshSessionId?: string
   createdAt: number
   updatedAt: number
 }
@@ -47,6 +50,7 @@ export interface PersistedSession {
   question: string
   context?: string
   cwd?: string
+  dshSessionId?: string
   advisorIds: string[]
   maxRounds: number
   createdAt: number

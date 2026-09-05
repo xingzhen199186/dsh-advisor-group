@@ -204,6 +204,7 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
         args.context,
         args.advisorIds,
         sessionLog ? sessionLog.header.cwd : undefined,
+        sessionLog ? sessionLog.id : undefined,
       )
       if (sessionLog) appendAdvisorStart(sessionLog, session)
       // Auto-deepen pipeline (2026-09-05): one call runs the whole consultation

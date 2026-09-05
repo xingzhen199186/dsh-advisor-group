@@ -162,7 +162,7 @@ describe('stop → resume (继续聊天)', () => {
     try {
       const cfg = config({ advisors: [ADVISOR_A], discussion: { ...config().discussion, maxRounds: 1, maxAdvisorsPerCall: 1 } })
       const serviceA = new AdvisorGroupService(streamStub(), cfg)
-      const session = serviceA.createSession('快照问题', undefined, [], 'C:\\work')
+      const session = serviceA.createSession('快照问题', undefined, [], 'C:\\work', 'dsh-sess-1')
       // Wait for the snapshot file to land.
       const snapshotPath = join(dshHome, 'storages', 'advisor-group', 'sessions', `${session.id}.json`)
       await waitFor(() => existsSync(snapshotPath))
@@ -174,6 +174,9 @@ describe('stop → resume (继续聊天)', () => {
       expect(restored?.status).toBe('cancelled')
       expect(restored?.messages.some((m) => m.role === 'main')).toBe(true)
       expect(restored?.cwd).toBe('C:\\work')
+      // The DSH session id survives the snapshot round-trip so resume rebuilds
+      // the AGENT session (card data source), not a detached consult session.
+      expect(restored?.dshSessionId).toBe('dsh-sess-1')
       expect(serviceB.resumeConsultation(session.id)).toEqual({ ok: true })
       await waitFor(() => serviceB.getSession(session.id)?.status === 'completed')
       const advisorMessages = restored?.messages.filter((m) => m.role === 'advisor') ?? []
