@@ -89,7 +89,10 @@ async function generateWith(
       ],
       temperature: 0.7,
       maxTokens: 600,
-      signal: withTimeout(60_000, signal),
+      // Long discussions (default 24k-char transcript + accumulated tool
+      // results) regularly exceeded 60s on the driver model, so the final
+      // synthesis degraded to its fallback text. Give the driver a real budget.
+      signal: withTimeout(180_000, signal),
     }
     let text = ''
     for await (const chunk of ctx.llm.stream(options)) {
