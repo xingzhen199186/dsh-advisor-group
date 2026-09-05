@@ -412,19 +412,22 @@ export class AdvisorGroupService {
 
   private buildTranscript(session: ConsultSession): TranscriptEntry[] {
     // Preserve the actual back-and-forth order: main question -> advisor reply
-    // -> main follow-up -> advisor reply ... Keep the window bounded.
+    // -> main follow-up -> advisor reply ... Keep the window bounded. The bound
+    // is deliberately tight (12 msgs x 3000 chars): a long-reasoning model with
+    // a big context spends its reply budget on thinking and loses the body, so
+    // later-round transcripts stay lean (see ADVISOR_OUTPUT_POLICY).
     return session.messages
       .filter((message) => message.role !== 'system')
-      .slice(-20)
+      .slice(-12)
       .map((message): TranscriptEntry | null => {
         if (message.role === 'main') {
-          return { role: 'main', name: '主模型', content: message.content.slice(0, 4000) }
+          return { role: 'main', name: '主模型', content: message.content.slice(0, 3000) }
         }
         if (message.role === 'advisor' && message.advisorName) {
           return {
             role: 'advisor',
             name: message.advisorName,
-            content: message.content.slice(0, 4000),
+            content: message.content.slice(0, 3000),
           }
         }
         return null

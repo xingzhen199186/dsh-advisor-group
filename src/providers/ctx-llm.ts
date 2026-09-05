@@ -51,7 +51,10 @@ export async function callViaCtxLlm(
     system: `${advisor.systemPrompt}${ADVISOR_OUTPUT_POLICY}`,
     messages,
     temperature: advisor.temperature,
-    maxTokens: advisor.maxTokens,
+    // A hard floor for the reply budget: without it, long-reasoning models can
+    // spend everything on the thinking chain and truncate the body (see
+    // ADVISOR_OUTPUT_POLICY).
+    maxTokens: advisor.maxTokens ?? 16384,
     signal: withTimeout(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal),
   }
 
