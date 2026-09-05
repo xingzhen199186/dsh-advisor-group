@@ -65,6 +65,7 @@ npx @deepseek-ai/dsh web
 | `discussion.autoDeepen` | boolean | `true` | 启用自动深挖流水线（驱动追问 + 综合结论） |
 | `discussion.driverModel` | object | – | 兜底驱动模型 `{provider, model}`（会话头信息不可读时） |
 | `discussion.advisorTimeoutMs` | number | `600000` | 单顾问调用超时（毫秒，1000–600000），双通道均生效 |
+| `discussion.driverTimeoutMs` | number | `600000` | 驱动模型生成超时（深挖追问/综合结论；毫秒，1000–1200000） |
 | `discussion.advisorTools` | string | `'readonly'` | **未单独设置时的全局默认**顾问工具调用范围：`readonly`（只读白名单 read/grep/glob/web_search/web_fetch…）｜`all`（全部会话可见工具，含可写，慎用）｜`off`（关闭）。仅直连通道（OpenAI/Anthropic）支持工具调用，DSH 内置通道的顾问需配 `baseURL`/`apiKey`/`apiKeyEnv` 直连（详情见「功能特性」）。 |
 | `advisors[].tools` | string | – | 每个顾问的**单独**工具调用范围覆盖（`readonly`/`all`/`off`；未设置时跟随全局默认）；设置卡片上：可直连的顾问显示下拉，DSH 内置通道顾问显示“不可配置”。 |
 | `quota.enabled` | boolean | `true` | 启用每日咨询上限（成本安全阀） |
