@@ -31,6 +31,8 @@ export interface AdvisorGroupMessageData {
   readonly content: string
   readonly thinking?: string
   readonly round?: number
+  /** Stream was cut before a complete body (advisor timeout / network drop). */
+  readonly truncated?: { readonly reason: 'timeout' | 'network'; readonly atMs: number }
 }
 
 export interface AdvisorGroupDeltaData {

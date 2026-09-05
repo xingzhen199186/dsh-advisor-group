@@ -2,6 +2,12 @@ import type { AdvisorConfig } from './config'
 
 export type ChatRole = 'main' | 'advisor' | 'system'
 
+/** Why an advisor stream ended before producing a complete answer body. */
+export interface TruncationInfo {
+  reason: 'timeout' | 'network'
+  atMs: number
+}
+
 export interface ChatMessage {
   role: ChatRole
   advisorId?: string
@@ -9,6 +15,8 @@ export interface ChatMessage {
   content: string
   thinking?: string
   round?: number
+  /** Set when the stream was cut before a complete body (e.g. advisor timeout). */
+  truncated?: TruncationInfo
   ts: number
 }
 

@@ -140,7 +140,7 @@ const DiscussionConfig: Schema<DiscussionConfig> = Schema.object({
   autoDeepen: Schema.boolean().default(true).description('Run the auto-deepen pipeline: after each round the driver model asks a deeper follow-up, and a final conclusion closes the consultation.'),
   driverModel: Schema.union([DriverModel, Schema.const(undefined)]).description('Fallback driver model (provider/model) used when the session header cannot be read.'),
   stopOnConsensus: Schema.boolean().default(false).description('Deprecated: dormant under the auto-deepen pipeline; kept for stored-config compatibility.'),
-  advisorTimeoutMs: Schema.number().min(1000).max(600000).default(120000).description('Per-advisor call timeout in milliseconds (default 120000).'),
+  advisorTimeoutMs: Schema.number().min(1000).max(600000).default(240000).description('Per-advisor call timeout in milliseconds (default 240000). Long-reasoning models can exhaust shorter budgets on the thinking chain and lose the answer body; a timeout keeps the partial thinking chain and marks the message as truncated.'),
 })
 
 const TriggerConfig: Schema<TriggerConfig> = Schema.object({

@@ -1,7 +1,8 @@
 import type { AdvisorConfig } from '../config'
+import type { TruncationInfo } from '../types'
 import { getProviderPreset } from './presets'
 import { ADVISOR_OUTPUT_POLICY } from './advisor-prompt'
-import { ADVISOR_CALL_TIMEOUT_MS, withTimeout } from './timeout'
+import { ADVISOR_CALL_TIMEOUT_MS, withTimeout, timeoutSignalPair } from './timeout'
 import type { TranscriptEntry } from './ctx-llm'
 
 /**
@@ -50,6 +51,8 @@ export interface StreamDelta {
 export interface StreamResult {
   content: string
   thinking: string
+  /** Set when timeout/network cut the stream before a complete body. */
+  truncated?: TruncationInfo
 }
 
 /** Stream an advisor response through direct HTTP (OpenAI/Anthropic SSE). */
@@ -101,6 +104,7 @@ async function streamOpenAICompatible(
   const endpoint = baseURL.endsWith('/chat/completions')
     ? baseURL
     : `${baseURL.replace(/\/+$/, '')}/chat/completions`
+  const pair = timeoutSignalPair(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal)
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -117,7 +121,7 @@ async function streamOpenAICompatible(
       max_tokens: advisor.maxTokens ?? 16384,
       stream: true,
     }),
-    signal: withTimeout(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal),
+    signal: pair.signal,
   })
   if (!response.ok) {
     throw new Error(`OpenAI-compatible request failed: ${response.status} ${await response.text()}`)
@@ -138,10 +142,15 @@ async function streamOpenAICompatible(
       done = read.done
       value = read.value
     } catch (error) {
-      // A mid-stream connection drop keeps the collected partial content;
-      // only the caller's abort/timeout signal propagates as cancellation.
+      // Timeout: keep the partial thinking chain and mark the truncation so
+      // the caller can surface it (the stream "just stops" otherwise).
+      if (pair.isTimeout()) {
+        return { content, thinking, truncated: { reason: 'timeout', atMs: Date.now() } }
+      }
+      // Caller signal (user stop / exec.signal): propagate as cancellation.
       if (signal?.aborted || (error as { name?: string })?.name === 'AbortError') throw error
-      break
+      // Mid-stream network drop: keep the partial content, mark truncation.
+      return { content, thinking, truncated: { reason: 'network', atMs: Date.now() } }
     }
     if (done) break
     buffer += decoder.decode(value, { stream: true })
@@ -206,6 +215,7 @@ async function streamAnthropic(
   } else {
     headers['x-api-key'] = apiKey
   }
+  const pair = timeoutSignalPair(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal)
   const response = await fetch(endpoint, {
     method: 'POST',
     headers,
@@ -217,7 +227,7 @@ async function streamAnthropic(
       max_tokens: advisor.maxTokens ?? 16384,
       stream: true,
     }),
-    signal: withTimeout(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal),
+    signal: pair.signal,
   })
   if (!response.ok) {
     throw new Error(`Anthropic request failed: ${response.status} ${await response.text()}`)
@@ -238,10 +248,11 @@ async function streamAnthropic(
       done = read.done
       value = read.value
     } catch (error) {
-      // A mid-stream connection drop keeps the collected partial content;
-      // only the caller's abort/timeout signal propagates as cancellation.
+      if (pair.isTimeout()) {
+        return { content, thinking, truncated: { reason: 'timeout', atMs: Date.now() } }
+      }
       if (signal?.aborted || (error as { name?: string })?.name === 'AbortError') throw error
-      break
+      return { content, thinking, truncated: { reason: 'network', atMs: Date.now() } }
     }
     if (done) break
     buffer += decoder.decode(value, { stream: true })

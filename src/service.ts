@@ -12,7 +12,7 @@ import { advisorJoinPrompt } from './providers/advisor-prompt'
 import { generateConclusion, generateDeepenQuestion, resolveDriverSource } from './driver'
 import { appendAdvisorDelta, appendAdvisorEnd, appendAdvisorMessage } from './session-log'
 import { publish } from './stream-channel'
-import type { ChatMessage, ConsultSession, ConsultSummary, AdvisorSummary } from './types'
+import type { ChatMessage, ConsultSession, ConsultSummary, AdvisorSummary, TruncationInfo } from './types'
 import './events'
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
@@ -516,16 +516,21 @@ export class AdvisorGroupService {
       // Non-DSH providers (preset/custom) must go through direct HTTP; ctx.llm
       // may silently stream nothing for an unknown provider instead of throwing.
       const advisorTimeoutMs = this.config.discussion.advisorTimeoutMs
+      let truncated: TruncationInfo | undefined
       if (!isDshLlmProvider || advisor.baseURL || advisor.apiKey || advisor.apiKeyEnv) {
         const streamResult = await streamDirectHttp(relational, transcript, emitDelta, signal, advisorTimeoutMs)
         flush()
         content = streamResult.content
         message.thinking = streamResult.thinking
+        truncated = streamResult.truncated
       } else {
-        content = await callViaCtxLlm(this.ctx, relational, transcript, signal, emitDelta, advisorTimeoutMs)
+        const result = await callViaCtxLlm(this.ctx, relational, transcript, signal, emitDelta, advisorTimeoutMs)
         flush()
+        content = result.content
+        truncated = result.truncated
       }
       message.content = content
+      if (truncated) message.truncated = truncated
     } catch (error) {
       if (isAbortError(error, signal)) throw error
       message.content = `（顾问调用失败：${error instanceof Error ? error.message : String(error)}）`
@@ -569,6 +574,9 @@ export class AdvisorGroupService {
     const riskNotes = advisorMessages.some((message) => /风险|注意|不确定|risk|uncertain|confidence/i.test(message.content))
       ? ['部分顾问提到了风险、不确定性或置信度较低，请主模型谨慎采用。']
       : []
+    if (advisorMessages.some((message) => message.truncated !== undefined)) {
+      riskNotes.push('有顾问输出在流式过程中被截断（超时或网络中断），其正文可能不完整，且该顾问本轮可能只提供了部分意见。')
+    }
 
     if (cancelled) {
       riskNotes.push('本次顾问群讨论已被用户或主模型取消，结论可能不完整。')

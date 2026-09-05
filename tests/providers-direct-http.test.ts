@@ -53,12 +53,12 @@ describe('direct-http provider contract', () => {
             return
           }
           if (route === 'slow') {
-            setTimeout(() => {
-              res.writeHead(200, { 'content-type': 'text/event-stream' })
-              res.write('data: {"choices":[{"delta":{"content":"迟到"}}]}\n\n')
-              res.write('data: [DONE]\n\n')
-              res.end()
-            }, 800)
+            // Headers arrive immediately; the body streams one thinking chunk
+            // and then stalls well past the client's 80ms timeout — the
+            // mid-stream read aborts and must degrade to a marked truncation.
+            res.writeHead(200, { 'content-type': 'text/event-stream' })
+            res.write('data: {"choices":[{"delta":{"reasoning_content":"慢思考"}}]}\n\n')
+            setTimeout(() => res.end(), 800)
             return
           }
           res.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -124,13 +124,14 @@ describe('direct-http provider contract', () => {
     expect(deltas).toEqual([{ thinking: '思考中' }, { text: '你好' }, { text: '，世界' }])
   })
 
-  it('keeps partial content on a mid-stream connection drop (no throw)', async () => {
+  it('keeps partial content on a mid-stream connection drop and marks network truncation', async () => {
     const result = await streamDirectHttp(
       advisor({ baseURL: `${baseURL}/truncated`, protocol: 'openai', apiKey: 'sk-contract-key' }),
       transcript,
       () => {},
     )
     expect(result.content).toBe('你好，世界')
+    expect(result.truncated?.reason).toBe('network')
   })
 
   it('returns empty content for a stream with only [DONE]', async () => {
@@ -200,18 +201,18 @@ describe('direct-http provider contract', () => {
     expect(result.content).toBe('你好，世界')
   })
 
-  it('honors the configurable timeout (timeoutMs) by aborting a slow provider', async () => {
+  it('honors the configurable timeout (timeoutMs) by truncating a slow provider', async () => {
     const started = Date.now()
-    await expect(
-      streamDirectHttp(
-        advisor({ baseURL: `${baseURL}/slow`, protocol: 'openai', apiKey: 'sk-contract-key' }),
-        transcript,
-        () => {},
-        undefined,
-        80,
-      ),
-    ).rejects.toThrow()
+    const result = await streamDirectHttp(
+      advisor({ baseURL: `${baseURL}/slow`, protocol: 'openai', apiKey: 'sk-contract-key' }),
+      transcript,
+      () => {},
+      undefined,
+      80,
+    )
     expect(Date.now() - started).toBeLessThan(700)
+    expect(result.truncated?.reason).toBe('timeout')
+    expect(result.thinking).toBe('慢思考')
   })
 })
 
@@ -241,7 +242,7 @@ describe('ctx.llm provider contract', () => {
     } as unknown as Context
 
     const deltas: Array<{ text?: string; thinking?: string }> = []
-    const text = await callViaCtxLlm(
+    const result = await callViaCtxLlm(
       fakeCtx,
       advisor({ protocol: 'openai', apiKey: '' }),
       [{ role: 'main', name: '主模型', content: '问题' }],
@@ -255,7 +256,64 @@ describe('ctx.llm provider contract', () => {
     expect(captured.system).toContain('契约测试专家')
     expect(captured.messages).toHaveLength(1)
     expect(captured.signal).toBeDefined()
-    expect(text).toBe('答复')
+    expect(result.content).toBe('答复')
+    expect(result.truncated).toBeUndefined()
     expect(deltas).toEqual([{ thinking: '理由' }, { text: '答复' }])
+  })
+
+  it('marks a provider timeout as truncated instead of a silent empty body', async () => {
+    const fakeCtx = {
+      llm: {
+        async *stream(options: { signal?: AbortSignal }) {
+          // Long-reasoning shape: thinking only, then the provider hangs until
+          // the combined signal aborts it (dsh-llm throws AbortError here).
+          yield { type: 'reasoning-delta', text: '长思考链' } as never
+          await new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError')),
+            )
+          })
+        },
+      },
+    } as unknown as Context
+
+    const result = await callViaCtxLlm(
+      fakeCtx,
+      advisor({ protocol: 'openai', apiKey: '' }),
+      [{ role: 'main', name: '主模型', content: '问题' }],
+      undefined,
+      undefined,
+      40,
+    )
+    expect(result.content).toBe('')
+    expect(result.thinking).toBe('长思考链')
+    expect(result.truncated?.reason).toBe('timeout')
+  })
+
+  it('propagates caller abort as cancellation, not truncation', async () => {
+    const controller = new AbortController()
+    const fakeCtx = {
+      llm: {
+        async *stream(options: { signal?: AbortSignal }) {
+          yield { type: 'text-delta', text: 'x' } as never
+          await new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError')),
+            )
+          })
+        },
+      },
+    } as unknown as Context
+    setTimeout(() => controller.abort(), 30)
+    await expect(
+      callViaCtxLlm(
+        fakeCtx,
+        advisor({ protocol: 'openai', apiKey: '' }),
+        [{ role: 'main', name: '主模型', content: '问题' }],
+        controller.signal,
+        undefined,
+        10_000,
+      ),
+    ).rejects.toThrow()
   })
 })

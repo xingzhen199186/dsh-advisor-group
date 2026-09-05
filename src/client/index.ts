@@ -484,6 +484,25 @@ function MessageBubble({ message }: { message: AdvisorGroupMessageData }): React
         : createElement(
             'div',
             { style: { wordBreak: 'break-word' } },
+            message.truncated
+              ? createElement(
+                  'div',
+                  {
+                    style: {
+                      fontSize: 11,
+                      color: '#f87171',
+                      border: '1px solid #dc2626',
+                      borderRadius: 3,
+                      padding: '2px 6px',
+                      display: 'inline-block',
+                      marginBottom: 3,
+                    },
+                  },
+                  message.truncated.reason === 'timeout'
+                    ? '⏱ 响应超时截断 — 思考已收到，正文未完成'
+                    : '⚠ 流中断 — 正文可能不完整',
+                )
+              : null,
             renderMarkdown(message.content),
           ),
     ),
@@ -1238,7 +1257,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
             min: 1000,
             max: 600000,
             step: 1000,
-            value: String(config.discussion.advisorTimeoutMs ?? 120000),
+            value: String(config.discussion.advisorTimeoutMs ?? 240000),
             onChange: (e: { target: { value: string } }) =>
               setConfig({
                 ...config,

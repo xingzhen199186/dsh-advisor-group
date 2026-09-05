@@ -255,12 +255,16 @@ function formatConversation(session: ConsultSession): string {
     if (message.role === 'main') {
       lines.push(`主模型：${message.content}`)
     } else if (message.role === 'advisor') {
+      const truncatedNote =
+        message.truncated === undefined
+          ? ''
+          : `（顾问输出在流式过程中被截断：${message.truncated.reason === 'timeout' ? '超时' : '网络中断'}，正文可能不完整）\n`
       const body =
         message.content && message.content.trim()
-          ? message.content
-          : message.thinking && message.thinking.trim()
+          ? truncatedNote + message.content
+          : truncatedNote + (message.thinking && message.thinking.trim()
             ? `（思维链）\n${message.thinking}`
-            : '（顾问未返回正文）'
+            : '（顾问未返回正文）')
       lines.push(`【${message.advisorName ?? message.advisorId ?? '顾问'}】：${body}`)
     }
     lines.push('')

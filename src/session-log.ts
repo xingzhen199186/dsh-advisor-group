@@ -61,6 +61,7 @@ export function appendAdvisorMessage(
     ...(message.advisorName === undefined ? {} : { advisorName: message.advisorName }),
     ...(message.round === undefined ? {} : { round: message.round }),
     ...(message.thinking === undefined ? {} : { thinking: message.thinking }),
+    ...(message.truncated === undefined ? {} : { truncated: message.truncated }),
   }
   log.append('advisor-group/message', data)
 }
