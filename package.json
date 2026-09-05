@@ -1,7 +1,7 @@
 {
   "name": "dsh-advisor-group",
-  "version": "0.1.1",
-  "description": "DSH plugin: consult multiple expert advisor models in a retro chat-group card — auto-deepen consultation pipeline with real streaming, SSE replay, and 26 provider presets.",
+  "version": "0.0.1",
+  "description": "DSH plugin: consult multiple expert advisor models in a retro chat-group card 鈥?auto-deepen consultation pipeline with real streaming, SSE replay, and 26 provider presets.",
   "type": "module",
   "main": "lib/index.mjs",
   "types": "lib/index.d.mts",
@@ -84,3 +84,4 @@
   "packageManager": "pnpm@11.7.0",
   "license": "Apache-2.0"
 }
+
