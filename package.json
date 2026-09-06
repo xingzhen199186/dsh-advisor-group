@@ -2,6 +2,20 @@
   "name": "dsh-advisor-group",
   "version": "0.0.1",
   "description": "DSH plugin: consult multiple expert advisor models in a retro chat-group card \u2014 auto-deepen consultation pipeline with real streaming, SSE replay, and 26 provider presets.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xingzhen199186/dsh-advisor-group.git"
+  },
+  "homepage": "https://github.com/xingzhen199186/dsh-advisor-group",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "advisor",
+    "multi-model",
+    "consultation",
+    "crt"
+  ],
   "type": "module",
   "main": "lib/index.mjs",
   "types": "lib/index.d.mts",
