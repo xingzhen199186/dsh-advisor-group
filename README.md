@@ -8,6 +8,8 @@
 
 ---
 
+<img width="865" height="983" alt="1788679983177" src="https://github.com/user-attachments/assets/dad2f2be-acf6-41d7-b61a-c11596e48408" />
+
 ## ✨ Features
 
 - **Auto-deepen consultation pipeline** — one `ask_advisors` call runs up to `maxRounds` rounds automatically: each round is a *driver deep-question → advisor A → advisor B (sees A) → advisor C (sees A+B) → …* sequential relay, closed by a driver-generated synthesis conclusion.
@@ -44,6 +46,8 @@ npx @deepseek-ai/dsh web
 > ```
 
 ## 🚀 Quick start
+
+<img width="791" height="797" alt="image" src="https://github.com/user-attachments/assets/5fba07bc-8c36-40f1-b423-d206aa495192" />
 
 1. Restart DSH web and hard-refresh the browser (`Ctrl+Shift+R`).
 2. Go to **Settings → Plugins → Advisor Group**: configure your advisors (provider route + model; use *获取模型列表* to pull the authoritative model list) and tune `maxRounds`, thresholds, and the UI theme.
