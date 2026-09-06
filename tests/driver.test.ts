@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   FALLBACK_CONCLUSION,
   FALLBACK_DEEPEN_QUESTION,
@@ -114,5 +114,64 @@ describe('driver cancellation semantics (stop during generation)', () => {
       undefined,
     )
     expect(question).toBe(FALLBACK_DEEPEN_QUESTION)
+  })
+
+  it('logs the real failure reason instead of silently degrading', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fakeCtx = {
+        llm: {
+          async *stream() {
+            throw new Error('provider exploded')
+          },
+        },
+      } as unknown as Context
+      const session = {
+        messages: [{ role: 'main', content: '问题', ts: 0 }],
+      } as never
+      const question = await generateDeepenQuestion(
+        fakeCtx,
+        session,
+        { provider: 'fake-provider', model: 'fake-model' },
+        undefined,
+      )
+      expect(question).toBe(FALLBACK_DEEPEN_QUESTION)
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('驱动模型生成失败（fake-provider/fake-model）'),
+        expect.stringContaining('provider exploded'),
+      )
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('warns on an empty stream (reasoning-only, no exception) and still falls back', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fakeCtx = {
+        llm: {
+          async *stream() {
+            yield { type: 'reasoning-delta', text: '想' } as never
+            yield { type: 'reasoning-delta', text: '再想' } as never
+          },
+        },
+      } as unknown as Context
+      const session = {
+        messages: [{ role: 'main', content: '问题', ts: 0 }],
+      } as never
+      const question = await generateDeepenQuestion(
+        fakeCtx,
+        session,
+        { provider: 'fake-provider', model: 'fake-model' },
+        undefined,
+      )
+      expect(question).toBe(FALLBACK_DEEPEN_QUESTION)
+      expect(warn).toHaveBeenCalledTimes(1)
+      const msg = String(warn.mock.calls[0]?.[0] ?? '')
+      expect(msg).toContain('驱动模型空响应（fake-provider/fake-model）')
+      expect(msg).toContain('chunks=2 textDeltas=0 reasoningDeltas=2')
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

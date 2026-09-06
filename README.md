@@ -82,6 +82,7 @@ npx @deepseek-ai/dsh web
 - Diagnostics endpoints resolve the real key server-side and validate the target URL against an https-only / loopback SSRF guard; DNS-rebinding protection is a documented out-of-scope limitation.
 - The daily consultation cap (configurable via `quota.*`; default 50; can be disabled) is persisted to `$DSH_HOME/storages/advisor-group/daily-guard.json` (UTC day key), so restarts don't reset it.
 - Classifier shadow mode appends one observation sample per non-forced classification (read-only `/advisor-group/shadow`), used for threshold tuning only — never influences behavior.
+- **`advisorTools: 'all'` is an elevated-risk scope.** It exposes every session-visible tool to the advisor models, including writable/execution ones (`pwsh`, `bash`, `write`, config/SSH tools), executed through the official guarded pipeline. Only enable it for advisors you trust (e.g., your own local models), keep them on the direct-http channel, and note that every non-read-only invocation is logged with `console.warn` for audit. Prefer the default `readonly` (read/grep/glob/web_search/web_fetch/scan_discover/list_imported_sessions) or `off`.
 
 ## 🛠️ Development
 

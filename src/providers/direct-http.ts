@@ -5,6 +5,184 @@ import { ADVISOR_OUTPUT_POLICY } from './advisor-prompt'
 import { ADVISOR_CALL_TIMEOUT_MS, timeoutSignalPair, withTimeout } from './timeout'
 import type { TranscriptEntry } from './ctx-llm'
 import type { AdvisorToolCall, AdvisorToolSchema } from '../advisor-tools'
+import { parseTextToolCalls } from '../dsml'
+
+type AdvisorThinkingEffort = 'off' | 'low' | 'high' | 'max'
+
+/** True when the user asked to force thinking off, through either spelling. */
+function thinkingOff(advisor: AdvisorConfig): boolean {
+  return advisor.thinking === 'disabled' || advisor.reasoningEffort === 'off'
+}
+
+/**
+ * OpenAI-compatible reasoning params, provider-aware (2026-09-05 知识 X 最新):
+ * - DeepSeek: `thinking {type}` switch + `reasoning_effort` low/high/max.
+ * - Kimi/Kimi Code: kimi-k3 = top-level `reasoning_effort` low/high/max (no
+ *   `thinking`); kimi-k2.7-code = always thinking, no params; kimi-k2.6 =
+ *   `thinking {type}` switch only.
+ * - OpenAI official: `reasoning_effort` minimal|low|medium|high (no max, no off).
+ * - 阿里云百炼: `enable_thinking` bool (Qwen chat completions).
+ * - 智谱: `thinking {type}` switch + `reasoning_effort` (GLM-5.3 force-enabled,
+ *   disabled→enabled+low; GLM-5.2/5.1/5 can disable).
+ * - 硅基流动: `enable_thinking` + `thinking_budget`.
+ * - Others (AIHubMix/OpenRouter/custom): best-effort `reasoning_effort`.
+ */
+function openAiThinkingParams(advisor: AdvisorConfig): Record<string, unknown> {
+  const provider = advisor.provider
+  const model = advisor.model
+  const effort = advisor.reasoningEffort
+
+  if (provider === 'deepseek') {
+    if (thinkingOff(advisor)) return { thinking: { type: 'disabled' } }
+    return {
+      ...(advisor.thinking === 'enabled' ? { thinking: { type: 'enabled' } } : {}),
+      ...(effort && effort !== 'off' ? { reasoning_effort: effort } : {}),
+    }
+  }
+
+  if (provider === 'moonshot' || provider === 'kimi-code') {
+    if (/^(k3|kimi-k3)(-|$)/i.test(model)) {
+      // kimi-k3 always reasons; strength via top-level reasoning_effort.
+      if (effort && effort !== 'off') return { reasoning_effort: effort }
+      return {}
+    }
+    if (/kimi-k2\.7-code|kimi-for-coding/i.test(model)) {
+      // Always thinking; no thinking/reasoning_effort params accepted.
+      return {}
+    }
+    // kimi-k2.6 and older: thinking switch only.
+    if (advisor.thinking === 'disabled') return { thinking: { type: 'disabled' } }
+    if (advisor.thinking === 'enabled') return { thinking: { type: 'enabled' } }
+    return {}
+  }
+
+  if (provider === 'openai') {
+    if (effort === 'low') return { reasoning_effort: 'low' }
+    if (effort === 'high' || effort === 'max') return { reasoning_effort: 'high' }
+    return {}
+  }
+
+  if (provider === 'bailian' || provider === 'bailian-openai-singapore' || provider === 'bailian-openai-us') {
+    // DashScope OpenAI-compatible: enable_thinking bool toggles Qwen thinking.
+    if (thinkingOff(advisor)) return { enable_thinking: false }
+    if (advisor.thinking === 'enabled') return { enable_thinking: true }
+    return {}
+  }
+
+  if (provider === 'zhipu') {
+    if (/glm-5\.3/i.test(model)) {
+      // GLM-5.3/5.3-FLASH force thinking; disabled would 400. Migrate off→low.
+      return {
+        thinking: { type: 'enabled' },
+        reasoning_effort: thinkingOff(advisor)
+          ? 'low'
+          : effort && effort !== 'off'
+            ? effort
+            : 'max',
+      }
+    }
+    if (/glm-5/i.test(model)) {
+      // GLM-5.2/5.1/5/5-turbo/5v-turbo: switch + effort.
+      if (thinkingOff(advisor)) return { thinking: { type: 'disabled' } }
+      return {
+        ...(advisor.thinking === 'enabled' ? { thinking: { type: 'enabled' } } : {}),
+        ...(effort && effort !== 'off' ? { reasoning_effort: effort } : {}),
+      }
+    }
+    // Older GLM (4.6/4.5): thinking switch only.
+    if (advisor.thinking === 'disabled') return { thinking: { type: 'disabled' } }
+    if (advisor.thinking === 'enabled') return { thinking: { type: 'enabled' } }
+    return {}
+  }
+
+  if (provider === 'siliconflow') {
+    if (thinkingOff(advisor)) return { enable_thinking: false }
+    const budget =
+      effort === 'low' ? 1024 : effort === 'high' ? 8192 : effort === 'max' ? 16384 : 0
+    return {
+      ...(advisor.thinking === 'enabled' || budget > 0 ? { enable_thinking: true } : {}),
+      ...(budget > 0 ? { thinking_budget: budget } : {}),
+    }
+  }
+
+  // aihubmix / openrouter / custom
+  if (effort && effort !== 'off') return { reasoning_effort: effort }
+  return {}
+}
+
+/** Anthropic Messages reasoning params, provider-aware.
+ *  Official Anthropic: adaptive (`thinking:{type:'adaptive'}` + `output_config.effort`)
+ *  for Opus 4.6/4.7/Sonnet 4.6/Mythos; manual `enabled`+`budget_tokens` for older
+ *  models. DeepSeek's Anthropic-compatible endpoint uses `reasoning.effort` +
+ *  `output_config.effort` (its `budget_tokens` is ignored). Other Anthropic skins
+ *  follow the official Anthropic wire shape. */
+function anthropicThinkingParams(advisor: AdvisorConfig): Record<string, unknown> {
+  const provider = advisor.provider
+  if (provider === 'deepseek-anthropic') {
+    if (thinkingOff(advisor)) return { reasoning: { effort: 'none' } }
+    if (advisor.reasoningEffort && advisor.reasoningEffort !== 'off') {
+      return {
+        reasoning: { effort: advisor.reasoningEffort },
+        output_config: { effort: advisor.reasoningEffort },
+      }
+    }
+    return {}
+  }
+  if (thinkingOff(advisor)) return { thinking: { type: 'disabled' } }
+  if (advisor.reasoningEffort && advisor.reasoningEffort !== 'off') {
+    const adaptive = /(?:opus-4-[6-8]|opus-5|sonnet-4-6|sonnet-5|fable|mythos)/i.test(advisor.model)
+    if (adaptive) {
+      return {
+        thinking: { type: 'adaptive' },
+        output_config: { effort: advisor.reasoningEffort },
+      }
+    }
+    const budget =
+      advisor.reasoningEffort === 'low'
+        ? 2048
+        : advisor.reasoningEffort === 'high'
+          ? 8192
+          : 16384
+    return { thinking: { type: 'enabled', budget_tokens: budget } }
+  }
+  return {}
+}
+
+/** Gemini `generateContent` thinking config. Disabling thinking uses
+ *  `thinkingBudget: 0` (NOT `includeThoughts:false`, which only hides returned
+ *  thoughts). Effort uses `thinkingBudget`, the backward-compatible knob that
+ *  works across Gemini 2.5 and Gemini 3 per Google's migration note. */
+function geminiThinkingParams(advisor: AdvisorConfig): Record<string, unknown> {
+  if (thinkingOff(advisor)) return { thinkingConfig: { thinkingBudget: 0 } }
+  const budget =
+    advisor.reasoningEffort === 'low'
+      ? 1024
+      : advisor.reasoningEffort === 'high'
+        ? 8192
+        : advisor.reasoningEffort === 'max'
+          ? 16384
+          : 0
+  if (budget > 0) return { thinkingConfig: { thinkingBudget: budget } }
+  return {}
+}
+
+/** Validate the per-advisor thinking fields at the direct-http boundary so a
+ *  malformed stored config fails loudly instead of silently ignoring. */
+function assertThinkingParams(advisor: AdvisorConfig): void {
+  if (
+    advisor.thinking !== undefined &&
+    advisor.thinking !== 'enabled' &&
+    advisor.thinking !== 'disabled'
+  ) {
+    throw new Error(`Unsupported thinking mode: ${String(advisor.thinking)}`)
+  }
+  if (
+    advisor.reasoningEffort !== undefined &&
+    !(['off', 'low', 'high', 'max'] as const).includes(advisor.reasoningEffort as AdvisorThinkingEffort)
+  ) {
+    throw new Error(`Unsupported reasoningEffort: ${String(advisor.reasoningEffort)}`)
+  }
+}
 
 /**
  * Fallback direct HTTP client for providers that are not (yet) configured in
@@ -23,6 +201,7 @@ export async function callDirectHttp(
   const apiKey = advisor.apiKey ?? process.env[advisor.apiKeyEnv ?? preset?.apiKeyEnv ?? ''] ?? ''
   const protocol = advisor.protocol ?? preset?.protocol ?? 'openai'
   const authMode = advisor.authMode ?? preset?.authMode ?? 'x-api-key'
+  assertThinkingParams(advisor)
 
   if (!baseURL || !apiKey) {
     throw new Error(`Direct HTTP fallback is not configured for advisor "${advisor.name}" (${advisor.provider}). Add baseURL/apiKey or configure the provider in DSH.`)
@@ -66,12 +245,17 @@ export async function streamDirectHttp(
   signal?: AbortSignal,
   timeoutMs?: number,
   tools?: AdvisorToolSchema[],
+  /** Whitelist for the text tool-call restorer; defaults to `tools` names.
+   *  The final forced round sends `tools=[]` but must STILL restore the model's
+   *  DSML/text echoes against the advisor's full tool set. */
+  parseToolNames?: string[],
 ): Promise<StreamResult> {
   const preset = advisor.provider ? getProviderPreset(advisor.provider) : undefined
   const baseURL = (advisor.baseURL ?? preset?.baseURL ?? '').replace(/\/+$/, '')
   const apiKey = advisor.apiKey ?? process.env[advisor.apiKeyEnv ?? preset?.apiKeyEnv ?? ''] ?? ''
   const protocol = advisor.protocol ?? preset?.protocol ?? 'openai'
   const authMode = advisor.authMode ?? preset?.authMode ?? 'x-api-key'
+  assertThinkingParams(advisor)
 
   if (!baseURL || !apiKey) {
     throw new Error(`Direct HTTP fallback is not configured for advisor "${advisor.name}" (${advisor.provider}). Add baseURL/apiKey or configure the provider in DSH.`)
@@ -81,19 +265,48 @@ export async function streamDirectHttp(
     .map((entry) => `[${entry.role === 'main' ? '主模型' : entry.name}]\n${entry.content}`)
     .join('\n\n')
 
+  let result: StreamResult
   switch (protocol) {
     case 'openai':
-      return streamOpenAICompatible(baseURL, advisor, apiKey, transcriptText, onDelta, signal, timeoutMs, tools)
+      result = await streamOpenAICompatible(baseURL, advisor, apiKey, transcriptText, onDelta, signal, timeoutMs, tools)
+      break
     case 'anthropic':
-      return streamAnthropic(baseURL, advisor, apiKey, transcriptText, authMode, onDelta, signal, timeoutMs, tools)
+      result = await streamAnthropic(baseURL, advisor, apiKey, transcriptText, authMode, onDelta, signal, timeoutMs, tools)
+      break
     case 'gemini': {
       const content = await callGemini(baseURL, advisor, apiKey, transcriptText, signal, timeoutMs)
       onDelta({ text: content })
-      return { content, thinking: '' }
+      result = { content, thinking: '' }
+      break
     }
     default:
       throw new Error(`Unsupported protocol: ${String(protocol)}`)
   }
+
+  // Text tool-call restore: when the provider echoed its tool requests as plain
+  // DSML/text instead of structured stream events, parse them, remove the raw
+  // markup from the body (so the card never shows it) and merge the calls into
+  // `toolCalls` — runAdvisorToolLoop executes them through the official
+  // pipeline (with the same per-invocation idempotency guard).
+  const parsed = parseTextToolCalls(
+    result.content,
+    new Set(parseToolNames ?? (tools ?? []).map((tool) => tool.name)),
+  )
+  if (parsed.toolCalls.length > 0) {
+    console.warn(
+      `[dsh-advisor-group] 检测到文本工具调用（DSML/非结构流），已还原并交给 runAdvisorToolLoop 执行：` +
+        `${parsed.toolCalls.map((tool) => tool.name).join('、')}`,
+    )
+    // Merge restored text tool calls with any structured stream calls so the
+    // caller executes them through the SAME official pipeline. `cleaned`
+    // removes the raw DSML markup from the body (card never shows it).
+    return {
+      ...result,
+      content: parsed.cleaned,
+      toolCalls: [...(result.toolCalls ?? []), ...parsed.toolCalls],
+    }
+  }
+  return result
 }
 
 async function streamOpenAICompatible(
@@ -118,6 +331,7 @@ async function streamOpenAICompatible(
     ],
     temperature: advisor.temperature ?? 0.3,
     max_tokens: advisor.maxTokens ?? 16384,
+    ...openAiThinkingParams(advisor),
     stream: true,
   }
   if (tools && tools.length > 0) {
@@ -272,6 +486,7 @@ async function streamAnthropic(
     messages: [{ role: 'user', content: transcriptText }],
     temperature: advisor.temperature ?? 0.3,
     max_tokens: advisor.maxTokens ?? 16384,
+    ...anthropicThinkingParams(advisor),
     stream: true,
   }
   if (tools && tools.length > 0) {
@@ -397,6 +612,7 @@ async function callOpenAICompatible(
       ],
       temperature: advisor.temperature ?? 0.3,
       max_tokens: advisor.maxTokens ?? 16384,
+      ...openAiThinkingParams(advisor),
       stream: false,
     }),
     signal: withTimeout(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal),
@@ -442,6 +658,7 @@ async function callAnthropic(
       messages: [{ role: 'user', content: transcriptText }],
       temperature: advisor.temperature ?? 0.3,
       max_tokens: advisor.maxTokens ?? 16384,
+      ...anthropicThinkingParams(advisor),
     }),
     signal: withTimeout(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal),
   })
@@ -476,6 +693,7 @@ async function callGemini(
       generationConfig: {
         temperature: advisor.temperature ?? 0.3,
         maxOutputTokens: advisor.maxTokens ?? 16384,
+        ...geminiThinkingParams(advisor),
       },
     }),
     signal: withTimeout(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal),

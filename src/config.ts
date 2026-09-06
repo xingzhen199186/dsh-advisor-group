@@ -19,6 +19,22 @@ export interface AdvisorConfig {
   protocol?: ProviderProtocol
   authMode?: ProviderAuthMode
   /**
+   * Per-advisor thinking mode; unset = provider default. `disabled` forces
+   * every request from this advisor to run without a thinking/reasoning block
+   * (mapped to `reasoningEffort: 'off'` on the DSH built-in channel; on the
+   * direct-http channel it maps to provider-specific "no thinking" params
+   * where supported). When `enabled`, the selected `reasoningEffort` applies.
+   */
+  thinking?: 'enabled' | 'disabled'
+  /**
+   * Per-advisor thinking strength; unset = provider/model default. Standard
+   * DSH effort ids (`off` disables thinking per request). On the direct-http
+   * channel the ids are mapped to provider-specific reasoning parameters
+   * (OpenAI `reasoning_effort`, Anthropic thinking budget, Gemini
+   * `thinkingConfig`).
+   */
+  reasoningEffort?: 'off' | 'low' | 'high' | 'max'
+  /**
    * Per-advisor tool calling scope override; unset = the global default
    * (`discussion.advisorTools`). Only meaningful on the direct-http channel.
    */
@@ -144,6 +160,16 @@ const AdvisorConfig: Schema<AdvisorConfig> = Schema.object({
   apiKeyEnv: Schema.string().description('Optional env var name for direct-http fallback.'),
   protocol: ProviderProtocol,
   authMode: ProviderAuthMode.description('Anthropic auth header style: x-api-key or bearer.'),
+  thinking: Schema.union([
+    Schema.const('enabled'),
+    Schema.const('disabled'),
+  ]).description('Per-advisor thinking mode; unset = provider default. disabled forces no thinking block (DSH built-in channel maps it to reasoningEffort off).'),
+  reasoningEffort: Schema.union([
+    Schema.const('off'),
+    Schema.const('low'),
+    Schema.const('high'),
+    Schema.const('max'),
+  ]).description('Per-advisor thinking strength; unset = provider/model default. Standard DSH effort ids; off disables thinking per request.'),
   tools: Schema.union([
     Schema.const('readonly'),
     Schema.const('all'),

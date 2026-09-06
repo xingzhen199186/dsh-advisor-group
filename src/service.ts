@@ -12,7 +12,7 @@ import { advisorJoinPrompt, ADVISOR_TOOL_GUIDANCE } from './providers/advisor-pr
 import { generateConclusion, generateDeepenQuestion, resolveDriverSource } from './driver'
 import { appendAdvisorDelta, appendAdvisorEnd, appendAdvisorMessage, appendAdvisorResume } from './session-log'
 import { publish } from './stream-channel'
-import { executeAdvisorTool, resolveAdvisorToolSchemas, runAdvisorToolLoop, type AdvisorAgent, type AdvisorToolStepEvent } from './advisor-tools'
+import { executeAdvisorTool, resolveAdvisorToolSchemas, runAdvisorToolLoop, sanitizeAdvisorContent, type AdvisorAgent, type AdvisorToolStepEvent } from './advisor-tools'
 import type { ChatMessage, ConsultSession, ConsultSummary, AdvisorSummary, TruncationInfo, PersistedSession, AdvisorToolStep } from './types'
 import './events'
 
@@ -177,8 +177,11 @@ export class AdvisorGroupService {
             advisorName: message.advisorName,
             content: message.content,
             thinking: message.thinking,
+            thinkingSegments: message.thinkingSegments,
+            actionDescriptions: message.actionDescriptions,
             round: message.round,
             truncated: message.truncated,
+            toolSteps: message.toolSteps,
             ts: message.ts,
           })),
           cwd: raw.cwd,
@@ -217,8 +220,11 @@ export class AdvisorGroupService {
         ...(message.advisorName === undefined ? {} : { advisorName: message.advisorName }),
         content: message.content,
         ...(message.thinking === undefined ? {} : { thinking: message.thinking }),
+        ...(message.thinkingSegments === undefined ? {} : { thinkingSegments: message.thinkingSegments }),
+        ...(message.actionDescriptions === undefined ? {} : { actionDescriptions: message.actionDescriptions }),
         ...(message.round === undefined ? {} : { round: message.round }),
         ...(message.truncated === undefined ? {} : { truncated: message.truncated }),
+        ...(message.toolSteps === undefined ? {} : { toolSteps: message.toolSteps }),
         ts: message.ts,
       })),
     }
@@ -247,6 +253,11 @@ export class AdvisorGroupService {
           error instanceof Error ? error.message : String(error),
         )
       })
+  }
+
+  /** Wait for queued durable writes before a host or test tears down storage. */
+  async flushPersistence(): Promise<void> {
+    await Promise.all([this.dailyWriteChain, this.sessionWriteChain])
   }
 
   /** Structural view of the DSH in-memory session store (may be absent). */
@@ -964,19 +975,24 @@ export class AdvisorGroupService {
         pendingText = ''
         pendingThinking = ''
       }
-      const emitDelta = (delta: { text?: string; thinking?: string }) => {
+      const emitDelta = (
+        delta: { text?: string; thinking?: string },
+        phase: 'tool' | 'answer' = 'answer',
+      ) => {
         if (delta.text) {
           message.content += delta.text
           pendingText += delta.text
         }
         if (delta.thinking) {
           message.thinking = (message.thinking ?? '') + delta.thinking
+          thinkingBuffer += delta.thinking
           pendingThinking += delta.thinking
         }
         publish(session.id, {
           advisorId: advisor.id,
           advisorName: advisor.name,
           round,
+          phase,
           contentDelta: delta.text,
           thinkingDelta: delta.thinking,
           done: false,
@@ -988,6 +1004,12 @@ export class AdvisorGroupService {
       // may silently stream nothing for an unknown provider instead of throwing.
       const advisorTimeoutMs = this.config.discussion.advisorTimeoutMs
       let truncated: TruncationInfo | undefined
+      // Thinking split at each tool-call boundary (one row per segment).
+      const thinkingSegments: string[] = []
+      let thinkingBuffer = ''
+      // Model TEXT blocks spoken before each tool round — the precise source of
+      // the card's 📋 行动·N rows (DSH block order: text → reasoning → tool-call).
+      const actionDescriptions: string[] = []
       if (!isDshLlmProvider || advisor.baseURL || advisor.apiKey || advisor.apiKeyEnv) {
         // Advisor tool calling (2026-09-05): when the direct-http OpenAI/Anthropic
         // channel is in use and the configured scope resolves session-visible
@@ -1005,8 +1027,25 @@ export class AdvisorGroupService {
           // Own row stream: call/result steps are appended to the message in
           // order and published + durably logged immediately (no 200ms batch).
           const messageToolSteps: AdvisorToolStep[] = []
+          // Round narration (the model's pre-tool "正文/行动描述", streamed as
+          // text before the tool calls) is kept for the first tool step of each
+          // round so the card can render 📋 行动·N right after the 💭 思考·N panel
+          // (mirrors DSH: text block → reasoning row → tool row).
+          let narrationBuffer = ''
           const emitToolStep = (step: AdvisorToolStepEvent) => {
             const full: AdvisorToolStep = { ...step, atMs: Date.now() }
+            // Commit the thinking accumulated up to this tool boundary so the
+            // card can render one 思考行 per step (interleaved with 工具行).
+            const parts: string[] = []
+            if (narrationBuffer.trim()) {
+              parts.push(narrationBuffer.trim())
+              narrationBuffer = ''
+            }
+            if (thinkingBuffer.trim()) parts.push(thinkingBuffer)
+            if (parts.length > 0) {
+              thinkingSegments.push(parts.join('\n\n'))
+              thinkingBuffer = ''
+            }
             messageToolSteps.push(full)
             if (sessionLog) {
               appendAdvisorDelta(sessionLog, session.id, {
@@ -1024,17 +1063,35 @@ export class AdvisorGroupService {
               toolStep: full,
             })
           }
-          emitToolStep({ kind: 'call', name: '⚙️ tools', text: `本次可用：${toolSchemas.map((t) => t.name).join('、')}` })
+          // NOTE: the internal「本次可用工具」announcement is intentionally NOT
+          // emitted — it is server-side bookkeeping that must not reach the user.
           const streamOnce = (tools: typeof toolSchemas, extra: string) => {
             const withExtra = extra.trim()
               ? [...transcript, { role: 'main' as const, name: '已执行工具', content: extra.trim() }]
               : transcript
-            return streamDirectHttp(relational, withExtra, emitDelta, signal, advisorTimeoutMs, tools).then((result) => ({
-              content: result.content,
-              thinking: result.thinking,
-              toolCalls: result.toolCalls ?? [],
-              truncated: result.truncated,
-            }))
+            // Text tool-call restore must ALWAYS see the full advisor tool set:
+            // the final forced round sends `tools=[]` but still parses the model's
+            // DSML/text echoes (whitelist = the advisor's tools, request = empty).
+            const parseNames = toolSchemas.map((tool) => tool.name)
+            // Live text routing mirrors the official block order: text streamed
+            // while tools are on the table is the round's action announcement
+            // (📋 行动), text streamed with `tools=[]` is the answer (📄 正文).
+            const emitRoundDelta = (delta: { text?: string; thinking?: string }) =>
+              emitDelta(delta, tools.length > 0 ? 'tool' : 'answer')
+            return streamDirectHttp(relational, withExtra, emitRoundDelta, signal, advisorTimeoutMs, tools, parseNames).then((result) => {
+              // Keep this round's pre-tool narration for the next 思考·N segment.
+              narrationBuffer = result.content.trim()
+              // Model TEXT block before a TOOL round = the action announcement
+              // (final no-tools rounds send `tools=[]` and are the answer, not
+              // an announcement).
+              if (tools.length > 0 && narrationBuffer) actionDescriptions.push(narrationBuffer)
+              return {
+                content: result.content,
+                thinking: result.thinking,
+                toolCalls: result.toolCalls ?? [],
+                truncated: result.truncated,
+              }
+            })
           }
           const loop = await runAdvisorToolLoop(
             toolSchemas,
@@ -1059,8 +1116,13 @@ export class AdvisorGroupService {
         content = result.content
         truncated = result.truncated
       }
-      message.content = content
+      message.content = sanitizeAdvisorContent(content)
       if (truncated) message.truncated = truncated
+      // Trailing thinking (after the last tool call / no-tool path) becomes the
+      // final segment; the card falls back to one thinking row when empty.
+      if (thinkingBuffer.trim()) thinkingSegments.push(thinkingBuffer)
+      if (thinkingSegments.length > 0) message.thinkingSegments = thinkingSegments
+      if (actionDescriptions.length > 0) message.actionDescriptions = actionDescriptions
     } catch (error) {
       if (isAbortError(error, signal)) throw error
       message.content = `（顾问调用失败：${error instanceof Error ? error.message : String(error)}）`
@@ -1092,7 +1154,11 @@ export class AdvisorGroupService {
     const advisors: AdvisorSummary[] = [...byAdvisor.entries()].map(([id, messages]) => {
       const advisor = session.advisors.find((item) => item.id === id)
       const meaningful = messages.filter(
-        (message) => message.content && message.content.trim() && !message.content.startsWith('（顾问调用失败'),
+        (message) =>
+          message.content &&
+          message.content.trim() &&
+          !message.content.startsWith('（顾问调用失败') &&
+          !message.content.startsWith('（顾问未生成正文'),
       )
       const last = meaningful[meaningful.length - 1] ?? messages[messages.length - 1]
       return {

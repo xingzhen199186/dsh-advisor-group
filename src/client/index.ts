@@ -54,6 +54,28 @@ function authHeaders(): Record<string, string> {
   return token ? { 'x-advisor-group-token': token } : {}
 }
 
+/**
+ * Browser-side twin of `sanitizeAdvisorContent` (host module cannot be
+ * imported by the client bundle). The SSE live overlay streams the RAW model
+ * output, whose length usually EXCEEDS the sanitized durable message — so the
+ * merge below must sanitize whichever content it picks or the raw tool-call
+ * markup would keep rendering until the overlay is gone.
+ */
+const CLIENT_RAW_TOOL_CALL_BLOCK = /<(?:[｜|]{1,2})?(?:tool_calls|DSML)[\s\S]*?<\/(?:[｜|]{1,2})?(?:tool_calls|DSML)\s*>/g
+const CLIENT_RAW_TOOL_CALL_TAIL =
+  /<(?:[｜|]{1,2})?(?:tool_calls|DSML)[\s\S]{0,60}?(?:<invoke|<parameter|<[｜|]{1,2}DSML)[\s\S]*$/g
+const CLIENT_EMPTY_BODY_NOTICE =
+  '（顾问未生成正文：输出仅为工具调用描述，请参考其思维链与工具调用记录。）'
+
+export function sanitizeClientContent(content: string): string {
+  if (!content.trim()) return content
+  const cleaned = content
+    .replace(CLIENT_RAW_TOOL_CALL_BLOCK, '')
+    .replace(CLIENT_RAW_TOOL_CALL_TAIL, '')
+    .trim()
+  return cleaned || CLIENT_EMPTY_BODY_NOTICE
+}
+
 export interface AdvisorGroupState {
   readonly sessionId: string
   readonly turn: number
@@ -324,14 +346,6 @@ const headerStyle: CSSProperties = {
   fontSize: 11,
 }
 
-const questionStyle: CSSProperties = {
-  color: '#d9f99d',
-  fontWeight: 700,
-  whiteSpace: 'pre-wrap',
-  wordBreak: 'break-word',
-  marginBottom: 6,
-}
-
 const advisorsLineStyle: CSSProperties = {
   fontSize: 11,
   color: '#4ade80',
@@ -374,174 +388,437 @@ const waitingStyle: CSSProperties = {
 
 
 
-function MessageBubble({ message }: { message: AdvisorGroupMessageData }): ReactNode {
-  const [thinkingCollapsed, setThinkingCollapsed] = useState(false)
-  const thinkingPanelRef = useRef<{ scrollTop: number; scrollHeight: number } | null>(null)
+/** One tool invocation shown as a single ⛭ row (输入/输出 sections). */
+export interface ToolStepView {
+  name: string
+  /** Call arguments preview (the `call` step). */
+  input?: string
+  /** Result preview (the following `result` step). */
+  output?: string
+  /** True when the result was an execution failure (e.g. unconfigured tool). */
+  failed?: boolean
+  atMs?: number
+}
 
-  useEffect(() => {
-    if (!thinkingCollapsed && thinkingPanelRef.current) {
-      thinkingPanelRef.current.scrollTop = thinkingPanelRef.current.scrollHeight
+/** Internal announcements that must never reach the user (the tool list). */
+const INTERNAL_TOOL_STEP_NAMES = new Set(['⚙️ tools', '⚙ tools'])
+
+/** True when the tool result represents a failure — the wrapper prefix, or a
+ *  JSON payload carrying `error`/`detail`/HTTP error code (unconfigured/401
+ *  tools), robust to nested objects before the error key. */
+function isFailedToolResult(text: string): boolean {
+  if (text.startsWith('（工具执行失败')) return true
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; detail?: unknown; code?: number } | null
+    if (parsed && (parsed.error !== undefined || parsed.detail !== undefined)) return true
+    if (parsed && typeof parsed.code === 'number' && parsed.code >= 400 && parsed.code <= 599) return true
+  } catch {
+    // Not JSON — only the wrapper prefix above counts.
+  }
+  return false
+}
+
+/**
+ * Pair call/result tool steps into one `ToolStepView` per invocation, in
+ * stream order, and drop internal announcements (「本次可用」).
+ */
+export function buildToolStepViews(
+  steps: ReadonlyArray<{ kind: string; name: string; text: string; atMs: number }> | undefined,
+): ToolStepView[] {
+  const out: ToolStepView[] = []
+  let last: ToolStepView | undefined
+  for (const step of steps ?? []) {
+    if (INTERNAL_TOOL_STEP_NAMES.has(step.name)) continue
+    if (step.kind === 'call') {
+      last = { name: step.name, input: step.text, atMs: step.atMs }
+      out.push(last)
+    } else if (step.kind === 'result') {
+      if (last && last.output === undefined && last.input !== undefined) {
+        last.output = step.text
+        if (isFailedToolResult(step.text)) last.failed = true
+      } else {
+        out.push({
+          name: step.name,
+          output: step.text,
+          atMs: step.atMs,
+          ...(isFailedToolResult(step.text) ? { failed: true } : {}),
+        })
+      }
     }
-  }, [message.thinking, thinkingCollapsed])
+  }
+  return out.filter((view) => view.input !== undefined || view.output !== undefined)
+}
 
+const stepRowShellStyle: CSSProperties = {
+  border: '1px solid rgba(34,197,94,0.28)',
+  borderRadius: 3,
+  margin: '5px 0',
+  background: 'rgba(34,197,94,0.05)',
+  overflow: 'hidden',
+}
+
+const stepRowHeaderStyle = (color: string): CSSProperties => ({
+  width: '100%',
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  cursor: 'pointer',
+  background: 'transparent',
+  border: 'none',
+  color,
+  fontSize: 12,
+  textAlign: 'left',
+  padding: '4px 8px',
+})
+
+const stepRowBodyStyle: CSSProperties = {
+  borderTop: '1px dashed rgba(47,158,68,0.45)',
+  padding: '5px 8px',
+}
+
+function StepRow({
+  title,
+  badges,
+  defaultOpen,
+  color = '#4ade80',
+  body,
+}: {
+  title: string
+  badges?: ReactNode[]
+  defaultOpen: boolean
+  color?: string
+  body: ReactNode
+}): ReactNode {
+  const [open, setOpen] = useState(defaultOpen)
+  return createElement(
+    'div',
+    { style: stepRowShellStyle },
+    createElement(
+      'button',
+      {
+        type: 'button',
+        onClick: () => setOpen((value) => !value),
+        style: stepRowHeaderStyle(color),
+      },
+      createElement('span', null, open ? '▾' : '▸'),
+      createElement('span', { style: { fontWeight: 700 } }, title),
+      ...(badges ?? []),
+    ),
+    open ? createElement('div', { style: stepRowBodyStyle }, body) : null,
+  )
+}
+
+/**
+ * Inline thinking annotation: an UNFRAMED block that sits directly above the
+ * tool row it led to (each step reads: 💭 思考文本 → ⛭ 工具), with the full
+ * segment visible (scrollable) — not a separate bordered card.
+ */
+const thinkingInlineStyle: CSSProperties = {
+  margin: '4px 0 2px',
+  padding: '4px 8px',
+  borderLeft: '2px solid rgba(251,191,36,0.45)',
+  background: 'rgba(217,119,6,0.04)',
+}
+
+const thinkingTagStyle: CSSProperties = {
+  color: '#fbbf24',
+  fontSize: 11,
+  marginBottom: 2,
+  fontWeight: 700,
+}
+
+const descriptionBodyStyle: CSSProperties = {
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  color: '#d9f99d',
+  fontSize: 12,
+  padding: '2px 6px 4px',
+}
+
+/**
+ * Short "next-action narrative" of a thinking segment — the visible 📋 行动·N
+ * block shown directly after the 💭 思考·N panel and before the ⛭ tool row.
+ * Standard-agent style: pick the FIRST SHORT sentence that says what the model
+ * is about to do (action markers like 我先/接下来/我需要…), else the first
+ * non-generic short sentence; hard-cap at ~140 chars. The long internal
+ * monologue stays in the thinking panel.
+ */
+export function extractActionDescription(segment: string): string {
+  const text = segment.trim()
+  if (!text) return ''
+  const sentences = (text.match(/[^。！？!?]+[。！？!?]?/g) ?? [])
+    .map((sentence) => sentence.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+  const cut = (value: string, max: number): string => (value.length > max ? `${value.slice(0, max)}…` : value)
+  const ACTION = /(我先|接下来|下一步|下面|准备|打算|我需要|先做|先看|先检查|先核对|先核实|先验证|先确认|先读|先搜索|先检索|先找|计划|步骤|让我先|我会|需要先|先补|先抓|先取|先查|先分析|先整理|先修改|先跟踪)/
+  const GENERIC = /^(让我|我明白|好的|嗯|OK|Okay|我是|我是一位|我的角色|Let me|Sure|The user|用户)/
+  // 1) First short sentence that states a planned action.
+  for (const sentence of sentences.slice(0, 5)) {
+    if (sentence.length <= 160 && ACTION.test(sentence)) return cut(sentence, 140)
+  }
+  // 2) First short non-generic sentence (no rambling intro).
+  for (const sentence of sentences.slice(0, 3)) {
+    if (sentence.length <= 120 && !GENERIC.test(sentence)) return cut(sentence, 120)
+  }
+  // 3) Fallback: the first sentence, hard-capped.
+  return cut(sentences[0] ?? text, 100)
+}
+
+const thinkingBodyStyle: CSSProperties = {
+  maxHeight: 200,
+  overflowY: 'auto',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  color: '#fde68a',
+  fontSize: 12,
+  padding: '4px 6px',
+}
+
+const toolBodyStyle: CSSProperties = {
+  fontSize: 12,
+  color: '#38bdf8',
+}
+
+const toolIoTitleStyle: CSSProperties = {
+  color: '#86efac',
+  fontWeight: 700,
+  margin: '2px 0 2px',
+}
+
+const toolIoBodyStyle: CSSProperties = {
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  color: 'var(--dsh-color-muted, #8b90a0)',
+  marginBottom: 6,
+}
+
+const badgeStyle = (color: string): CSSProperties => ({
+  color,
+  fontSize: 11,
+  opacity: 0.95,
+})
+
+/** One interleaved step row for the card: 行动N → 思考N → ⛭ 工具N → … → 📄 正文. */
+export type StepSeqItem =
+  | { kind: 'action'; text: string; step: number }
+  | { kind: 'thinking'; segment: string; step: number }
+  | { kind: 'tool'; view: ToolStepView }
+  | { kind: 'body' }
+
+/**
+ * Interleave action announcements, thinking segments and tool views in the
+ * official DSH block order (text → reasoning → tool-call), then the body.
+ * Each round contributes at most one 行动 / 思考 / 工具 item; missing actions
+ * are derived from the thinking segment so pre-actionDescriptions logs still
+ * render sensibly.
+ */
+export function buildStepSequence(
+  actionDescriptions: readonly string[],
+  thinkingSegments: readonly string[],
+  toolViews: ToolStepView[],
+): StepSeqItem[] {
+  const items: StepSeqItem[] = []
+  const count = Math.max(actionDescriptions.length, thinkingSegments.length, toolViews.length)
+  for (let index = 0; index < count; index += 1) {
+    const step = index + 1
+    const described = actionDescriptions[index]?.trim()
+    const segment = thinkingSegments[index]
+    const action =
+      described ||
+      (segment !== undefined && segment.trim() ? extractActionDescription(segment) : '')
+    if (action) items.push({ kind: 'action', text: action, step })
+    if (segment !== undefined && segment.trim()) items.push({ kind: 'thinking', segment, step })
+    const view = toolViews[index]
+    if (view !== undefined) items.push({ kind: 'tool', view })
+  }
+  items.push({ kind: 'body' })
+  return items
+}
+
+/**
+ * Render one consultation message as a stack of STEP rows (one row per step,
+ * appearing in stream order, each independently expandable):
+ *   💭 思考·1 → ⛭ 工具×1（输入/输出）→ 💭 思考·2 → ⛭ 工具×2 → … → 📄 正文
+ * Main/system messages stay a single collapsible row.
+ */
+function AdvisorSteps({ message }: { message: AdvisorGroupMessageData }): ReactNode {
   const isMain = message.role === 'main'
   const isSystem = message.role === 'system'
-  const justify = isMain ? 'flex-end' : 'flex-start'
-  const background = isSystem
-    ? 'rgba(217,119,6,0.08)'
-    : isMain
-      ? 'rgba(34,197,94,0.14)'
-      : 'rgba(34,197,94,0.06)'
-  const borderColor = isSystem ? '#b45309' : '#16a34a'
   const label = isMain
     ? 'YOU'
     : isSystem
       ? 'SYSTEM'
       : (message.advisorName ?? message.advisorId ?? 'ADVISOR')
-  const hasThinking = Boolean(message.thinking && message.thinking.length > 0)
+  const group = isMain ? 'YOU' : isSystem ? 'SYSTEM' : `${label} · R${message.round ?? 1}`
+  const truncated = message.truncated
+  const toolViews = buildToolStepViews(message.toolSteps)
+  const thinkingSegments =
+    message.thinkingSegments && message.thinkingSegments.length > 0
+      ? message.thinkingSegments
+      : message.thinking
+        ? [message.thinking]
+        : []
+  const baseColor = isSystem ? '#fcd34d' : '#4ade80'
 
-  return createElement(
-    'div',
-    { style: { display: 'flex', justifyContent: justify, margin: '4px 0' } },
-    createElement(
-      'div',
-      {
-        style: {
-          maxWidth: '92%',
-          padding: '4px 8px',
-          border: `1px solid ${borderColor}`,
-          borderRadius: 3,
-          background,
-        },
-      },
-      createElement(
+  if (isMain || isSystem) {
+    return createElement(StepRow, {
+      title: group,
+      defaultOpen: isMain,
+      color: baseColor,
+      body: createElement(
         'div',
-        {
-          style: {
-            fontSize: 11,
-            color: isSystem ? '#fcd34d' : '#4ade80',
-            marginBottom: 2,
-          },
-        },
-        `${label}${message.round ? ` · R${message.round}` : ''}`,
+        { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } },
+        message.content,
       ),
-      hasThinking
-        ? createElement(
-            'div',
-            {
-              style: {
-                border: '1px dashed #a16207',
-                borderRadius: 3,
-                marginBottom: 4,
-                background: 'rgba(217,119,6,0.06)',
-              },
-            },
+    })
+  }
+
+  const sequence = buildStepSequence(
+    message.actionDescriptions ?? [],
+    thinkingSegments,
+    toolViews,
+  )
+  const live = message as { liveBody?: string; livePhase?: 'tool' | 'answer' }
+  const liveToolPhase = live.livePhase === 'tool'
+  const liveAction = liveToolPhase && live.liveBody?.trim()
+    ? live.liveBody.trim()
+    : undefined
+  const children: ReactNode[] = []
+  for (const [index, item] of sequence.entries()) {
+    if (item.kind === 'action') {
+      // 📋 行动·N: the model's full TEXT block for this round, shown BEFORE
+      // the thinking panel — official DSH order is text → reasoning → tool.
+      children.push(
+        createElement(
+          'div',
+          { key: `action-${index}`, style: thinkingInlineStyle },
+          createElement('div', { style: thinkingTagStyle }, `${group} 📋 行动·${item.step}`),
+          createElement('div', { style: descriptionBodyStyle }, item.text),
+        ),
+      )
+      continue
+    }
+    if (item.kind === 'thinking') {
+      // 💭 思考·N: full reasoning segment (collapsible), after the action row.
+      children.push(
+        createElement(StepRow, {
+          key: `think-${index}`,
+          title: `${group} 💭 思考·${item.step}`,
+          badges: [
             createElement(
-              'button',
-              {
-                type: 'button',
-                onClick: () => setThinkingCollapsed((value) => !value),
-                style: {
-                  width: '100%',
-                  cursor: 'pointer',
-                  background: 'transparent',
-                  border: 'none',
-                  color: '#fbbf24',
-                  fontSize: 11,
-                  textAlign: 'left',
-                  padding: '3px 6px',
-                },
-              },
-              `💭 ${thinkingCollapsed ? '已思考（点击展开）' : '思维链（点击收起）'} ${thinkingCollapsed ? '▸' : '▾'}`,
+              'span',
+              { style: badgeStyle('#fbbf24') },
+              `${item.segment.length} 字符`,
             ),
-            !thinkingCollapsed
+          ],
+          defaultOpen: false,
+          color: '#fbbf24',
+          body: createElement('div', { style: thinkingBodyStyle }, item.segment),
+        }),
+      )
+      continue
+    }
+    if (item.kind === 'tool') {
+      const view = item.view
+      children.push(
+        createElement(StepRow, {
+          key: `tool-${index}`,
+          title: `${group} ⛭ ${view.name}`,
+          badges: [
+            createElement(
+              'span',
+              { style: badgeStyle(view.failed ? '#f87171' : '#38bdf8') },
+              view.output === undefined ? '调用中…' : view.failed ? '⚠ 失败' : '调用完成',
+            ),
+          ],
+          defaultOpen: false,
+          color: view.failed ? '#f87171' : '#38bdf8',
+          body: createElement(
+            'div',
+            null,
+            view.input !== undefined
               ? createElement(
                   'div',
-                  {
-                    ref: (el: unknown) => {
-                      thinkingPanelRef.current = el as {
-                        scrollTop: number
-                        scrollHeight: number
-                      } | null
-                    },
-                    style: {
-                      maxHeight: 160,
-                      overflowY: 'auto',
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      padding: '4px 6px',
-                      color: '#fde68a',
-                      fontSize: 12,
-                      borderTop: '1px dashed #a16207',
-                    },
-                  },
-                  message.thinking,
+                  { style: toolBodyStyle },
+                  createElement('div', { style: toolIoTitleStyle }, '输入'),
+                  createElement('div', { style: toolIoBodyStyle }, view.input),
                 )
               : null,
-          )
-        : null,
-      (message.toolSteps ?? []).length > 0 && !isMain && !isSystem
-        ? createElement(
-            'div',
-            {
-              style: {
-                borderLeft: '2px solid rgba(56,189,248,0.4)',
-                padding: '2px 6px',
-                margin: '2px 0 4px',
-                fontSize: 12,
-              },
-            },
-            (message.toolSteps ?? []).map((step, index) =>
+            view.output !== undefined
+              ? createElement(
+                  'div',
+                  { style: toolBodyStyle },
+                  createElement('div', { style: toolIoTitleStyle }, '输出'),
+                  createElement('div', { style: toolIoBodyStyle }, view.output),
+                )
+              : null,
+          ),
+        }),
+      )
+      continue
+    }
+    // Body: skip while a live tool round is in progress — the current round's
+    // text is either already committed as a 📋 行动 row or streaming as the
+    // pending action row below. 📄 正文 only renders in the answer phase or
+    // after the message is finalized.
+    if (liveToolPhase) continue
+    children.push(
+      createElement(StepRow, {
+        key: `body-${index}`,
+        title: `${group} 📄 正文`,
+        badges: truncated
+          ? [
               createElement(
+                'span',
+                { style: badgeStyle('#f87171') },
+                truncated.reason === 'timeout' ? '⏱ 响应超时截断' : '⚠ 流中断',
+              ),
+            ]
+          : [],
+        defaultOpen: true,
+        color: '#4ade80',
+        body: createElement(
+          'div',
+          { style: { wordBreak: 'break-word' } },
+          truncated
+            ? createElement(
                 'div',
                 {
-                  key: index,
                   style: {
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    marginBottom: 1,
-                    color: step.kind === 'call' ? '#38bdf8' : 'var(--dsh-color-muted, #8b90a0)',
+                    fontSize: 11,
+                    color: '#f87171',
+                    border: '1px solid #dc2626',
+                    borderRadius: 3,
+                    padding: '2px 6px',
+                    display: 'inline-block',
+                    marginBottom: 3,
                   },
                 },
-                step.kind === 'call'
-                  ? `⛭ ${step.name} · ${step.text}`
-                  : `↳ ${step.text}`,
-              ),
-            ),
-          )
-        : null,
-      isMain || isSystem
-        ? createElement(
-            'div',
-            { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } },
-            message.content,
-          )
-        : createElement(
-            'div',
-            { style: { wordBreak: 'break-word' } },
-            message.truncated
-              ? createElement(
-                  'div',
-                  {
-                    style: {
-                      fontSize: 11,
-                      color: '#f87171',
-                      border: '1px solid #dc2626',
-                      borderRadius: 3,
-                      padding: '2px 6px',
-                      display: 'inline-block',
-                      marginBottom: 3,
-                    },
-                  },
-                  message.truncated.reason === 'timeout'
-                    ? '⏱ 响应超时截断 — 思考已收到，正文未完成'
-                    : '⚠ 流中断 — 正文可能不完整',
-                )
-              : null,
-            renderMarkdown(message.content),
-          ),
-    ),
-  )
+                truncated.reason === 'timeout'
+                  ? '⏱ 响应超时截断 — 思考已收到，正文未完成'
+                  : '⚠ 流中断 — 正文可能不完整',
+              )
+            : null,
+          renderMarkdown(message.content),
+        ),
+      }),
+    )
+  }
+  if (liveAction !== undefined) {
+    children.push(
+      createElement(
+        'div',
+        { key: 'live-action', style: thinkingInlineStyle },
+        createElement(
+          'div',
+          { style: thinkingTagStyle },
+          `${group} 📋 行动·${toolViews.length + 1}`,
+        ),
+        createElement('div', { style: descriptionBodyStyle }, liveAction),
+      ),
+    )
+  }
+  return createElement('div', null, children)
 }
 
 function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactNode {
@@ -551,7 +828,25 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
   // leak a later round's deltas into an earlier round's bubble (see the
   // sequential auto-deepen pipeline). Durable messages stay the base of truth.
   const [live, setLive] = useState<
-    Record<string, { content: string; thinking: string; toolSteps: Array<{ kind: string; name: string; text: string; atMs?: number }> }>
+    Record<
+      string,
+      {
+        content: string
+        thinking: string
+        thinkingSegments: string[]
+        committedLen: number
+        /** Text committed at each tool boundary — the per-round 📋 行动 rows. */
+        contentSegments: string[]
+        committedContentLen: number
+        /** Latest stream phase: 'tool' = current text is a round announcement,
+         *  'answer' = current text is the final answer body. */
+        phase: 'tool' | 'answer'
+        /** Set when the `done` frame arrives; from then on the durable message
+         *  (final answer + actionDescriptions + toolSteps) is authoritative. */
+        finalized: boolean
+        toolSteps: Array<{ kind: string; name: string; text: string; atMs?: number }>
+      }
+    >
   >({})
   const [contextCollapsed, setContextCollapsed] = useState(true)
   const lastEventIdRef = useRef(0)
@@ -572,7 +867,9 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
           round?: number
           contentDelta?: string
           thinkingDelta?: string
+          phase?: 'tool' | 'answer'
           toolStep?: { kind: string; name: string; text: string; atMs?: number }
+          done?: boolean
           eventId?: number
           bootId?: string
         }
@@ -590,12 +887,44 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
         if (eventId > 0) lastEventIdRef.current = eventId
         const bucket = `${delta.advisorId}::${delta.round ?? 1}`
         setLive((prev) => {
-          const current = prev[bucket] ?? { content: '', thinking: '', toolSteps: [] }
+          const current = prev[bucket] ?? {
+            content: '',
+            thinking: '',
+            thinkingSegments: [],
+            committedLen: 0,
+            contentSegments: [],
+            committedContentLen: 0,
+            phase: 'answer',
+            finalized: false,
+            toolSteps: [],
+          }
+          let thinkingSegments = current.thinkingSegments
+          let committedLen = current.committedLen
+          let contentSegments = current.contentSegments
+          let committedContentLen = current.committedContentLen
+          if (delta.toolStep) {
+            // Commit the thinking accumulated up to this tool boundary as its
+            // own 思考·N row (stream order, interleaved with the tool row).
+            const segment = current.thinking.slice(committedLen)
+            if (segment.trim()) thinkingSegments = [...current.thinkingSegments, segment]
+            committedLen = current.thinking.length
+            // Commit the text accumulated up to this tool boundary as the
+            // round's 📋 行动 row (official order: text → reasoning → tool).
+            const contentSegment = current.content.slice(committedContentLen)
+            if (contentSegment.trim()) contentSegments = [...current.contentSegments, contentSegment]
+            committedContentLen = current.content.length
+          }
           return {
             ...prev,
             [bucket]: {
               content: current.content + (delta.contentDelta ?? ''),
               thinking: current.thinking + (delta.thinkingDelta ?? ''),
+              thinkingSegments,
+              committedLen,
+              contentSegments,
+              committedContentLen,
+              phase: delta.phase ?? current.phase,
+              finalized: current.finalized || delta.done === true,
               toolSteps: delta.toolStep ? [...current.toolSteps, delta.toolStep] : current.toolSteps,
             },
           }
@@ -619,13 +948,14 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
     const advisorId = message.advisorId ?? ''
     const streamed = live[`${advisorId}::${message.round ?? 1}`]
     if (!streamed) return message
-    // Durable log content is the base of truth. Prefer the SSE live buffer only
-    // when it is actually ahead; otherwise a late/reconnected EventSource would
-    // overwrite a complete durable message with a truncated live one.
-    const content =
-      (streamed.content?.length ?? 0) > (message.content?.length ?? 0)
-        ? streamed.content
-        : message.content
+    // Once the server published `done`, the durable message event is the full
+    // final answer (content + actionDescriptions + thinkingSegments + toolSteps)
+    // and the cumulative SSE buffer must NOT override it.
+    if (streamed.finalized) return message
+    // Body: only the current round's uncommitted text. Text committed at tool
+    // boundaries is rendered as 📋 行动 rows (official text → reasoning → tool).
+    const liveBody = sanitizeClientContent(streamed.content.slice(streamed.committedContentLen))
+    const content = liveBody.trim() ? liveBody : sanitizeClientContent(message.content)
     const thinking =
       (streamed.thinking?.length ?? 0) > (message.thinking?.length ?? 0)
         ? streamed.thinking
@@ -634,7 +964,27 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
       (streamed.toolSteps?.length ?? 0) > (message.toolSteps?.length ?? 0)
         ? streamed.toolSteps
         : message.toolSteps ?? []
-    return { ...message, content, thinking, toolSteps } as typeof message
+    const liveSegments = streamed.thinkingSegments?.length ? streamed.thinkingSegments : []
+    const baseSegments = message.thinkingSegments?.length
+      ? message.thinkingSegments
+      : message.thinking
+        ? [message.thinking]
+        : []
+    const thinkingSegments = liveSegments.length ? liveSegments : baseSegments
+    const liveActions = streamed.contentSegments?.length
+      ? streamed.contentSegments.map((segment) => sanitizeClientContent(segment))
+      : []
+    const baseActions = message.actionDescriptions?.length ? message.actionDescriptions : []
+    const actionDescriptions = liveActions.length ? liveActions : baseActions
+    return {
+      ...message,
+      content,
+      thinking,
+      thinkingSegments,
+      toolSteps,
+      actionDescriptions,
+      ...(streamed.phase === 'tool' ? { liveBody, livePhase: streamed.phase } : {}),
+    } as typeof message & { liveBody?: string; livePhase?: 'tool' | 'answer' }
   })
 
   const shortId = data.sessionId.length > 8 ? data.sessionId.slice(0, 8) : data.sessionId
@@ -711,7 +1061,6 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
         createElement('span', { key: 'id' }, `#${shortId}`),
       ),
     ),
-    createElement('div', { style: questionStyle }, `> ${data.question}`),
     data.context
       ? createElement(
           'div',
@@ -736,7 +1085,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
       `ADVISORS: ${data.advisors.map((a) => (a.avatar ? `${a.avatar} ${a.name}` : a.name)).join(' · ')}`,
     ),
     mergedMessages.map((message, index) =>
-      createElement(MessageBubble, { key: index, message }),
+      createElement(AdvisorSteps, { key: index, message }),
     ),
     data.status === 'completed' && data.summary?.conclusion
       ? createElement(
@@ -1846,6 +2195,45 @@ function AdvisorGroupSettingsTab(): ReactNode {
               ),
             ]
           })(),
+          label('思考模式 / 思考强度（未设置 = 跟随模型与供应商默认）'),
+          createElement(
+            'div',
+            { style: { display: 'flex', gap: 8, marginTop: 4 } },
+            createElement(
+              'select',
+              {
+                'aria-label': '思考模式',
+                value: advisor.thinking ?? '',
+                onChange: (e: { target: { value: string } }) =>
+                  updateAdvisor(index, {
+                    thinking: e.target.value === '' ? undefined : (e.target.value as 'enabled' | 'disabled'),
+                  }),
+                style: settingsInputStyle,
+              },
+              createElement('option', { value: '' }, '思考：默认'),
+              createElement('option', { value: 'enabled' }, '思考：开启'),
+              createElement('option', { value: 'disabled' }, '思考：关闭'),
+            ),
+            createElement(
+              'select',
+              {
+                'aria-label': '思考强度',
+                value: advisor.reasoningEffort ?? '',
+                onChange: (e: { target: { value: string } }) =>
+                  updateAdvisor(index, {
+                    reasoningEffort: e.target.value === ''
+                      ? undefined
+                      : (e.target.value as 'off' | 'low' | 'high' | 'max'),
+                  }),
+                style: settingsInputStyle,
+              },
+              createElement('option', { value: '' }, '强度：默认'),
+              createElement('option', { value: 'off' }, 'off（不思考）'),
+              createElement('option', { value: 'low' }, 'low（低）'),
+              createElement('option', { value: 'high' }, 'high（高）'),
+              createElement('option', { value: 'max' }, 'max（最大）'),
+            ),
+          ),
           createElement(
             'div',
             { style: { display: 'flex', gap: 8, marginTop: 4 } },

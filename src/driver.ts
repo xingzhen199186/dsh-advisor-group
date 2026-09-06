@@ -89,23 +89,50 @@ async function generateWith(
         }),
       ],
       temperature: 0.7,
-      maxTokens: 600,
+      // "3 段中文结论" 与一句追问都不大，但推理型模型可能把预算吃在思考上
+      // 导致正文为空；给足余量（原 600）。
+      maxTokens: 2048,
       // Long discussions (24k-char transcript + accumulated tool results)
       // need a real budget: default 10 min (configurable via
       // `discussion.driverTimeoutMs`).
       signal: withTimeout(timeoutMs, signal),
     }
     let text = ''
+    let chunks = 0
+    let textDeltas = 0
+    let reasoningDeltas = 0
     for await (const chunk of ctx.llm.stream(options)) {
-      if (chunk.type === 'text-delta') text += chunk.text
+      chunks += 1
+      if (chunk.type === 'text-delta') {
+        textDeltas += 1
+        text += chunk.text
+      } else {
+        // reasoning / thinking / other deltas — the model produced something
+        // but no answer text.
+        reasoningDeltas += 1
+      }
     }
-    return text.trim() || undefined
+    const trimmed = text.trim()
+    if (!trimmed) {
+      // Empty stream WITHOUT an exception (provider route mismatch / output
+      // budget eaten by reasoning) — must be visible, not a silent fallback.
+      console.warn(
+        `[dsh-advisor-group] 驱动模型空响应（${source.provider}/${source.model}）：` +
+          `chunks=${chunks} textDeltas=${textDeltas} reasoningDeltas=${reasoningDeltas}；` +
+          '建议配置 discussion.driverModel 或提高 maxTokens',
+      )
+    }
+    return trimmed || undefined
   } catch (error) {
     // A caller abort (stop / host signal) must PROPAGATE as cancellation: the
     // follow-up was never really generated, so nothing should be pushed and a
     // resume must regenerate it fresh. Only REAL failures (timeout / provider
     // errors) degrade to the static fallback text.
     if (signal?.aborted) throw error
+    console.warn(
+      `[dsh-advisor-group] 驱动模型生成失败（${source.provider}/${source.model}）：`,
+      error instanceof Error ? error.message : String(error),
+    )
     return undefined
   }
 }

@@ -44,11 +44,14 @@ function makeService(overrides?: Partial<Config['quota']>): AdvisorGroupService 
     quota: { ...BASE_CONFIG.quota, ...overrides },
   }
   const ctx = { on: () => {} } as unknown as Context
-  return new AdvisorGroupService(ctx, config)
+  const service = new AdvisorGroupService(ctx, config)
+  activeServices.push(service)
+  return service
 }
 
 let dshHome: string
 let savedHome: string | undefined
+const activeServices: AdvisorGroupService[] = []
 
 beforeEach(() => {
   dshHome = mkdtempSync(join(tmpdir(), 'advisor-group-quota-'))
@@ -56,7 +59,8 @@ beforeEach(() => {
   process.env.DSH_HOME = dshHome
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(activeServices.splice(0).map((service) => service.flushPersistence()))
   if (savedHome === undefined) delete process.env.DSH_HOME
   else process.env.DSH_HOME = savedHome
   rmSync(dshHome, { recursive: true, force: true })

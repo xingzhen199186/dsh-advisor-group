@@ -27,6 +27,15 @@ export interface ChatMessage {
   advisorName?: string
   content: string
   thinking?: string
+  /** Thinking split at each tool-call boundary, in stream order — the card
+   *  renders ONE row per segment (第 N 步思考), interleaved with tool rows. */
+  thinkingSegments?: string[]
+  /**
+   * The model's TEXT blocks spoken before each tool round (the DSH block order
+   * text → reasoning → tool-call): the "我要做什么" announcement the model
+   * makes to the user. Precise source for the card's 📋 行动·N rows.
+   */
+  actionDescriptions?: string[]
   round?: number
   /** Tool-calling steps streamed as independent rows (not part of thinking). */
   toolSteps?: AdvisorToolStep[]
@@ -85,6 +94,8 @@ export interface PersistedSession {
     advisorName?: string
     content: string
     thinking?: string
+    thinkingSegments?: string[]
+    actionDescriptions?: string[]
     round?: number
     toolSteps?: AdvisorToolStep[]
     truncated?: TruncationInfo

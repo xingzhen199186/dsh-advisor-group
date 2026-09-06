@@ -30,6 +30,10 @@ export interface AdvisorGroupMessageData {
   readonly advisorName?: string
   readonly content: string
   readonly thinking?: string
+  /** Thinking split at tool-call boundaries (one row per segment). */
+  readonly thinkingSegments?: ReadonlyArray<string>
+  /** Model TEXT blocks before each tool round (📋 行动·N precise source). */
+  readonly actionDescriptions?: ReadonlyArray<string>
   readonly round?: number
   /** Tool-calling steps (agent-loop style, rendered as independent rows). */
   readonly toolSteps?: ReadonlyArray<{

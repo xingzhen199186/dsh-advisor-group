@@ -61,11 +61,18 @@ export async function callViaCtxLlm(
   ]
 
   const pair = timeoutSignalPair(timeoutMs ?? ADVISOR_CALL_TIMEOUT_MS, signal)
+  // Per-advisor thinking control: `thinking: 'disabled'` forces reasoning off;
+  // an explicit `reasoningEffort` wins otherwise. Unset = provider default.
+  const reasoningEffort =
+    advisor.thinking === 'disabled' ? 'off' : advisor.reasoningEffort
   const options: GenerateOptions = {
     provider: advisor.provider,
     model: advisor.model,
     system: `${advisor.systemPrompt}${ADVISOR_OUTPUT_POLICY}`,
     messages,
+    ...(reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: reasoningEffort as unknown as GenerateOptions['reasoningEffort'] }),
     temperature: advisor.temperature,
     // A hard floor for the reply budget: without it, long-reasoning models can
     // spend everything on the thinking chain and truncate the body (see

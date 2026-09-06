@@ -16,6 +16,14 @@ export interface StreamChannelDelta {
   round?: number
   contentDelta?: string
   thinkingDelta?: string
+  /**
+   * Streaming phase of this delta: 'tool' = the text belongs to a tool-calling
+   * round (the model's "I am going to…" announcement before tool calls),
+   * 'answer' = the final no-tools round whose text is the answer body. The card
+   * uses it to route live text to 📋 行动 vs 📄 正文 like the official loop's
+   * text → reasoning → tool-call block order.
+   */
+  phase?: 'tool' | 'answer'
   /** One tool step appended to the advisor's tool-trace row stream. */
   toolStep?: ToolStep
   done?: boolean

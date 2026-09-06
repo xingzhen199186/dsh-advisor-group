@@ -87,6 +87,7 @@ npx @deepseek-ai/dsh web
 - 诊断端点服务端按存档 key 解析真实值再打供应商，并对目标 URL 做 https-only/loopback SSRF 校验；DNS rebinding 记为文档化已知边界。
 - 每日咨询上限（`quota.*` 可配置，默认 50、可关闭）持久化在 `$DSH_HOME/storages/advisor-group/daily-guard.json`（UTC 日切），重启不再归零。
 - 分类器影子模式：每次非强制分类追加一条观测样本（只读 `/advisor-group/shadow`），仅用于阈值调优，绝不干预行为。
+- **`advisorTools: 'all'` 属于高风险作用域**：会把会话可见的**全部工具**（含 `pwsh`/`bash`/`write`、配置/SSH 等可写/执行类）暴露给顾问模型（经官方守卫管线执行）。仅建议为可信的本地模型启用，并保证走 direct-http 通道；每次**非只读**工具调用都会以 `console.warn` 留审计痕迹。默认请用 `readonly`（read/grep/glob/web_search/web_fetch/scan_discover/list_imported_sessions）或 `off`。
 
 ## 🛠️ 开发
 

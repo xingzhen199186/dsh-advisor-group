@@ -47,11 +47,14 @@ function makeService(): AdvisorGroupService {
       },
     },
   } as unknown as Context
-  return new AdvisorGroupService(fakeCtx, CONFIG)
+  const service = new AdvisorGroupService(fakeCtx, CONFIG)
+  activeServices.push(service)
+  return service
 }
 
 let dshHome: string
 let savedHome: string | undefined
+const activeServices: AdvisorGroupService[] = []
 
 beforeEach(() => {
   dshHome = mkdtempSync(join(tmpdir(), 'advisor-group-lock-'))
@@ -59,7 +62,8 @@ beforeEach(() => {
   process.env.DSH_HOME = dshHome
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(activeServices.splice(0).map((service) => service.flushPersistence()))
   if (savedHome === undefined) delete process.env.DSH_HOME
   else process.env.DSH_HOME = savedHome
   rmSync(dshHome, { recursive: true, force: true })

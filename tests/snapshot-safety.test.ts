@@ -146,4 +146,34 @@ describe('snapshot safety (id whitelist + untrusted cwd)', () => {
     expect(restored?.stopReason).toBe('user-stop')
     expect(restored?.dshSessionId).toBe('session-00000000-0000-4000-8000-000000000001')
   })
+
+  it('persists toolSteps across the snapshot round-trip', async () => {
+    const serviceA = makeService()
+    const session = serviceA.createSession(
+      '问题',
+      undefined,
+      [],
+      undefined,
+      'session-00000000-0000-4000-8000-000000000002',
+    )
+    session.messages.push({
+      role: 'advisor',
+      advisorId: 'a1',
+      advisorName: '顾问A',
+      content: '正文',
+      ts: 1,
+      thinkingSegments: ['想1', '想2'],
+      actionDescriptions: ['我先做两步实机验证。', '然后查会话列表。'],
+      toolSteps: [{ kind: 'call', name: 'read', text: '{"path":"a.txt"}', atMs: 2 }],
+    })
+    ;(serviceA as unknown as { persistSession(s: typeof session): void }).persistSession(session)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const serviceB = makeService()
+    const restored = serviceB.getSession(session.id)
+    expect(restored?.messages[2]?.toolSteps).toEqual([
+      { kind: 'call', name: 'read', text: '{"path":"a.txt"}', atMs: 2 },
+    ])
+    expect(restored?.messages[2]?.thinkingSegments).toEqual(['想1', '想2'])
+    expect(restored?.messages[2]?.actionDescriptions).toEqual(['我先做两步实机验证。', '然后查会话列表。'])
+  })
 })
