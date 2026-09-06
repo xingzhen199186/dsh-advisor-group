@@ -8,6 +8,8 @@
 
 ---
 
+<img width="865" height="983" alt="1788679983177" src="https://github.com/user-attachments/assets/5660ce94-70f0-42ed-84e4-9f926d1e2c64" />
+
 ## ✨ 功能特性
 
 - **自动深挖咨询流水线**：一次 `ask_advisors` 自动跑满 `maxRounds` 轮——每轮 = *驱动模型深挖追问 → 顾问 A → 顾问 B（看到 A）→ 顾问 C（看到 A+B）→ …* 顺序接力，最后驱动模型产出**综合结论**。
@@ -46,6 +48,9 @@ npx @deepseek-ai/dsh web
 > ```
 
 ## 🚀 快速开始
+
+<img width="791" height="797" alt="2026_09_06_15_35_31" src="https://github.com/user-attachments/assets/52a5b9fe-1ee9-4980-9b97-73bf616f36eb" />
+
 
 1. 重启 dsh web 并硬刷新浏览器（`Ctrl+Shift+R`）。
 2. 打开 **设置 → 插件 → 顾问群**：配置顾问（提供商路由 + 模型，用「获取模型列表」拉取权威清单），按需调整 `maxRounds`、阈值与 UI 主题。
