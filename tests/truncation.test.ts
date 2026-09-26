@@ -106,3 +106,27 @@ describe('truncation surfacing (advisor timeout)', () => {
     expect(summary.riskNotes.some((note) => note.includes('截断'))).toBe(false)
   })
 })
+
+describe('advisor failure card text', () => {
+  it('keeps the summary-filter prefix, redacts credentials and caps length', async () => {
+    const fakeCtx = {
+      on: () => {},
+      emit: () => {},
+      llm: {
+        listProviders: () => [{ id: 'fake-provider' }],
+        async *stream() {
+          throw new Error(`401 Bearer sk-or-v1-deadbeefcafe1234 ${'server error '.repeat(50)}`)
+        },
+      },
+    } as unknown as Context
+    const service = new AdvisorGroupService(fakeCtx, CONFIG)
+    const session = service.createSession('测试问题', undefined)
+    await service.runOneRoundAndSummarize(session)
+    const content = session.messages.find((message) => message.role === 'advisor')?.content ?? ''
+    expect(content.startsWith('（顾问调用失败')).toBe(true)
+    expect(content).not.toContain('deadbeef')
+    expect(content).toContain('[已隐藏]')
+    expect(content).toContain('…（完整错误已记录到服务端日志）')
+    expect(content.length).toBeLessThan(400)
+  })
+})

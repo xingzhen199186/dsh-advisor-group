@@ -33,4 +33,24 @@ describe('classifier shadow samples', () => {
     expect(formatted.ts).toBe(123)
     void before
   })
+
+  it('preserves Jev provenance and raw scores when present', () => {
+    const formatted = formatShadowSample(sample({
+      provider: 'jev',
+      scores: { needsAdvisor: 0.42, webSearch: 0.1, highRisk: 0.77, domain: 'legal' },
+      model: 'openrouter/jev-1.13.0',
+    }))
+    expect(formatted.provider).toBe('jev')
+    expect(formatted.scores).toEqual({ needsAdvisor: 0.42, webSearch: 0.1, highRisk: 0.77, domain: 'legal' })
+    expect(formatted.model).toBe('openrouter/jev-1.13.0')
+  })
+
+  it('keeps legacy samples without provenance fields intact', () => {
+    // Pre-Jev lines carry none of the new optional fields.
+    const legacy = sample()
+    const formatted = formatShadowSample(legacy)
+    expect('provider' in formatted).toBe(false)
+    expect('scores' in formatted).toBe(false)
+    expect('model' in formatted).toBe(false)
+  })
 })

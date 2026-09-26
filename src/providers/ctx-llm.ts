@@ -56,7 +56,7 @@ export async function callViaCtxLlm(
   const messages = [
     createUserMessage({
       content: [{ type: 'text', text: userText }],
-      source: { kind: 'plugin', plugin: 'dsh-advisor-group' },
+      source: { kind: 'user' },
     }),
   ]
 

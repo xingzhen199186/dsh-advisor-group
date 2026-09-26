@@ -12,7 +12,7 @@ export type AdvisorAgent = { session?: unknown; id?: string }
  * registry, guard pipeline and pre/post policies the agent loop uses.
  *
  * Two channel constraints:
- *  - `ctx.llm` (dsh-llm 0.1.2-rc.1) does not support tool-calling, so tool use
+ *  - `ctx.llm` does not expose tool-calling, so tool use
  *    requires the DIRECT-http channel (OpenAI-compatible / Anthropic).
  *  - `discussion.advisorTools` = 'readonly' (default, read-only whitelist) |
  *    'all' (every session-visible tool, incl. writable ones) | 'off'.
@@ -244,7 +244,8 @@ export async function runAdvisorToolLoop(
       }
       const { outcome, reused } = await executeDeduped(call)
       if (outcome.trim()) {
-        const preview = outcome.replace(/\n+/g, ' ').slice(0, 240).trim()
+        const flat = outcome.replace(/\n+/g, ' ').trim()
+        const preview = flat.length > 240 ? `${flat.slice(0, 240)}…` : flat
         onToolStep({ kind: 'result', name: call.name, text: `${reused ? '（复用已执行结果）' : ''}${preview}` })
       }
       executed.push(`- ${call.name}${call.argumentsJson ? ` 参数：${call.argumentsJson.slice(0, 200)}` : ''}\n结果：${capOutcome(outcome)}`)
@@ -268,7 +269,8 @@ export async function runAdvisorToolLoop(
       }
       const { outcome, reused } = await executeDeduped(call)
       if (outcome.trim()) {
-        const preview = outcome.replace(/\n+/g, ' ').slice(0, 240).trim()
+        const flat = outcome.replace(/\n+/g, ' ').trim()
+        const preview = flat.length > 240 ? `${flat.slice(0, 240)}…` : flat
         onToolStep({ kind: 'result', name: call.name, text: `${reused ? '（复用已执行结果）' : ''}${preview}` })
       }
       executed.push(`- ${call.name}${call.argumentsJson ? ` 参数：${call.argumentsJson.slice(0, 200)}` : ''}\n结果：${capOutcome(outcome)}`)

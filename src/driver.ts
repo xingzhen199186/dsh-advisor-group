@@ -72,6 +72,7 @@ function transcriptOf(session: ConsultSession): string {
 async function generateWith(
   ctx: Context,
   source: DriverSource,
+  sessionId: string,
   system: string,
   prompt: string,
   signal?: AbortSignal,
@@ -85,7 +86,7 @@ async function generateWith(
       messages: [
         createUserMessage({
           content: [{ type: 'text', text: prompt }],
-          source: { kind: 'plugin', plugin: 'dsh-advisor-group' },
+          source: { kind: 'user' },
         }),
       ],
       temperature: 0.7,
@@ -117,8 +118,9 @@ async function generateWith(
       // Empty stream WITHOUT an exception (provider route mismatch / output
       // budget eaten by reasoning) — must be visible, not a silent fallback.
       console.warn(
-        `[dsh-advisor-group] 驱动模型空响应（${source.provider}/${source.model}）：` +
-          `chunks=${chunks} textDeltas=${textDeltas} reasoningDeltas=${reasoningDeltas}；` +
+        `[dsh-advisor-group] 驱动模型空响应（${source.provider}/${source.model}）：`,
+        sessionId,
+        `chunks=${chunks} textDeltas=${textDeltas} reasoningDeltas=${reasoningDeltas}；` +
           '建议配置 discussion.driverModel 或提高 maxTokens',
       )
     }
@@ -131,6 +133,7 @@ async function generateWith(
     if (signal?.aborted) throw error
     console.warn(
       `[dsh-advisor-group] 驱动模型生成失败（${source.provider}/${source.model}）：`,
+      sessionId,
       error instanceof Error ? error.message : String(error),
     )
     return undefined
@@ -149,6 +152,7 @@ export async function generateDeepenQuestion(
   const produced = await generateWith(
     ctx,
     source,
+    session.id,
     DRIVER_SYSTEM_PROMPT,
     `以下是一轮顾问群的讨论记录：\n\n${transcriptOf(session)}\n\n请给出下一步的深入追问。`,
     signal,
@@ -169,6 +173,7 @@ export async function generateConclusion(
   const produced = await generateWith(
     ctx,
     source,
+    session.id,
     CONCLUSION_SYSTEM_PROMPT,
     `以下是顾问群全部 ${session.messages.filter((m) => m.role === 'advisor').length} 条顾问回答的讨论记录：\n\n${transcriptOf(session)}\n\n请给出综合结论。`,
     signal,

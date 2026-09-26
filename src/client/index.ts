@@ -28,10 +28,11 @@ import type {
   ChatNodeDataMap,
   ChatNodeViewProps,
 } from '@deepseek-ai/dsh-client-ui-chat/client'
-// Type-only: activates the `settings.plugin.item` keyed slot declaration
+// Type-only: activates the settings section slot declaration
 // contributed by the settings-plugins package (cross-collaboration goes
 // through cordis services; value imports fail the client bundle-purity gate).
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: activates the `slots` Cordis service declaration (provided at
 // runtime by the UI renderer package).
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -383,6 +384,11 @@ const contextBodyStyle: CSSProperties = {
 
 const waitingStyle: CSSProperties = {
   color: '#fbbf24',
+  marginTop: 6,
+}
+
+const noticeStyle: CSSProperties = {
+  color: '#fda4af',
   marginTop: 6,
 }
 
@@ -821,6 +827,9 @@ function AdvisorSteps({ message }: { message: AdvisorGroupMessageData }): ReactN
   return createElement('div', null, children)
 }
 
+/** Auto-hide delay for transient card notices (request failures, resync). */
+const NOTICE_TTL_MS = 6000
+
 function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactNode {
   const data = props.node.data
   const sessionId = data.sessionId
@@ -851,6 +860,32 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
   const [contextCollapsed, setContextCollapsed] = useState(true)
   const lastEventIdRef = useRef(0)
   const lastBootIdRef = useRef('')
+  // One-line transient notice next to the AWAITING line: SSE connection/resync
+  // updates and stop/resume request failures. It never touches `status`, so
+  // the LIVE/DONE/STOPPED semantics stay intact. `kind` records who may clear
+  // it: stream events clear 'stream' notices; 'action' notices expire on their
+  // own timer.
+  const [transientNotice, setTransientNotice] = useState<{
+    text: string
+    kind: 'stream' | 'action'
+  } | null>(null)
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showTransientNotice = (text: string, kind: 'stream' | 'action', ttlMs?: number): void => {
+    if (noticeTimerRef.current !== null) {
+      clearTimeout(noticeTimerRef.current)
+      noticeTimerRef.current = null
+    }
+    setTransientNotice({ text, kind })
+    if (ttlMs !== undefined) {
+      noticeTimerRef.current = setTimeout(() => {
+        noticeTimerRef.current = null
+        setTransientNotice(null)
+      }, ttlMs)
+    }
+  }
+  const clearStreamNotice = (): void => {
+    setTransientNotice((prev) => (prev && prev.kind === 'stream' ? null : prev))
+  }
 
   useEffect(() => {
     if (!sessionId) return
@@ -860,7 +895,17 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
     const es = new EventSource(
       `/advisor-group/stream?sessionId=${encodeURIComponent(sessionId)}&lastEventId=${lastEventIdRef.current}&bootId=${encodeURIComponent(lastBootIdRef.current)}&token=${encodeURIComponent(advisorGroupToken())}`,
     )
+    es.onopen = () => {
+      // Connected (again): the outage notice no longer applies.
+      clearStreamNotice()
+    }
+    es.onerror = () => {
+      // EventSource retries on its own; surface the gap until it succeeds.
+      showTransientNotice('连接中断，正在重连…', 'stream')
+    }
     es.onmessage = (event: MessageEvent) => {
+      // A normal frame proves the stream is alive again.
+      clearStreamNotice()
       try {
         const delta = JSON.parse(event.data as string) as {
           advisorId: string
@@ -933,14 +978,38 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
         // Ignore malformed stream frames.
       }
     }
-    es.addEventListener('resync', () => {
+    es.addEventListener('resync', (event) => {
       // The host cannot replay the gap (restart or buffer overflow). Durable
       // session events already carry the full content, so reset the SSE overlay
       // and continue accepting live frames from now on.
       lastEventIdRef.current = 0
       setLive({})
+      let reason = ''
+      try {
+        const payload = JSON.parse((event as MessageEvent).data as string) as { reason?: string }
+        reason = payload.reason ?? ''
+      } catch {
+        // Ignore malformed resync payloads.
+      }
+      // The TTL only guards against a session that produces no further frames
+      // (nothing left to catch up on); a normal frame clears it earlier.
+      showTransientNotice(
+        reason === 'restart'
+          ? '服务端已重启，正在补齐对话内容…'
+          : reason === 'gap'
+            ? '正在补齐断开期间的内容…'
+            : '正在补齐对话内容…',
+        'stream',
+        NOTICE_TTL_MS,
+      )
     })
-    return () => es.close()
+    return () => {
+      es.close()
+      if (noticeTimerRef.current !== null) {
+        clearTimeout(noticeTimerRef.current)
+        noticeTimerRef.current = null
+      }
+    }
   }, [sessionId])
 
   const mergedMessages = data.messages.map((message) => {
@@ -1015,11 +1084,25 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
               {
                 type: 'button',
                 onClick: () => {
-                  void fetch('/advisor-group/stop', {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json', ...authHeaders() },
-                    body: JSON.stringify({ sessionId }),
-                  }).catch(() => {})
+                  void (async () => {
+                    try {
+                      const res = await fetch('/advisor-group/stop', {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json', ...authHeaders() },
+                        body: JSON.stringify({ sessionId }),
+                      })
+                      const body = (await res.json()) as { ok?: boolean; error?: string }
+                      if (body.ok === false) {
+                        showTransientNotice(
+                          body.error ?? '请求未被服务端接受，请稍后重试。',
+                          'action',
+                          NOTICE_TTL_MS,
+                        )
+                      }
+                    } catch {
+                      showTransientNotice('网络异常，请稍后重试。', 'action', NOTICE_TTL_MS)
+                    }
+                  })()
                 },
                 style: {
                   cursor: 'pointer',
@@ -1039,11 +1122,25 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
                 {
                   type: 'button',
                   onClick: () => {
-                    void fetch('/advisor-group/resume', {
-                      method: 'POST',
-                      headers: { 'content-type': 'application/json', ...authHeaders() },
-                      body: JSON.stringify({ sessionId }),
-                    }).catch(() => {})
+                    void (async () => {
+                      try {
+                        const res = await fetch('/advisor-group/resume', {
+                          method: 'POST',
+                          headers: { 'content-type': 'application/json', ...authHeaders() },
+                          body: JSON.stringify({ sessionId }),
+                        })
+                        const body = (await res.json()) as { ok?: boolean; error?: string }
+                        if (body.ok === false) {
+                          showTransientNotice(
+                            body.error ?? '请求未被服务端接受，请稍后重试。',
+                            'action',
+                            NOTICE_TTL_MS,
+                          )
+                        }
+                      } catch {
+                        showTransientNotice('网络异常，请稍后重试。', 'action', NOTICE_TTL_MS)
+                      }
+                    })()
                   },
                   style: {
                     cursor: 'pointer',
@@ -1105,8 +1202,54 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
           createElement('div', null, renderMarkdown(data.summary.conclusion)),
         )
       : null,
+    data.status === 'completed' && (data.summary?.riskNotes ?? []).length > 0
+      ? createElement(
+          'div',
+          {
+            style: {
+              borderTop: '1px dashed #2f9e44',
+              marginTop: 8,
+              paddingTop: 8,
+            },
+          },
+          (data.summary?.riskNotes ?? []).map((note, index) =>
+            createElement(
+              'div',
+              { key: index, style: { color: '#fbbf24', fontSize: 12, marginTop: 2 } },
+              note,
+            ),
+          ),
+        )
+      : null,
+    data.status === 'cancelled'
+      ? createElement(
+          'div',
+          {
+            style: {
+              borderTop: '1px dashed #2f9e44',
+              marginTop: 8,
+              paddingTop: 8,
+            },
+          },
+          createElement(
+            'div',
+            { style: { color: '#fde68a', marginBottom: 4 } },
+            '本次讨论已停止；点 ▶ 继续聊天 可从断点续跑。',
+          ),
+          (data.summary?.riskNotes ?? []).map((note, index) =>
+            createElement(
+              'div',
+              { key: index, style: { color: '#fbbf24', fontSize: 12, marginTop: 2 } },
+              note,
+            ),
+          ),
+        )
+      : null,
     data.status === 'running'
       ? createElement('div', { style: waitingStyle }, '▊ AWAITING RESPONSES…')
+      : null,
+    transientNotice
+      ? createElement('div', { style: noticeStyle }, transientNotice.text)
       : null,
   )
 }
@@ -1121,7 +1264,7 @@ const settingsRootStyle: CSSProperties = {
 }
 
 /*
- * Card shell mirroring the official `settings.plugin.item` cards (Bash /
+ * Card shell mirroring the official Plugins settings tab cards (Bash /
  * WebSearch / AgentLoop / SubagentModelSelection): one plugin settings panel
  * with a collapsible header + chevron, staged edits outlive collapsing. The
  * official PluginCard component cannot be value-imported (client bundle purity
@@ -1323,6 +1466,23 @@ interface ProviderOption {
   protocol?: string
 }
 
+function defaultJevConfig() {
+  return {
+    enabled: false,
+    provider: 'typesafe' as const,
+    model: 'jev-latest',
+    baseURL: '',
+    timeoutMs: 10000,
+    confidenceThreshold: 0.6,
+    useEnglishState: false,
+  }
+}
+
+const JEV_DEFAULT_ENDPOINTS = {
+  typesafe: 'https://api.typesafe.ai/v1/systemone',
+  openrouter: 'https://openrouter.ai/api/alpha/decisions',
+} as const
+
 function AdvisorGroupSettingsTab(): ReactNode {
   const [config, setConfig] = useState<AdvisorGroupConfig | null>(null)
   const [providers, setProviders] = useState<ProviderOption[]>([])
@@ -1502,6 +1662,12 @@ function AdvisorGroupSettingsTab(): ReactNode {
       // in the payload as the explicit clear intent.
       const configPayload: AdvisorGroupConfig = {
         ...config,
+        trigger: {
+          ...config.trigger,
+          jev: config.trigger.jev
+            ? (({ apiKeyMeta: _meta, ...rest }) => rest)(config.trigger.jev)
+            : defaultJevConfig(),
+        },
         advisors: config.advisors.map(({ apiKeyMetaByProvider: _meta, ...rest }) => rest),
       }
       const res = await fetch('/advisor-group/config', {
@@ -1727,6 +1893,182 @@ function AdvisorGroupSettingsTab(): ReactNode {
             }),
           style: settingsInputStyle,
         }),
+      ),
+    ),
+    createElement(
+      'div',
+      { style: settingsSectionStyle },
+      createElement('strong', null, 'Jev 前置分类'),
+      createElement(
+        'div',
+        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '4px 0 8px' } },
+        '启用后由 Jev 判断是否需要顾问群；未配置或调用失败时自动使用本地分类器。',
+      ),
+      createElement(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
+        createElement('input', {
+          type: 'checkbox',
+          checked: config.trigger.jev?.enabled ?? false,
+          onChange: (e: { target: { checked: boolean } }) =>
+            setConfig({
+              ...config,
+              trigger: {
+                ...config.trigger,
+                jev: { ...(config.trigger.jev ?? defaultJevConfig()), enabled: e.target.checked },
+              },
+            }),
+        }),
+        label('启用 Jev'),
+      ),
+      createElement(
+        'div',
+        { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 } },
+        createElement(
+          'div',
+          null,
+          label('Jev 渠道'),
+          createElement(
+            'select',
+            {
+              value: config.trigger.jev?.provider ?? 'typesafe',
+              onChange: (e: { target: { value: 'typesafe' | 'openrouter' } }) => {
+                const current = config.trigger.jev ?? defaultJevConfig()
+                const previousProvider = current.provider ?? 'typesafe'
+                const currentURL = current.baseURL ?? ''
+                const usesDefault = !currentURL || currentURL === JEV_DEFAULT_ENDPOINTS[previousProvider]
+                setConfig({
+                  ...config,
+                  trigger: {
+                    ...config.trigger,
+                    jev: {
+                      ...current,
+                      provider: e.target.value,
+                      ...(usesDefault ? { baseURL: JEV_DEFAULT_ENDPOINTS[e.target.value] } : {}),
+                    },
+                  },
+                })
+              },
+              style: settingsInputStyle,
+            },
+            createElement('option', { value: 'typesafe' }, 'TypeSafe 官方 API'),
+            createElement('option', { value: 'openrouter' }, 'OpenRouter Decisions API'),
+          ),
+        ),
+        createElement(
+          'div',
+          null,
+          label('Jev 模型'),
+          createElement('input', {
+            value: config.trigger.jev?.model ?? 'jev-latest',
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({ ...config, trigger: { ...config.trigger, jev: { ...(config.trigger.jev ?? defaultJevConfig()), model: e.target.value } } }),
+            style: settingsInputStyle,
+          }),
+        ),
+        createElement(
+          'div',
+          null,
+          label('判断阈值（0-1）'),
+          createElement('input', {
+            type: 'number',
+            min: 0,
+            max: 1,
+            step: 0.05,
+            value: String(config.trigger.jev?.confidenceThreshold ?? 0.6),
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({ ...config, trigger: { ...config.trigger, jev: { ...(config.trigger.jev ?? defaultJevConfig()), confidenceThreshold: Number(e.target.value) } } }),
+            style: settingsInputStyle,
+          }),
+        ),
+        createElement(
+          'div',
+          null,
+          label('高风险阈值（0-1，空=跟随判断阈值）'),
+          createElement('input', {
+            type: 'number',
+            min: 0,
+            max: 1,
+            step: 0.05,
+            placeholder: String(config.trigger.jev?.confidenceThreshold ?? 0.6),
+            value: config.trigger.jev?.highRiskThreshold !== undefined ? String(config.trigger.jev.highRiskThreshold) : '',
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({ ...config, trigger: { ...config.trigger, jev: { ...(config.trigger.jev ?? defaultJevConfig()), highRiskThreshold: e.target.value === '' ? undefined : Number(e.target.value) } } }),
+            style: settingsInputStyle,
+          }),
+        ),
+        createElement(
+          'div',
+          null,
+          label('请求超时（毫秒）'),
+          createElement('input', {
+            type: 'number',
+            min: 1000,
+            max: 60000,
+            step: 1000,
+            value: String(config.trigger.jev?.timeoutMs ?? 10000),
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({ ...config, trigger: { ...config.trigger, jev: { ...(config.trigger.jev ?? defaultJevConfig()), timeoutMs: Math.max(1000, Number(e.target.value)) } } }),
+            style: settingsInputStyle,
+          }),
+        ),
+      ),
+      createElement(
+        'div',
+        { style: { marginTop: 8 } },
+        label('API 地址（留空使用渠道默认地址）'),
+        createElement('input', {
+          value: config.trigger.jev?.baseURL || JEV_DEFAULT_ENDPOINTS[config.trigger.jev?.provider ?? 'typesafe'],
+          placeholder: JEV_DEFAULT_ENDPOINTS[config.trigger.jev?.provider ?? 'typesafe'],
+          onChange: (e: { target: { value: string } }) =>
+            setConfig({ ...config, trigger: { ...config.trigger, jev: { ...(config.trigger.jev ?? defaultJevConfig()), baseURL: e.target.value } } }),
+          style: settingsInputStyle,
+        }),
+      ),
+      createElement(
+        'div',
+        { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginTop: 8 } },
+        createElement(
+          'div',
+          null,
+          label('Jev API Key'),
+          createElement('input', {
+            type: 'password',
+            placeholder: config.trigger.jev?.apiKeyMeta?.configured ? `已配置 ••••${config.trigger.jev.apiKeyMeta.last4 ?? ''}` : '输入 API Key',
+            value: config.trigger.jev?.apiKey ?? '',
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({ ...config, trigger: { ...config.trigger, jev: { ...(config.trigger.jev ?? defaultJevConfig()), apiKey: e.target.value } } }),
+            style: settingsInputStyle,
+          }),
+        ),
+        createElement(
+          'div',
+          null,
+          label('API Key 环境变量名（可选）'),
+          createElement('input', {
+            placeholder: 'TYPESAFE_API_KEY 或 OPENROUTER_API_KEY',
+            value: config.trigger.jev?.apiKeyEnv ?? '',
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({ ...config, trigger: { ...config.trigger, jev: { ...(config.trigger.jev ?? defaultJevConfig()), apiKeyEnv: e.target.value } } }),
+            style: settingsInputStyle,
+          }),
+        ),
+      ),
+      createElement(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
+        createElement('input', {
+          type: 'checkbox',
+          checked: config.trigger.jev?.useEnglishState ?? false,
+          onChange: (e: { target: { checked: boolean } }) =>
+            setConfig({ ...config, trigger: { ...config.trigger, jev: { ...(config.trigger.jev ?? defaultJevConfig()), useEnglishState: e.target.checked } } }),
+        }),
+        label('Jev 英文判定（questionEn 概要）'),
+      ),
+      createElement(
+        'div',
+        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '4px 0 0' } },
+        '开启后，主模型提供的英文概要（questionEn）会作为 Jev 的判定输入；展示问句、会话记录与重复检测仍用中文。默认关闭。',
       ),
     ),
     createElement(
@@ -2307,7 +2649,7 @@ export const name = 'dsh-advisor-group'
 export const inject = ['uiConversation', 'slots', 'locale']
 
 export function apply(ctx: ClientContext): void {
-  // 0.1.2-rc.1 conversation model: business event Definitions are registered
+  // Current conversation model: business event Definitions are registered
   // with the target-neutral `uiConversation` registry; the chat target's view
   // builder turns their `buildViewNode` results into renderable chat Nodes.
   ctx.uiConversation.events.register(advisorGroupDefinition)
@@ -2324,12 +2666,14 @@ export function apply(ctx: ClientContext): void {
     ),
   )
 
-  // Settings plugin card, keyed by the settings namespace the card edits.
-  ctx.slots.inject('settings.plugin.item', () =>
+  // Standalone settings section with a host-owned configurable entry.
+  ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {
-        name: 'settings.plugin.item',
-        key: 'advisor-group',
+        name: 'settings.section',
+        id: 'dsh-advisor-group',
+        order: 0,
+        label: '顾问群',
       },
       AdvisorGroupSettingsTab,
     ),

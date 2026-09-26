@@ -147,6 +147,31 @@ describe('snapshot safety (id whitelist + untrusted cwd)', () => {
     expect(restored?.dshSessionId).toBe('session-00000000-0000-4000-8000-000000000001')
   })
 
+  it('defaults stopReason to abort-error for snapshots that lost it (crash restore)', () => {
+    const dir = join(dshHome, 'storages', 'advisor-group', 'sessions')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, '00000000-0000-4000-8000-000000000002.json'),
+      JSON.stringify({
+        version: 1,
+        id: '00000000-0000-4000-8000-000000000002',
+        status: 'active',
+        question: 'x',
+        advisorIds: ['a1'],
+        dshSessionId: 'session-00000000-0000-4000-8000-000000000002',
+        maxRounds: 2,
+        createdAt: 0,
+        updatedAt: 0,
+        messages: [],
+      }),
+      'utf8',
+    )
+    const service = makeService()
+    const restored = service.getSession('00000000-0000-4000-8000-000000000002')
+    expect(restored?.status).toBe('cancelled')
+    expect(restored?.stopReason).toBe('abort-error')
+  })
+
   it('persists toolSteps across the snapshot round-trip', async () => {
     const serviceA = makeService()
     const session = serviceA.createSession(

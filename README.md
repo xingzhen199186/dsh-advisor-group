@@ -13,6 +13,7 @@
 - **Auto-deepen consultation pipeline** — one `ask_advisors` call runs up to `maxRounds` rounds automatically: each round is a *driver deep-question → advisor A → advisor B (sees A) → advisor C (sees A+B) → …* sequential relay, closed by a driver-generated synthesis conclusion.
 - **Zero-config driver model** — the driver formulation of deep follow-ups reuses the current agent's provider/model, so no extra API key or model setup is needed; it falls back to `discussion.driverModel` when the session header is unavailable.
 - **Three ways to activate** — `@顾问群` mention (force-start), same question repeated 3 times without resolution, or main-model self-assessed confidence below the threshold.
+- **Optional Jev semantic pre-classification (off by default)** — when `trigger.jev.enabled` is on, a configured Jev model judges non-force-started consultations first (escalation / high-risk / web-search fit, thresholds under `trigger.jev.*`); if Jev is unavailable the local rules-based classifier still decides. With `trigger.jev.useEnglishState`, the judge reads the caller-supplied English gist (`questionEn`) instead of the Chinese question — display and session records stay Chinese.
 - **Retro CRT chat cards** — green/amber/blue CRT themes, scanlines, LIVE/DONE headers, auto-expanded thinking panel with auto-scroll; advisor Markdown rendered with a link-protocol whitelist (headings, lists, code, quotes, links, tables).
 - **Provider presets (11 platforms · 26 presets)** — DeepSeek, Moonshot Kimi, Kimi Code, Aliyun Bailian, Zhipu AI, OpenAI, Claude, Gemini, SiliconFlow, AIHubMix, OpenRouter (OpenAI/Anthropic-compatible variants included).
 - **Security-minded by design** — API keys use official `SecretField` semantics (never returned to the browser; `apiKeysByProvider` key history is server-side only), SSRF-guarded diagnostics (https-only / loopback, no IP literals, no redirects), per-boot token auth on `/advisor-group/*` routes, and an atomic **configurable daily consultation cap** (default 50, can be disabled) persisted across restarts.
@@ -22,7 +23,7 @@
 
 | Surface | Status |
 |---|---|
-| Harness | DeepSeek Harness `0.1.2-rc.1` |
+| Harness | DeepSeek Harness `0.1.7-rc.2` |
 | Node | `^22.19.0 \|\| >=24.0.0` |
 | Platforms | DSH Web (client bundle) + headless host logic |
 
@@ -40,7 +41,7 @@ npx @deepseek-ai/dsh web
 > ```sh
 > npm install --legacy-peer-deps --no-audit --no-fund
 > npm run build
-> dsh plugin --profile web add ./dsh-advisor-group-0.1.0.tgz   # after npm pack
+> dsh plugin --profile web add ./dsh-advisor-group-<version>.tgz   # after npm pack (version from package.json)
 > ```
 
 ## 🚀 Quick start
@@ -63,14 +64,22 @@ npx @deepseek-ai/dsh web
 | `discussion.autoDeepen` | boolean | `true` | Run the auto-deepen pipeline (driver follow-ups + final synthesis) |
 | `discussion.driverModel` | object | – | Fallback driver model `{provider, model}` when the session header cannot be read |
 | `discussion.advisorTimeoutMs` | number | `600000` | Per-advisor call timeout (ms, 1000–600000), applied to both channels |
+| `discussion.driverTimeoutMs` | number | `600000` | Driver generation timeout (deep-question / conclusion; ms, 1000–1200000) |
+| `discussion.advisorTools` | string | `'readonly'` | Global default advisor tool scope when an advisor sets no own `tools`: `readonly` / `all` (every session-visible tool incl. writable — elevated risk, see Security) / `off`. Tool calling needs the direct-http (OpenAI/Anthropic) channel. |
 | `quota.enabled` | boolean | `true` | Enable the daily new-consultation cap (cost safety valve) |
 | `quota.maxPerDay` | number | `50` | Max new consultations per UTC day (1–100000); ignored when `quota.enabled` is `false` |
 | `trigger.requireClassifier` | boolean | `true` | Run the pre-classifier before starting |
 | `trigger.allowWebFallback` | boolean | `true` | Allow classifier to recommend web search |
 | `trigger.confidenceThreshold` | number | `0.6` | Escalate when main-model confidence is below this |
+| `trigger.jev.enabled` | boolean | `false` | Use the external Jev model for semantic pre-classification of non-forced consultations; falls back to the local rules-based classifier when Jev is unavailable |
+| `trigger.jev.provider` / `trigger.jev.model` | string | `'typesafe'` / `'jev-latest'` | Jev route (`typesafe` or `openrouter`) and model; key via `trigger.jev.apiKey` (secret) or `trigger.jev.apiKeyEnv`; optional `baseURL`, `timeoutMs` (default `10000`) |
+| `trigger.jev.confidenceThreshold` | number | `0.6` | Escalate when Jev answers `needsAdvisor` yes (or its 0–1 score reaches this value) |
+| `trigger.jev.highRiskThreshold` | number | follows `jev.confidenceThreshold` | Flag high-risk when Jev answers `high_risk` yes (or its 0–1 score reaches this value); unset = follows `trigger.jev.confidenceThreshold` |
+| `trigger.jev.useEnglishState` | boolean | `false` | Judge using the caller-supplied English gist (`questionEn`) instead of the Chinese question; display and session records stay Chinese |
 | `ui.theme` | string | `retro-green` | Chat card theme (`retro-green` / `retro-amber` / `retro-blue`) |
 | `ui.showTimestamps` | boolean | `true` | Show timestamps |
 | `ui.autoExpand` | boolean | `true` | Auto-expand card |
+| `advisors[].tools` | string | – | Per-advisor tool-scope override (`readonly`/`all`/`off`; unset follows the global default) |
 | `advisors` | array | `[]` | Advisor list (provider/model/baseURL/apiKey/apiKeyEnv/protocol…, keys are `role('secret')`) |
 
 > `discussion.parallel` and `discussion.stopOnConsensus` are deprecated leftovers kept only for stored-config compatibility.
@@ -84,12 +93,17 @@ npx @deepseek-ai/dsh web
 - Classifier shadow mode appends one observation sample per non-forced classification (read-only `/advisor-group/shadow`), used for threshold tuning only — never influences behavior.
 - **`advisorTools: 'all'` is an elevated-risk scope.** It exposes every session-visible tool to the advisor models, including writable/execution ones (`pwsh`, `bash`, `write`, config/SSH tools), executed through the official guarded pipeline. Only enable it for advisors you trust (e.g., your own local models), keep them on the direct-http channel, and note that every non-read-only invocation is logged with `console.warn` for audit. Prefer the default `readonly` (read/grep/glob/web_search/web_fetch/scan_discover/list_imported_sessions) or `off`.
 
+## ⚠️ Known limitations
+
+- A hard crash of the DSH host can leave an already-open card showing **LIVE** until the page is refreshed (a disconnect notice now appears); refresh restores the true state from the session log.
+- Risk notes (truncation / cancellation / caution hints) are heuristically extracted from advisor text: users see them on **stopped or completed** cards and in the session log, and the main model receives them in the `ask_advisors` result; the heuristic may miss or over-trigger.
+
 ## 🛠️ Development
 
 ```sh
 npm install --legacy-peer-deps --no-audit --no-fund
 npm run typecheck
-npm test        # 64 tests, incl. provider streaming contracts against a local fake LLM server
+npm test        # vitest suite, incl. provider streaming contracts against a local fake LLM server
 npm run build   # tsdown; client bundle must NOT be built with minify: true
 ```
 

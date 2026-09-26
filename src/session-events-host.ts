@@ -1,7 +1,7 @@
 /**
  * Host-only registration for the advisor-group session event vocabulary.
  *
- * The official 0.1.2-rc.1 compatibility mechanism is the per-event
+ * The official compatibility mechanism is the per-event
  * `SessionEvent.ignorable: true` envelope marker: `dsh-session-persistence`
  * refuses unknown event types unless `KNOWN_SESSION_EVENT_TYPES.has(type)`
  * or the stored event is marked ignorable. However `Session.append()` exposes

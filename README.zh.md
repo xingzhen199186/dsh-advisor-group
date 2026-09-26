@@ -15,6 +15,7 @@
 - **停止后可继续**：用户停止或 dsh 重启后，卡片「⏹ 停止」原位变为「▶ 继续聊天」→ `POST /advisor-group/resume` → 从断点续跑（本轮未答的顾问补答、已答的不重问、剩余轮次照常、最终照常生成综合结论）；会话快照持久化到 `storages/advisor-group/sessions/<id>.json`（仅存顾问 id/消息/状态，不含任何凭据），跨重启自动恢复。
 - **驱动模型零配置复用**：深挖追问由驱动模型生成，直接复用会话当前 agent 的 provider/model——无需额外配 Key 或模型；会话头不可读时回退 `discussion.driverModel`。
 - **三种触发方式**：`@顾问群` 提及（强制启动）、同一问题重复 3 次未解决、主模型自评置信度低于阈值。
+- **Jev 语义前置分类（可选，默认关闭）**：开启 `trigger.jev.enabled` 后，未强制启动的咨询先由配置的 Jev 模型语义判断（是否该找顾问 / 是否高风险 / 是否更适合联网，阈值在 `trigger.jev.*`）；Jev 不可用时仍由本地规则分类器判定。`trigger.jev.useEnglishState` 开启后，判定改读主模型附带的英文概要（`questionEn`），展示与会话记录仍用中文。
 - **复古 CRT 聊天组卡片**：绿/琥珀/蓝三主题、扫描线、LIVE/DONE 标题、💭 思考面板默认展开自动滚底；顾问正文走轻量 Markdown 渲染（链接协议白名单，支持标题/列表/代码/引用/链接/表格）。
 - **供应商预设（11 平台 · 26 预设）**：DeepSeek、月之暗面 Kimi、Kimi Code、阿里云百炼、智谱 AI、OpenAI、Claude、Gemini、硅基流动、AIHubMix、OpenRouter（含 OpenAI / Anthropic 兼容变体）。
 - **注重安全**：API Key 采用官方 `SecretField` 语义（浏览器永不回显；`apiKeysByProvider` 供应商密钥档案仅存服务端）；诊断端点 SSRF 加固（仅 https/loopback、拒绝 IP 字面量与重定向）；`/advisor-group/*` 路由启动期 token 鉴权；每日新咨询**可配置原子配额**（默认 50，可关闭），持久化跨重启。
@@ -24,7 +25,7 @@
 
 | 项目 | 状态 |
 |---|---|
-| Harness | DeepSeek Harness `0.1.2-rc.1` |
+| Harness | DeepSeek Harness `0.1.7-rc.2` |
 | Node | `^22.19.0 \|\| >=24.0.0` |
 | 平台 | DSH Web（客户端 bundle）+ headless 宿主逻辑 |
 
@@ -42,7 +43,7 @@ npx @deepseek-ai/dsh web
 > ```sh
 > npm install --legacy-peer-deps --no-audit --no-fund
 > npm run build
-> dsh plugin --profile web add ./dsh-advisor-group-0.1.0.tgz   # 先 npm pack
+> dsh plugin --profile web add ./dsh-advisor-group-<版本>.tgz   # 先 npm pack（版本号见 package.json）
 > ```
 
 ## 🚀 快速开始
@@ -73,6 +74,11 @@ npx @deepseek-ai/dsh web
 | `trigger.requireClassifier` | boolean | `true` | 发起前先跑前置分类器 |
 | `trigger.allowWebFallback` | boolean | `true` | 分类器建议联网搜索时返回该提示 |
 | `trigger.confidenceThreshold` | number | `0.6` | 主模型置信度低于该值时升级 |
+| `trigger.jev.enabled` | boolean | `false` | 用外部 Jev 模型对非强制咨询做语义前置分类；Jev 不可用时回退本地规则分类器 |
+| `trigger.jev.provider` / `trigger.jev.model` | string | `'typesafe'` / `'jev-latest'` | Jev 路由（`typesafe` 或 `openrouter`）与模型；密钥用 `trigger.jev.apiKey`（secret）或 `trigger.jev.apiKeyEnv`；可选 `baseURL`、`timeoutMs`（默认 `10000`） |
+| `trigger.jev.confidenceThreshold` | number | `0.6` | Jev 判「该找顾问」为是（或 0–1 分数达到该值）时升级 |
+| `trigger.jev.highRiskThreshold` | number | 跟随 `jev.confidenceThreshold` | Jev 判「高风险」为是（或 0–1 分数达到该值）时标记高风险；未设置则跟随 `trigger.jev.confidenceThreshold` |
+| `trigger.jev.useEnglishState` | boolean | `false` | 判定改用主模型附带的英文概要（`questionEn`）而非中文原问；展示与会话记录仍为中文 |
 | `ui.theme` | string | `retro-green` | 卡片主题（retro-green / retro-amber / retro-blue） |
 | `ui.showTimestamps` | boolean | `true` | 显示时间戳 |
 | `ui.autoExpand` | boolean | `true` | 自动展开卡片 |
@@ -89,12 +95,17 @@ npx @deepseek-ai/dsh web
 - 分类器影子模式：每次非强制分类追加一条观测样本（只读 `/advisor-group/shadow`），仅用于阈值调优，绝不干预行为。
 - **`advisorTools: 'all'` 属于高风险作用域**：会把会话可见的**全部工具**（含 `pwsh`/`bash`/`write`、配置/SSH 等可写/执行类）暴露给顾问模型（经官方守卫管线执行）。仅建议为可信的本地模型启用，并保证走 direct-http 通道；每次**非只读**工具调用都会以 `console.warn` 留审计痕迹。默认请用 `readonly`（read/grep/glob/web_search/web_fetch/scan_discover/list_imported_sessions）或 `off`。
 
+## ⚠️ 已知限制
+
+- DSH 宿主进程硬崩溃时，已打开的卡片在刷新前可能仍显示 **LIVE**（现在会先出现断线提示）；刷新后按会话日志恢复真实状态。
+- 风险提示（截断 / 取消 / 谨慎采用等）由正则从顾问正文启发式抽取：用户可在**已停止或已完成**的卡片与会话日志中看到，主模型随 `ask_advisors` 返回收到；启发式抽取可能漏报或多报。
+
 ## 🛠️ 开发
 
 ```sh
 npm install --legacy-peer-deps --no-audit --no-fund
 npm run typecheck
-npm test        # 64 单测（含本地假 LLM 服务器上的供应商流式契约）
+npm test        # vitest 单测（含本地假 LLM 服务器上的供应商流式契约）
 npm run build   # tsdown；客户端 bundle 禁用 minify: true
 ```
 

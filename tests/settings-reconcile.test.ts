@@ -5,7 +5,7 @@ import {
   reconcileApiKeys,
   resolveDiagnosticApiKey,
 } from '../src/settings-api'
-import type { Config, AdvisorConfig } from '../src/config'
+import type { Config, AdvisorConfig, JevConfig } from '../src/config'
 import type { AdvisorGroupService } from '../src/service'
 
 /** Minimal service stub exposing only getConfig for the diagnostic resolver. */
@@ -276,5 +276,35 @@ describe('settings api key reconcile', () => {
       expect(assertSafeDiagnosticBase('not a url')).not.toBeNull()
       expect(assertSafeDiagnosticBase('ftp://example.com/v1')).not.toBeNull()
     })
+  })
+})
+
+describe('jev judgment settings roundtrip', () => {
+  const jevConfig: JevConfig = {
+    enabled: true,
+    provider: 'typesafe',
+    model: 'jev-latest',
+    timeoutMs: 10000,
+    confidenceThreshold: 0.6,
+  }
+
+  const incomingWith = (jev: Partial<JevConfig>): Config => {
+    const base = config([advisor({})])
+    return { ...base, trigger: { ...base.trigger, jev: { ...jevConfig, ...jev } } }
+  }
+
+  it('keeps the English-judgment toggle and an explicit high-risk threshold through a save', () => {
+    const result = reconcileApiKeys(
+      incomingWith({ useEnglishState: true, highRiskThreshold: 0.45 }),
+      config([advisor({})]),
+    )
+    expect(result.trigger.jev?.useEnglishState).toBe(true)
+    expect(result.trigger.jev?.highRiskThreshold).toBe(0.45)
+  })
+
+  it('normalizes a missing toggle to off and leaves an unset high-risk threshold following the general one', () => {
+    const result = reconcileApiKeys(incomingWith({}), config([advisor({})]))
+    expect(result.trigger.jev?.useEnglishState).toBe(false)
+    expect(result.trigger.jev?.highRiskThreshold).toBeUndefined()
   })
 })

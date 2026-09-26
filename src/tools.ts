@@ -2,9 +2,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { advisorsMissingModel } from './model-validation'
 import { appendShadowSample } from './shadow'
 import { classifyRequest } from './classifier'
+import { classifyWithJev, type JevClassificationResult } from './providers/jev'
 import type { AdvisorGroupService } from './service'
 import { appendAdvisorStart } from './session-log'
-import type { ConsultSession } from './types'
+import type { ConsultSession, ConsultSummary } from './types'
 
 export function registerAdvisorTools(service: AdvisorGroupService): Array<ReturnType<typeof defineTool>> {
   const askAdvisors = defineTool({
@@ -27,6 +28,11 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
         // (author keys limited to type/enum/const + annotations). Range is
         // enforced in execute() below.
         description: 'Optional self-assessed confidence 0-1. Values below the configured threshold escalate even without domain keywords.',
+      },
+      questionEn: {
+        type: 'string',
+        description:
+          'Optional self-contained English gist of the question plus key background. Used as the Jev pre-classification input only when the「Jev 英文判定」setting is enabled; the displayed question, session records, and duplicate detection always keep using question/context in Chinese. Omit it otherwise.',
       },
     },
     output: {
@@ -108,6 +114,14 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
             reason: 'session-not-found',
           }
         }
+        if (service.isSessionRunning(session.id)) {
+          return {
+            sessionId: session.id,
+            advice: '该顾问群会话正在运行中，请等本轮结束后再追问。',
+            skipped: true,
+            reason: 'session-running',
+          }
+        }
         if (service.hasReachedMaxRounds(session)) {
           return {
             sessionId: session.id,
@@ -117,12 +131,13 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
           }
         }
         service.appendFollowUp(session.id, args.followUp, sessionLog)
-        await service.runOneRoundAndSummarize(session, exec.signal, sessionLog, exec.agent)
+        const summary = await service.runOneRoundAndSummarize(session, exec.signal, sessionLog, exec.agent)
         const canContinue = !service.hasReachedMaxRounds(session)
         return {
           sessionId: session.id,
           advice:
             formatConversation(session) +
+            formatRiskNotes(summary) +
             (canContinue
               ? '\n\n（如需继续，可再次传入 sessionId 和 followUp 追问。）'
               : '\n\n（讨论轮数已达上限，请综合顾问意见给出最终答复。）'),
@@ -140,13 +155,36 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
       }
 
       if (cfg.trigger.requireClassifier && !mentionedAdvisorGroup && !forcedByRepeat) {
-        const classification = classifyRequest(
-          args.question,
-          args.context,
-          cfg.advisors,
-          args.confidence,
-          cfg.trigger.confidenceThreshold,
-        )
+        let classification
+        let jevResult: JevClassificationResult | undefined
+        const jev = cfg.trigger.jev
+        if (jev?.enabled) {
+          try {
+            jevResult = await classifyWithJev(
+              args.question,
+              args.context,
+              cfg.advisors,
+              jev,
+              exec.signal,
+              typeof args.questionEn === 'string' ? args.questionEn : undefined,
+            )
+            classification = jevResult
+          } catch (error) {
+            if (exec.signal.aborted) throw error
+            console.warn(
+              '[dsh-advisor-group] Jev 分类失败，回退到本地分类器：',
+              sessionLog?.id ?? 'no-session',
+              error instanceof Error ? error.message : String(error),
+            )
+          }
+        }
+        classification ??= classifyRequest(
+            args.question,
+            args.context,
+            cfg.advisors,
+            args.confidence,
+            cfg.trigger.confidenceThreshold,
+          )
         // Shadow sample: record every non-forced verdict for threshold tuning.
         // Fire-and-forget; never influences behavior.
         appendShadowSample({
@@ -157,6 +195,11 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
           reason: classification.reason,
           suggestWebSearch: classification.suggestWebSearch,
           launched: classification.shouldEscalate,
+          // Jev succeeded only when its verdict survived; otherwise this line
+          // documents the local classifier.
+          provider: jevResult ? 'jev' : 'local',
+          ...(jevResult?.rawAnswers ? { scores: jevResult.rawAnswers } : {}),
+          ...(jevResult?.model ? { model: jevResult.model } : {}),
         })
         if (!classification.shouldEscalate) {
           if (classification.suggestWebSearch && cfg.trigger.allowWebFallback) {
@@ -216,6 +259,7 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
         advice:
           formatConversation(session) +
           (summary.conclusion ? `\n\n【综合结论】\n${summary.conclusion}` : '') +
+          formatRiskNotes(summary) +
           (service.hasReachedMaxRounds(session)
             ? '\n\n（已达设置的最大讨论轮数，请参考上述顾问意见与综合结论给出最终答复。）'
             : ''),
@@ -248,6 +292,13 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
   })
 
   return [askAdvisors, toggleAdvisorGroup]
+}
+
+// Delivery-tension ruling (2026-09-26): the card copy says "请主模型谨慎采用",
+// so the caution must actually reach the main model — append the structured risk
+// notes to BOTH assembly sites (new consultation and follow-up) whenever present.
+function formatRiskNotes(summary: ConsultSummary): string {
+  return summary.riskNotes.length > 0 ? `\n\n【风险提示】\n${summary.riskNotes.join('\n')}` : ''
 }
 
 function formatConversation(session: ConsultSession): string {

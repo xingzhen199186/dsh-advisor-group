@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+## [0.1.0] - 2026-09-26
+
+### Added
+
+- **Jev semantic pre-classification** (`trigger.jev.*`, off by default): a configured Jev model (routes `typesafe` / `openrouter`, optional custom `baseURL` / key via `apiKey` or `apiKeyEnv` / `timeoutMs`) can judge non-force-started consultations first — `needsAdvisor` / `high_risk` / `webSearch` answers with independent thresholds (`trigger.jev.confidenceThreshold` default `0.6`; `trigger.jev.highRiskThreshold` unset = follow it). When Jev is unavailable the local rules-based classifier still decides. Jev answers are appended to the classifier shadow log (read-only `/advisor-group/shadow`) for threshold tuning. `trigger.jev.useEnglishState` (default `false`) makes Jev judge the caller-supplied English gist (`questionEn`) instead of the Chinese question; display, session records and repeat detection stay Chinese. The settings page exposes the whole Jev block including key handling.
+- Card notices for stop / resume / stream: a stopped consultation shows an explanation with its risk notes; SSE disconnects and host restarts surface a reconnect / backfill notice instead of failing silently; stop and resume failures show the server's error text.
+
+### Fixed
+
+- Crash-restored snapshots (status `active`, no `stopReason`) restore as `cancelled` + `abort-error`, so the interruption note no longer depends on a default chain (snapshot-safety test added).
+- Advisor failure cards: raw errors are redacted (API keys, bearer tokens) and capped to a single 300-char line, while the full error is logged server-side with the session id and advisor name; the `（顾问调用失败` prefix is preserved.
+- Model-list / connection-test failures map to readable Chinese messages (401/403, 404, DNS, refused, timeout) instead of raw fetch noise; settings save failures report a format-focused message.
+- Card stops now record a concrete `stopReason` (`abort-error` fallback) so "stopped" notes no longer vanish behind an empty string.
+- Risk notes now also render on completed cards; previously only the stopped card showed them (the stop explanation itself remains stop-only).
+
+### Changed
+
+- Adapted to DeepSeek Harness `0.1.7-rc.2` (volatile config fields for the custom settings page, settings tab contract, `kind: 'user'` message sources).
+- Advisor tool-call outcome previews are flattened to a single line and capped at 240 characters with an ellipsis.
+- `ask_advisors` results now append the structured risk notes when non-empty (after the conversation and synthesis, on both the new-consultation and follow-up paths), so the caution reaches the main model the card copy addresses; both README known-limitation entries were rewritten accordingly.
+
 ## [0.0.1] - 2026-09-06
 
 ### Added

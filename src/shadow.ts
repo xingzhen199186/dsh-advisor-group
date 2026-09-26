@@ -12,6 +12,14 @@ import { dirname, join } from 'node:path'
  * sets with real usage data; it never influences behavior.
  */
 
+/** Raw per-question values copied from a Jev verdict (absent for the local classifier). */
+export interface ShadowScores {
+  needsAdvisor?: number
+  webSearch?: number
+  highRisk?: number
+  domain?: string
+}
+
 export interface ShadowSample {
   /** Unix epoch ms. */
   ts: number
@@ -24,6 +32,12 @@ export interface ShadowSample {
   suggestWebSearch: boolean
   /** Whether a consultation was actually launched by the tool. */
   launched: boolean
+  /** Which classifier produced this verdict. */
+  provider?: 'jev' | 'local'
+  /** Jev's raw probabilities, so rejections are calibratable, not just countable. */
+  scores?: ShadowScores
+  /** Model id Jev reported (records `jev-latest` alias drift across samples). */
+  model?: string
 }
 
 export const SHADOW_QUESTION_LIMIT = 200

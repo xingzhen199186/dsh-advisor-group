@@ -187,13 +187,20 @@ export class AdvisorGroupService {
           cwd: raw.cwd,
           dshSessionId: raw.dshSessionId,
           driverSource: raw.driverSource,
-          stopReason: raw.stopReason,
+          // Crash snapshots carry no stopReason; default it so the card and
+          // the main model still see an interruption note.
+          stopReason: raw.stopReason ?? 'abort-error',
           createdAt: raw.createdAt,
           updatedAt: raw.updatedAt,
         }
         this.sessions.set(session.id, session)
-      } catch {
+      } catch (error) {
         // Corrupt snapshot: skip it, the durable session log still has history.
+        console.warn(
+          '[dsh-advisor-group] 会话快照读取失败，已跳过：',
+          file,
+          error instanceof Error ? error.message : String(error),
+        )
       }
     }
   }
@@ -250,9 +257,25 @@ export class AdvisorGroupService {
       .catch((error) => {
         console.warn(
           '[dsh-advisor-group] 咨询快照持久化失败：',
+          session.id,
           error instanceof Error ? error.message : String(error),
         )
       })
+  }
+
+  /**
+   * Card-facing advisor failure text: credentials redacted, collapsed to one
+   * line, length-capped. The full raw error is logged server-side instead.
+   */
+  private summarizeAdvisorError(raw: string): string {
+    const redacted = raw
+      .replace(/\b(api[_-]?key["']?\s*[:=]\s*["']?)[^\s"',}&]+/gi, '$1[已隐藏]')
+      .replace(/([?&]key=)[^\s&"']+/gi, '$1[已隐藏]')
+      .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [已隐藏]')
+      .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, '[已隐藏]')
+    const singleLine = redacted.replace(/\s+/g, ' ').trim()
+    if (singleLine.length <= 300) return singleLine
+    return `${singleLine.slice(0, 300)}…（完整错误已记录到服务端日志）`
   }
 
   /** Wait for queued durable writes before a host or test tears down storage. */
@@ -390,6 +413,7 @@ export class AdvisorGroupService {
     } catch (error) {
       console.warn(
         '[dsh-advisor-group] 重建会话句柄失败（降级为 detached）：',
+        session.id,
         error instanceof Error ? error.message : String(error),
       )
       const again = store.get(resumeId)
@@ -440,8 +464,12 @@ export class AdvisorGroupService {
     if (this.persistEnabledCallback) {
       try {
         await this.persistEnabledCallback(enabled)
-      } catch {
+      } catch (error) {
         // Keep the in-memory state; persistence will catch up on next save.
+        console.warn(
+          '[dsh-advisor-group] 启用开关保存失败（内存态未回滚）：',
+          error instanceof Error ? error.message : String(error),
+        )
       }
     }
     return this.enabled
@@ -724,6 +752,11 @@ export class AdvisorGroupService {
     return true
   }
 
+  /** True while a pipeline run (auto-deepen or a follow-up round) is in flight. */
+  isSessionRunning(sessionId: string): boolean {
+    return this.activeAborts.has(sessionId)
+  }
+
   /**
    * Resume a stopped/interrupted consultation from its interruption point.
    * Works for a user stop (live session) and after a dsh restart (snapshot
@@ -769,9 +802,14 @@ export class AdvisorGroupService {
     if (dshSession) appendAdvisorResume(dshSession, session.id)
     this.ctx.emit('advisor-group/resume', { sessionId: session.id })
     void this.runAutoPipeline(session, undefined, dshSession, resumeAgent)
-      .catch(() => {
-        // The pipeline degrades silently per its own contract; the snapshot
-        // and SSE channel already captured everything it produced.
+      .catch((error) => {
+        // Resume runs in the background where failures are invisible to the
+        // user; log them so a stuck card stays diagnosable.
+        console.error(
+          '[dsh-advisor-group] 续跑流水线失败：',
+          session.id,
+          error instanceof Error ? error.message : String(error),
+        )
       })
       .finally(() => this.releaseResumeLock(session.id))
     return { ok: true }
@@ -861,17 +899,48 @@ export class AdvisorGroupService {
     sessionLog?: Session,
     agent?: AdvisorAgent,
   ): Promise<ConsultSummary> {
-    await this.runOneRound(session, signal, sessionLog, agent)
-    session.status = 'completed'
-    session.updatedAt = Date.now()
-    const summary = this.buildSummary(session, false)
-    if (sessionLog) appendAdvisorEnd(sessionLog, session, summary)
-    this.persistSession(session)
-    await this.flushLog(sessionLog)
-    this.ctx.emit('advisor-group/session-end', { sessionId: session.id, summary })
-    // Keep the session in memory: ask_advisors returns the session id so the
-    // main model can continue with a follow-up question in a later call.
-    return summary
+    // Register the in-flight run like runAutoPipeline does: stop/resume/other
+    // follow-ups all consult `activeAborts`, so a follow-up round must appear
+    // there too. The controller is wired into the run (combined signal below),
+    // so stopConsultation aborts it for real instead of reporting success for
+    // a run it cannot reach.
+    const stop = new AbortController()
+    this.activeAborts.set(session.id, stop)
+    const combined = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal
+    try {
+      await this.runOneRound(session, combined, sessionLog, agent)
+      session.status = 'completed'
+      session.updatedAt = Date.now()
+      const summary = this.buildSummary(session, false)
+      if (sessionLog) appendAdvisorEnd(sessionLog, session, summary)
+      this.persistSession(session)
+      await this.flushLog(sessionLog)
+      this.ctx.emit('advisor-group/session-end', { sessionId: session.id, summary })
+      // Keep the session in memory: ask_advisors returns the session id so the
+      // main model can continue with a follow-up question in a later call.
+      return summary
+    } catch (error) {
+      // Same graceful-stop contract as runAutoPipeline: an aborted follow-up
+      // round degrades to a partial (stopped) summary instead of surfacing an
+      // AbortError out of the tool call.
+      if (isAbortError(error, combined) || stop.signal.aborted) {
+        if (stop.signal.aborted) {
+          session.stopReason = 'user-stop'
+        } else if (signal?.aborted) {
+          session.stopReason = 'exec-cancel'
+        } else {
+          session.stopReason = 'abort-error'
+        }
+        session.status = 'cancelled'
+        this.persistSession(session)
+        const summary = await this.generateFinalSummary(session, undefined, sessionLog, true)
+        await this.flushLog(sessionLog)
+        return summary
+      }
+      throw error
+    } finally {
+      this.activeAborts.delete(session.id)
+    }
   }
 
   getRoundCount(session: ConsultSession): number {
@@ -1125,7 +1194,9 @@ export class AdvisorGroupService {
       if (actionDescriptions.length > 0) message.actionDescriptions = actionDescriptions
     } catch (error) {
       if (isAbortError(error, signal)) throw error
-      message.content = `（顾问调用失败：${error instanceof Error ? error.message : String(error)}）`
+      const rawMessage = error instanceof Error ? error.message : String(error)
+      console.warn('[dsh-advisor-group] 顾问调用失败：', session.id, advisor.name, rawMessage)
+      message.content = `（顾问调用失败：${this.summarizeAdvisorError(rawMessage)}）`
     }
 
     publish(session.id, {

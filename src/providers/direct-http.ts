@@ -380,7 +380,8 @@ async function streamOpenAICompatible(
       const errName = (error as { name?: string })?.name ?? 'UnknownError'
       const errMessage = error instanceof Error ? error.message : String(error)
       console.warn(
-        `[dsh-advisor-group] direct-http stream read error: name=${errName} msg=${errMessage} ` +
+        `[dsh-advisor-group] direct-http stream read error: advisor=${advisor.name} base=${baseURL} ` +
+          `name=${errName} msg=${errMessage} ` +
           `isTimeout=${pair.isTimeout()} signalAborted=${signal?.aborted ?? false} ` +
           `collectedChars=${content.length + thinking.length}`,
       )
@@ -528,7 +529,8 @@ async function streamAnthropic(
       const errName = (error as { name?: string })?.name ?? 'UnknownError'
       const errMessage = error instanceof Error ? error.message : String(error)
       console.warn(
-        `[dsh-advisor-group] anthropic stream read error: name=${errName} msg=${errMessage} ` +
+        `[dsh-advisor-group] anthropic stream read error: advisor=${advisor.name} base=${baseURL} ` +
+          `name=${errName} msg=${errMessage} ` +
           `isTimeout=${pair.isTimeout()} signalAborted=${signal?.aborted ?? false} ` +
           `collectedChars=${content.length + thinking.length}`,
       )
@@ -681,6 +683,8 @@ async function callGemini(
 ): Promise<string> {
   const model = encodeURIComponent(advisor.model)
   const base = baseURL.replace(/\/+$/, '')
+  // HARD RULE: the Gemini key travels in this URL's query string. Never log
+  // endpoint/base anywhere on this path — one stray console.warn would leak it.
   const endpoint = base.endsWith('/v1beta')
     ? `${base}/models/${model}:generateContent?key=${apiKey}`
     : `${base}/v1beta/models/${model}:generateContent?key=${apiKey}`

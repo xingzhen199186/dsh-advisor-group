@@ -4,9 +4,14 @@ import { randomUUID } from 'node:crypto'
 import {
   SettingsConflictError,
   type SettingsNamespace,
-  type SettingsProvider,
 } from '@deepseek-ai/dsh-settings'
-import { Config, type AdvisorConfig, type Config as ConfigShape } from './config'
+import SettingsProvider from '@deepseek-ai/dsh-settings'
+import {
+  Config,
+  unwrapVolatileConfig,
+  type AdvisorConfig,
+  type Config as ConfigShape,
+} from './config'
 import { PROVIDER_PRESETS } from './providers/presets'
 import { subscribe } from './stream-channel'
 import { readShadowSamples } from './shadow'
@@ -27,6 +32,26 @@ type ScopedContext = Context & {
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(JSON.stringify(body))
+}
+
+function normalizeJevConfig(input: ConfigShape['trigger']['jev']): NonNullable<ConfigShape['trigger']['jev']> {
+  const apiKey = typeof input?.apiKey === 'string'
+    ? input.apiKey
+    : input?.apiKey && typeof input.apiKey === 'object' && 'value' in input.apiKey
+      ? String((input.apiKey as { value: unknown }).value ?? '')
+      : undefined
+  return {
+    enabled: input?.enabled ?? false,
+    provider: input?.provider ?? 'typesafe',
+    model: input?.model ?? 'jev-latest',
+    ...(input?.baseURL ? { baseURL: input.baseURL } : {}),
+    ...(apiKey ? { apiKey } : {}),
+    ...(input?.apiKeyEnv ? { apiKeyEnv: input.apiKeyEnv } : {}),
+    timeoutMs: input?.timeoutMs ?? 10000,
+    confidenceThreshold: input?.confidenceThreshold ?? 0.6,
+    useEnglishState: input?.useEnglishState ?? false,
+    ...(typeof input?.highRiskThreshold === 'number' ? { highRiskThreshold: input.highRiskThreshold } : {}),
+  }
 }
 
 /** Mask a stored API key so it never leaves the host in plain text. */
@@ -53,15 +78,26 @@ function isMaskedApiKey(incoming: string | undefined, previous: string | undefin
 /**
  * Return a copy of the config safe to send to the browser.
  *
- * 0.1.2-rc.1 SecretField convergence: no key material (not even a mask) leaves
+ * SecretField convergence: no key material (not even a mask) leaves
  * the host. `apiKey` is returned empty and per-provider presence facts
  * (`configured` + `last4`) ride in `apiKeyMetaByProvider`, so the card can
  * render the official "已配置/未配置" badge and publish new/cleared keys
  * without ever round-tripping a mask.
  */
 function sanitizeConfig(config: ConfigShape): ConfigShape {
+  const jev = normalizeJevConfig(config.trigger.jev)
   return {
     ...config,
+    trigger: {
+      ...config.trigger,
+      jev: {
+        ...jev,
+        apiKey: '',
+        ...(jev?.apiKey
+          ? { apiKeyMeta: { configured: true, last4: jev.apiKey.slice(-4) } }
+          : {}),
+      },
+    },
     advisors: config.advisors.map((advisor) => {
       const {
         apiKeysByProvider: _apiKeysByProvider,
@@ -112,8 +148,19 @@ function hasSameCredentialScope(a: AdvisorConfig, b: AdvisorConfig): boolean {
  */
 export function reconcileApiKeys(incoming: ConfigShape, previous: ConfigShape): ConfigShape {
   const previousById = new Map(previous.advisors.map((advisor) => [advisor.id, advisor]))
+  const incomingJev = normalizeJevConfig(incoming.trigger.jev)
+  const previousJev = normalizeJevConfig(previous.trigger.jev)
+  const jevApiKey = incomingJev?.apiKey || previousJev?.apiKey
   return {
     ...incoming,
+    trigger: {
+      ...incoming.trigger,
+      jev: {
+        ...incomingJev,
+        ...(jevApiKey ? { apiKey: jevApiKey } : {}),
+        apiKeyMeta: undefined,
+      },
+    },
     advisors: incoming.advisors.map((advisor) => {
       const { clearApiKey, ...advisorRest } = advisor
       const prev = previousById.get(advisor.id)
@@ -209,8 +256,19 @@ async function parseLookupParams(req: IncomingMessage): Promise<Record<string, s
 const ALLOWED_API_KEY_ENVS = new Set(
   Object.values(PROVIDER_PRESETS).map((preset) => preset.apiKeyEnv),
 )
+ALLOWED_API_KEY_ENVS.add('TYPESAFE_API_KEY')
+ALLOWED_API_KEY_ENVS.add('OPENROUTER_API_KEY')
 
 function validateSecurity(input: ConfigShape): string | null {
+  if (input.trigger.jev?.baseURL) {
+    const url = input.trigger.jev.baseURL.trim()
+    if (!(url.startsWith('https://') || url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost'))) {
+      return 'Jev API 地址仅允许 https:// 或本机 http://127.0.0.1 / http://localhost'
+    }
+  }
+  if (input.trigger.jev?.apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(input.trigger.jev.apiKeyEnv.trim())) {
+    return `Jev API Key 环境变量名无效：${input.trigger.jev.apiKeyEnv}`
+  }
   const ids = new Set<string>()
   for (const advisor of input.advisors) {
     if (ids.has(advisor.id)) {
@@ -371,6 +429,8 @@ async function queryAnthropicModels(
 
 async function queryGeminiModels(baseURL: string, apiKey: string): Promise<string[]> {
   const base = normalizeBase(baseURL)
+  // HARD RULE: the Gemini key travels in this URL's query string — never log
+  // endpoint/base on this path (fetch errors below only carry the status).
   const endpoint = base.endsWith('/v1beta')
     ? `${base}/models?key=${apiKey}`
     : `${base}/v1beta/models?key=${apiKey}`
@@ -461,9 +521,21 @@ async function handleModelsRequest(
   } catch (error) {
     sendJson(res, 400, {
       ok: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: describeConnectionError(error),
     })
   }
+}
+
+/** 网络/HTTP 类失败的设置页可读文案；原始信息保留在括号里。 */
+function describeConnectionError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/HTTP (401|403)\b/i.test(message)) return `密钥无效或没有访问权限（${message}）`
+  if (/HTTP 404\b/i.test(message)) return `地址不存在，检查 baseURL 是否写对（${message}）`
+  if (/ENOTFOUND|EAI_AGAIN/i.test(message)) return `找不到这个地址，检查域名拼写与网络（${message}）`
+  if (/ECONNREFUSED/i.test(message)) return `对方拒绝了连接，检查地址与端口（${message}）`
+  if (/ETIMEDOUT|\btimeout\b|aborted/i.test(message)) return `连接超时（${message}）`
+  if (/fetch failed/i.test(message)) return `网络连接失败，检查网络后重试（${message}）`
+  return `连接失败（${message}）`
 }
 
 async function handleTestConnectionRequest(
@@ -541,7 +613,7 @@ async function handleTestConnectionRequest(
   } catch (error) {
     sendJson(res, 400, {
       ok: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: describeConnectionError(error),
     })
   }
 }
@@ -593,7 +665,7 @@ function handleConfigRequest(
   service: AdvisorGroupService,
   authToken: string,
 ) {
-  const namespace = 'advisor-group' as SettingsNamespace
+  const namespace = 'dsh-advisor-group' as SettingsNamespace
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const rawUrl = req.url ?? ''
@@ -654,6 +726,10 @@ function handleConfigRequest(
         const stopped = service.stopConsultation(parsed.sessionId)
         sendJson(res, 200, { ok: true, stopped })
       } catch (error) {
+        console.warn(
+          '[dsh-advisor-group] stop 请求处理失败：',
+          error instanceof Error ? error.message : String(error),
+        )
         sendJson(res, 400, {
           ok: false,
           error: error instanceof Error ? error.message : String(error),
@@ -679,6 +755,10 @@ function handleConfigRequest(
         const result = service.resumeConsultation(parsed.sessionId)
         sendJson(res, result.ok ? 200 : 400, { ok: result.ok, ...(result.reason ? { error: result.reason } : {}) })
       } catch (error) {
+        console.warn(
+          '[dsh-advisor-group] resume 请求处理失败：',
+          error instanceof Error ? error.message : String(error),
+        )
         sendJson(res, 400, {
           ok: false,
           error: error instanceof Error ? error.message : String(error),
@@ -701,12 +781,23 @@ function handleConfigRequest(
       req.method === 'GET' &&
       (pathname === '/advisor-group/config' || pathname === '/advisor-group/config/')
     ) {
-      sendJson(res, 200, {
-        ok: true,
-        config: sanitizeConfig(service.getConfig()),
-        revision: currentRevision(scopedCtx, namespace),
-        dailyGuard: service.getDailyGuard(),
-      })
+      try {
+        sendJson(res, 200, {
+          ok: true,
+          config: sanitizeConfig(service.getConfig()),
+          revision: currentRevision(scopedCtx, namespace),
+          dailyGuard: service.getDailyGuard(),
+        })
+      } catch (error) {
+        console.error(
+          '[dsh-advisor-group] config read failed:',
+          error instanceof Error ? error.message : String(error),
+        )
+        sendJson(res, 500, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
       return
     }
 
@@ -725,8 +816,10 @@ function handleConfigRequest(
           typeof parsed.expectedRevision === 'number'
             ? parsed.expectedRevision
             : currentRevision(scopedCtx, namespace)
-        // Schemastery schema is callable: validates and returns normalized config.
-        const validated = Config(configInput) as ConfigShape
+        // Schemastery schema is callable: validates and returns normalized
+        // config. Volatile fields come back as live references, so unwrap
+        // them before the service stores plain values.
+        const validated = unwrapVolatileConfig(Config(configInput)) as ConfigShape
         const reconciled = reconcileApiKeys(validated, service.getConfig())
         const securityError = validateSecurity(reconciled)
         if (securityError) {
@@ -735,7 +828,11 @@ function handleConfigRequest(
         }
         // Persist first, then update memory: if persistence fails the running
         // instance keeps its previous config. expectedRevision refuses stale writes.
-        await scopedCtx.settings.replace(namespace, reconciled as unknown as object, expectedRevision)
+        await scopedCtx.settings.replace(
+          namespace,
+          reconciled as unknown as object,
+          expectedRevision,
+        )
         service.setConfig(reconciled)
         sendJson(res, 200, {
           ok: true,
@@ -749,7 +846,7 @@ function handleConfigRequest(
         }
         sendJson(res, 400, {
           ok: false,
-          error: error instanceof Error ? error.message : String(error),
+          error: `保存失败：请检查刚才修改项的格式（原始信息：${error instanceof Error ? error.message : String(error)}）`,
         })
       }
       return
@@ -829,14 +926,12 @@ export function registerAdvisorSettingsAndRoutes(
 
   inject(['settings', 'webServer'], (scoped) => {
     const scopedCtx = scoped as ScopedContext
-    const namespace = 'advisor-group' as SettingsNamespace
-    const scope = scopedCtx.settings.register(
-      namespace,
-      Config,
-      { base: config },
-    )
+    const namespace = 'dsh-advisor-group' as SettingsNamespace
+    service.setConfig(config)
 
-    service.setConfig(scope.get())
+    // This entry ships its own settings page, so tell DSH not to generate one
+    // for it. Returns a disposer released by the effect below.
+    const presentationDisposer = scopedCtx.settings.configure({ auto: false }, ctx.fiber)
 
     // Let the toggle tool persist the enabled flag through the same settings
     // namespace the settings tab uses.
@@ -844,8 +939,13 @@ export function registerAdvisorSettingsAndRoutes(
       await scopedCtx.settings.update(namespace, { enabled })
     })
 
-    const watchDisposer = scope.watch((next) => {
-      service.setConfig(next)
+    // The service holds plain values while DSH keeps the volatile references up
+    // to date in place, so re-read those references instead of the boot
+    // snapshot, which would otherwise revert every setting to its startup value.
+    const watchDisposer = (ctx as unknown as {
+      on(event: string, listener: () => void): () => void
+    }).on('loader/volatile-update', () => {
+      service.setConfig(unwrapVolatileConfig(ctx.fiber.config))
     })
 
     // Per-boot shared token: the host injects it into the served index and the
@@ -872,6 +972,7 @@ export function registerAdvisorSettingsAndRoutes(
       watchDisposer()
       routeDisposer()
       indexTapDisposer?.()
+      presentationDisposer()
     }, 'dsh-advisor-group: settings watcher + config routes')
   })
 }

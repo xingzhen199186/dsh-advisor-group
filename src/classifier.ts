@@ -116,7 +116,7 @@ export function classifyRequest(
   }
 }
 
-function matchAdvisors(text: string, advisors: AdvisorConfig[]): string[] {
+export function matchAdvisors(text: string, advisors: AdvisorConfig[]): string[] {
   if (advisors.length === 0) return []
   const matches = new Set<string>()
   const lowerText = text.toLowerCase()

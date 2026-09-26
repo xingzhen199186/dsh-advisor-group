@@ -95,7 +95,7 @@ export interface DiscussionConfig {
    * a read-only whitelist of the session's tools (read/grep/glob/web_search…);
    * 'all' exposes every session-visible tool (incl. writable ones); 'off'
    * disables tool calling. Only the direct-http OpenAI/Anthropic channel
-   * supports tool calling (ctx.llm / dsh-llm 0.1.2-rc.1 does not).
+   * supports tool calling (ctx.llm / dsh-llm does not expose tool calling).
    */
   advisorTools?: 'readonly' | 'all' | 'off'
   /**
@@ -109,6 +109,25 @@ export interface TriggerConfig {
   requireClassifier: boolean
   allowWebFallback: boolean
   confidenceThreshold: number
+  jev?: JevConfig
+}
+
+export type JevProvider = 'typesafe' | 'openrouter'
+
+export interface JevConfig {
+  enabled: boolean
+  provider: JevProvider
+  model: string
+  baseURL?: string
+  apiKey?: string
+  apiKeyEnv?: string
+  timeoutMs: number
+  confidenceThreshold: number
+  /** Judge with the caller-provided English gist (questionEn) as the Jev state; default keeps the Chinese question. */
+  useEnglishState?: boolean
+  /** Threshold for the high_risk question; unset means follow confidenceThreshold. */
+  highRiskThreshold?: number
+  apiKeyMeta?: { configured: boolean; last4?: string }
 }
 
 export interface UiConfig {
@@ -198,11 +217,27 @@ const DiscussionConfig: Schema<DiscussionConfig> = Schema.object({
   ]).default('readonly').description('Global default advisor tool calling scope for advisors that do not set their own `tools` field: readonly (default; read-only session tools), all (every session-visible tool incl. writable ones), off (disabled). Only the direct-http OpenAI/Anthropic channel supports tool calling.'),
 })
 
-const TriggerConfig: Schema<TriggerConfig> = Schema.object({
+const TriggerConfig = Schema.object({
   requireClassifier: Schema.boolean().default(true).description('Run the pre-classifier before starting a consultation.'),
   allowWebFallback: Schema.boolean().default(true).description('When classifier says web search is better, return that hint to the main model.'),
   confidenceThreshold: Schema.number().min(0).max(1).default(0.6).description('Below this confidence score, ask_advisors should escalate even without domain keywords.'),
-})
+  jev: Schema.object({
+    enabled: Schema.boolean().default(false).description('Use Jev for semantic pre-classification when configured.'),
+    provider: Schema.union([Schema.const('typesafe'), Schema.const('openrouter')]).default('typesafe'),
+    model: Schema.string().default('jev-latest'),
+    baseURL: Schema.string().description('Optional custom Jev API endpoint.'),
+    apiKey: Schema.string().role('secret').description('Jev API key; prefer apiKeyEnv when possible.'),
+    apiKeyEnv: Schema.string().description('Optional environment variable containing the Jev API key.'),
+    timeoutMs: Schema.number().min(1000).max(60000).default(10000),
+    confidenceThreshold: Schema.number().min(0).max(1).default(0.6),
+    useEnglishState: Schema.boolean().default(false).description('Judge with the caller-provided English gist (questionEn) as the Jev state instead of the Chinese question; display and session records stay Chinese.'),
+    highRiskThreshold: Schema.number().min(0).max(1).description('Threshold for the high_risk question; unset means follow confidenceThreshold.'),
+    apiKeyMeta: Schema.object({
+      configured: Schema.boolean(),
+      last4: Schema.string(),
+    }).description('Server-only API key presence metadata.'),
+  }).default({}),
+}) as unknown as Schema<TriggerConfig>
 
 const UiConfig: Schema<UiConfig> = Schema.object({
   theme: Schema.union([
@@ -219,11 +254,29 @@ const QuotaConfig: Schema<QuotaConfig> = Schema.object({
   maxPerDay: Schema.natural().min(1).max(100000).default(50).description('Max new consultations per UTC day (1–100000); ignored when enabled is false.'),
 })
 
-export const Config: Schema<Config> = Schema.object({
-  enabled: Schema.boolean().default(true),
-  discussion: DiscussionConfig,
-  trigger: TriggerConfig,
-  ui: UiConfig,
-  quota: QuotaConfig,
-  advisors: Schema.array(AdvisorConfig).default([]),
-})
+// Every field the custom settings page owns is declared volatile. DSH
+// 0.1.7-rc.2 only exposes and persists fields marked this way, and a marker
+// makes the whole subtree volatile too, so the advisor array (with its nested
+// secrets) stays writable as one document. The declared type stays plain
+// because callers unwrap with unwrapVolatileConfig before use.
+export const Config = Schema.object({
+  enabled: Schema.boolean().default(true).volatile(),
+  discussion: DiscussionConfig.volatile(),
+  trigger: TriggerConfig.volatile(),
+  ui: UiConfig.volatile(),
+  quota: QuotaConfig.volatile(),
+  advisors: Schema.array(AdvisorConfig).default([]).volatile(),
+}) as unknown as Schema<Config>
+
+export function unwrapVolatileConfig<T>(value: T): T {
+  if (value && typeof value === 'object' && 'get' in value && typeof (value as { get?: unknown }).get === 'function') {
+    return unwrapVolatileConfig((value as unknown as { get: () => unknown }).get()) as T
+  }
+  if (Array.isArray(value)) return value.map((item) => unwrapVolatileConfig(item)) as T
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, unwrapVolatileConfig(item)]),
+    ) as T
+  }
+  return value
+}

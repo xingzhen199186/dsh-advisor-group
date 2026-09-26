@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { Config, type Config as ConfigShape } from './config'
+import { Config, unwrapVolatileConfig, type Config as ConfigShape } from './config'
 import { AdvisorGroupService } from './service'
 import { registerAdvisorTools } from './tools'
 import { registerAdvisorSettingsAndRoutes } from './settings-api'
@@ -13,8 +13,12 @@ export const inject = ['tools', 'llm', 'systemPrompt', 'sessions']
 export { Config }
 
 export function apply(ctx: Context, config: ConfigShape): void {
-  const service = new AdvisorGroupService(ctx, config)
-  registerAdvisorSettingsAndRoutes(ctx, config, service)
+  // Config declares volatile fields, so Cordis hands `apply` live references.
+  // The service keeps plain values and re-reads them when the loader reports a
+  // volatile-only config change.
+  const resolvedConfig = unwrapVolatileConfig(config)
+  const service = new AdvisorGroupService(ctx, resolvedConfig)
+  registerAdvisorSettingsAndRoutes(ctx, resolvedConfig, service)
 
   for (const tool of registerAdvisorTools(service)) {
     ctx.tools.register(tool)

@@ -105,6 +105,7 @@ describe('driver cancellation semantics (stop during generation)', () => {
       },
     } as unknown as Context
     const session = {
+      id: 'sess-1',
       messages: [{ role: 'main', content: '问题', ts: 0 }],
     } as never
     const question = await generateDeepenQuestion(
@@ -127,6 +128,7 @@ describe('driver cancellation semantics (stop during generation)', () => {
         },
       } as unknown as Context
       const session = {
+        id: 'sess-1',
         messages: [{ role: 'main', content: '问题', ts: 0 }],
       } as never
       const question = await generateDeepenQuestion(
@@ -138,6 +140,7 @@ describe('driver cancellation semantics (stop during generation)', () => {
       expect(question).toBe(FALLBACK_DEEPEN_QUESTION)
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining('驱动模型生成失败（fake-provider/fake-model）'),
+        'sess-1',
         expect.stringContaining('provider exploded'),
       )
     } finally {
@@ -157,6 +160,7 @@ describe('driver cancellation semantics (stop during generation)', () => {
         },
       } as unknown as Context
       const session = {
+        id: 'sess-1',
         messages: [{ role: 'main', content: '问题', ts: 0 }],
       } as never
       const question = await generateDeepenQuestion(
@@ -167,9 +171,10 @@ describe('driver cancellation semantics (stop during generation)', () => {
       )
       expect(question).toBe(FALLBACK_DEEPEN_QUESTION)
       expect(warn).toHaveBeenCalledTimes(1)
-      const msg = String(warn.mock.calls[0]?.[0] ?? '')
-      expect(msg).toContain('驱动模型空响应（fake-provider/fake-model）')
-      expect(msg).toContain('chunks=2 textDeltas=0 reasoningDeltas=2')
+      const [prefix, sessionId, detail] = warn.mock.calls[0] ?? []
+      expect(String(prefix)).toContain('驱动模型空响应（fake-provider/fake-model）')
+      expect(sessionId).toBe('sess-1')
+      expect(String(detail)).toContain('chunks=2 textDeltas=0 reasoningDeltas=2')
     } finally {
       warn.mockRestore()
     }
