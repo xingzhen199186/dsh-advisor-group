@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Advisor prompt corruption guard** (`src/prompt-guard.ts`): on plugin load and on custom-settings save, each stored advisor prompt is compared against the built-in template. A prompt damaged into replacement characters (U+FFFD) with an unambiguous fit is restored from the template; anything ambiguous is left untouched and reported via a console warning for manual repair — the earlier silent-corruption failure mode now leaves a trace.
+
+### Changed
+
+- Risk-note detection extracted from `service.ts` into `src/risk-notes.ts` and its keyword rules revised (v2): the word list drops 「注意」 (the largest measured false-positive source), ASCII words gain boundaries so identifiers like `confidenceThreshold` no longer match, and negated assertions (「没有任何风险」/「no risk」…) are stripped before matching. Measured on a frozen 58-case corpus (24 real + 34 adversarial, split rule and acceptance criteria frozen before construction): holdout false positives 4 → 0 (hard gate now passes), keyword-scope recall 25/33 → 23/33 as the expected trade; truncation and cancel scopes unchanged at zero errors.
+
 ## [0.1.0] - 2026-09-26
 
 ### Added

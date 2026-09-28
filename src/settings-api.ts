@@ -15,6 +15,7 @@ import {
 import { PROVIDER_PRESETS } from './providers/presets'
 import { subscribe } from './stream-channel'
 import { readShadowSamples } from './shadow'
+import { guardAdvisorPrompts, reportPromptGuardFindings } from './prompt-guard'
 import type { AdvisorGroupService } from './service'
 
 type ScopedContext = Context & {
@@ -945,7 +946,11 @@ export function registerAdvisorSettingsAndRoutes(
     const watchDisposer = (ctx as unknown as {
       on(event: string, listener: () => void): () => void
     }).on('loader/volatile-update', () => {
-      service.setConfig(unwrapVolatileConfig(ctx.fiber.config))
+      // Same load-time prompt guard as apply(): corruption re-read from disk
+      // here gets healed (or loudly reported) before it reaches the service.
+      const guarded = guardAdvisorPrompts(unwrapVolatileConfig(ctx.fiber.config))
+      reportPromptGuardFindings(guarded.findings)
+      service.setConfig(guarded.config)
     })
 
     // Per-boot shared token: the host injects it into the served index and the

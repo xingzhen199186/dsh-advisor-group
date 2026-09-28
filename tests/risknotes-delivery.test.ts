@@ -133,4 +133,19 @@ describe('riskNotes in the ask_advisors tool result (delivery-tension ruling)', 
     expect(result.advice).toContain('【风险提示】')
     expect(result.advice).toContain(RISK_NOTE)
   })
+
+  it('real advisor prose (live session bab555f3) still trips the keyword rule', async () => {
+    // Contract fixture captured 2026-09-26 from a real consultation whose
+    // delivery was verified end-to-end: ordinary multi-clause prose with
+    // full-width punctuation and markdown (not just a short synthetic line)
+    // must still hit the keyword rule and deliver the same golden note.
+    const realProse =
+      '（双证校对、门禁两轮全绿、本机冒烟通过），**当前最大的风险不在代码，而在「验证深度不足」与「发布链路状态不一致」**：真实顾问会话未走新代码路径。'
+    const ask = askTool(makeService(realProse))
+    const result = (await ask.execute({ question: '测试问题' }, exec)) as AskResult
+
+    expect(result.skipped).toBe(false)
+    expect(result.advice).toContain('【风险提示】')
+    expect(result.advice).toContain(RISK_NOTE)
+  })
 })

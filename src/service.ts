@@ -10,6 +10,7 @@ import { callViaCtxLlm, type TranscriptEntry } from './providers/ctx-llm'
 import { streamDirectHttp } from './providers/direct-http'
 import { advisorJoinPrompt, ADVISOR_TOOL_GUIDANCE } from './providers/advisor-prompt'
 import { generateConclusion, generateDeepenQuestion, resolveDriverSource } from './driver'
+import { buildRiskNotes } from './risk-notes'
 import { appendAdvisorDelta, appendAdvisorEnd, appendAdvisorMessage, appendAdvisorResume } from './session-log'
 import { publish } from './stream-channel'
 import { executeAdvisorTool, resolveAdvisorToolSchemas, runAdvisorToolLoop, sanitizeAdvisorContent, type AdvisorAgent, type AdvisorToolStepEvent } from './advisor-tools'
@@ -1239,16 +1240,7 @@ export class AdvisorGroupService {
       }
     })
 
-    const riskNotes = advisorMessages.some((message) => /风险|注意|不确定|risk|uncertain|confidence/i.test(message.content))
-      ? ['部分顾问提到了风险、不确定性或置信度较低，请主模型谨慎采用。']
-      : []
-    if (advisorMessages.some((message) => message.truncated !== undefined)) {
-      riskNotes.push('有顾问输出在流式过程中被截断（超时或网络中断），其正文可能不完整，且该顾问本轮可能只提供了部分意见。')
-    }
-
-    if (cancelled) {
-      riskNotes.push('本次顾问群讨论已被用户或主模型取消，结论可能不完整。')
-    }
+    const riskNotes = buildRiskNotes(advisorMessages, cancelled)
 
     return {
       sessionId: session.id,

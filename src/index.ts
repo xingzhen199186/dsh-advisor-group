@@ -4,6 +4,7 @@ import { AdvisorGroupService } from './service'
 import { registerAdvisorTools } from './tools'
 import { registerAdvisorSettingsAndRoutes } from './settings-api'
 import { buildAdvisorPrompt } from './prompt'
+import { guardAdvisorPrompts, reportPromptGuardFindings } from './prompt-guard'
 import './events'
 import './session-events-host'
 
@@ -17,8 +18,12 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // The service keeps plain values and re-reads them when the loader reports a
   // volatile-only config change.
   const resolvedConfig = unwrapVolatileConfig(config)
-  const service = new AdvisorGroupService(ctx, resolvedConfig)
-  registerAdvisorSettingsAndRoutes(ctx, resolvedConfig, service)
+  // Load-time prompt guard: heal unambiguous corruption before anything
+  // (service, routes, prompt section) reads advisor prompts.
+  const guarded = guardAdvisorPrompts(resolvedConfig)
+  reportPromptGuardFindings(guarded.findings)
+  const service = new AdvisorGroupService(ctx, guarded.config)
+  registerAdvisorSettingsAndRoutes(ctx, guarded.config, service)
 
   for (const tool of registerAdvisorTools(service)) {
     ctx.tools.register(tool)
