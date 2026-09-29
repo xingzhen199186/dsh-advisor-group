@@ -55,9 +55,9 @@ describe('prompt guard: healAdvisorSystemPrompt', () => {
     expect(result.value).toBe(custom)
   })
 
-  it('strips a leading BOM and reports it as healed', () => {
+  it('strips a leading BOM and reports it as stripped (not as a template refill)', () => {
     const result = healAdvisorSystemPrompt('\uFEFF' + TEMPLATE)
-    expect(result.action).toBe('healed')
+    expect(result.action).toBe('stripped')
     expect(result.value).toBe(TEMPLATE)
   })
 
@@ -104,6 +104,15 @@ describe('prompt guard: guardAdvisorPrompts', () => {
     expect(findings).toHaveLength(0)
   })
 
+  it('applies BOM stripping as a config change (stripped counts as a modification)', () => {
+    const config = sampleConfig(['\uFEFF' + TEMPLATE])
+    const { config: result, findings } = guardAdvisorPrompts(config)
+    expect(result).not.toBe(config)
+    expect(result.advisors[0].systemPrompt).toBe(TEMPLATE)
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({ advisorId: 'advisor-0', action: 'stripped' })
+  })
+
   it('keeps the config object untouched on needs-manual, but still records the finding', () => {
     const lines = TEMPLATE.split('\n')
     lines[1] = '用户改过的行' + FFFD
@@ -116,18 +125,25 @@ describe('prompt guard: guardAdvisorPrompts', () => {
 })
 
 describe('prompt guard: reportPromptGuardFindings', () => {
-  it('logs one warning per finding, stating the action actually taken', () => {
+  it('logs one timestamped warning per finding, stating the action actually taken', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       reportPromptGuardFindings([
         { advisorId: 'advisor-a', action: 'healed', reason: '已回填' },
         { advisorId: 'advisor-b', action: 'needs-manual', reason: '需人工' },
+        { advisorId: 'advisor-c', action: 'stripped', reason: '开头含 BOM，已剥除' },
       ])
-      expect(warn).toHaveBeenCalledTimes(2)
+      expect(warn).toHaveBeenCalledTimes(3)
       expect(String(warn.mock.calls[0]?.[0])).toContain('advisor-a')
       expect(String(warn.mock.calls[0]?.[0])).toContain('回填')
       expect(String(warn.mock.calls[1]?.[0])).toContain('advisor-b')
       expect(String(warn.mock.calls[1]?.[0])).toContain('需人工处理')
+      expect(String(warn.mock.calls[2]?.[0])).toContain('advisor-c')
+      expect(String(warn.mock.calls[2]?.[0])).toContain('BOM')
+      expect(String(warn.mock.calls[2]?.[0])).not.toContain('按内置模板回填')
+      for (const call of warn.mock.calls) {
+        expect(String(call[0])).toMatch(/^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\] \[dsh-advisor-group\]/)
+      }
     } finally {
       warn.mockRestore()
     }

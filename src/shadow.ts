@@ -30,10 +30,25 @@ export interface ShadowSample {
   shouldEscalate: boolean
   reason: string
   suggestWebSearch: boolean
-  /** Whether a consultation was actually launched by the tool. */
+  /**
+   * Whether this verdict actually started a consultation. 2026-09-29: written
+   * once the branch resolved — it used to be a copy of `shouldEscalate`, which
+   * made the log unable to tell a blocked launch from an accepted one.
+   */
   launched: boolean
-  /** Which classifier produced this verdict. */
-  provider?: 'jev' | 'local'
+  /** Which classifier produced this verdict (`bypass` = the gate was skipped). */
+  provider?: 'jev' | 'local' | 'bypass'
+  /**
+   * Set only when Jev was attempted and failed, so the verdict below came from
+   * the local fallback (absent = Jev was never attempted).
+   */
+  jevError?: string
+  /** Round-trip time of the Jev attempt in ms (recorded for failures too). */
+  jevLatencyMs?: number
+  /** Present on forced runs only: why the classifier gate was skipped. */
+  bypass?: 'mention' | 'repeat'
+  /** Repeat-pressure count observed for this session at call time. */
+  repeatCount?: number
   /** Jev's raw probabilities, so rejections are calibratable, not just countable. */
   scores?: ShadowScores
   /** Model id Jev reported (records `jev-latest` alias drift across samples). */

@@ -39,10 +39,39 @@ describe('classifier shadow samples', () => {
       provider: 'jev',
       scores: { needsAdvisor: 0.42, webSearch: 0.1, highRisk: 0.77, domain: 'legal' },
       model: 'openrouter/jev-1.13.0',
+      jevLatencyMs: 813,
+      repeatCount: 2,
     }))
     expect(formatted.provider).toBe('jev')
     expect(formatted.scores).toEqual({ needsAdvisor: 0.42, webSearch: 0.1, highRisk: 0.77, domain: 'legal' })
     expect(formatted.model).toBe('openrouter/jev-1.13.0')
+    expect(formatted.jevLatencyMs).toBe(813)
+    expect(formatted.repeatCount).toBe(2)
+  })
+
+  it('records a fallback verdict with the Jev error and a bypass without provenance', () => {
+    // 2026-09-29 instrumentation: `launched` is now the real outcome, and a
+    // failed Jev attempt is kept so fallback verdicts stay distinguishable from
+    // "Jev was never asked".
+    const fellBack = formatShadowSample(sample({
+      provider: 'local',
+      jevError: 'Jev 超时（10000ms）',
+      jevLatencyMs: 10_004,
+      launched: false,
+    }))
+    expect(fellBack.launched).toBe(false)
+    expect(fellBack.jevError).toBe('Jev 超时（10000ms）')
+
+    const bypassed = formatShadowSample(sample({
+      provider: 'bypass',
+      bypass: 'repeat',
+      repeatCount: 3,
+      shouldEscalate: true,
+      launched: true,
+    }))
+    expect(bypassed.bypass).toBe('repeat')
+    expect(bypassed.provider).toBe('bypass')
+    expect('jevError' in bypassed).toBe(false)
   })
 
   it('keeps legacy samples without provenance fields intact', () => {
@@ -52,5 +81,8 @@ describe('classifier shadow samples', () => {
     expect('provider' in formatted).toBe(false)
     expect('scores' in formatted).toBe(false)
     expect('model' in formatted).toBe(false)
+    expect('jevError' in formatted).toBe(false)
+    expect('jevLatencyMs' in formatted).toBe(false)
+    expect('bypass' in formatted).toBe(false)
   })
 })

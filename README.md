@@ -25,9 +25,9 @@
 
 | Surface | Status |
 |---|---|
-| Harness | DeepSeek Harness `0.1.7-rc.2` |
+| Harness | DeepSeek Harness `0.1.7-rc.2` → `0.2.x` (incl. `0.2.0-rc.1`) |
 | Node | `^22.19.0 \|\| >=24.0.0` |
-| Platforms | DSH Web (client bundle) + headless host logic |
+| Platforms | DSH Web and the desktop app (same client bundle) + headless host logic |
 
 ## 📦 Installation
 
@@ -45,6 +45,8 @@ npx @deepseek-ai/dsh web
 > npm run build
 > dsh plugin --profile web add ./dsh-advisor-group-<version>.tgz   # after npm pack (version from package.json)
 > ```
+
+> **Desktop app**: the desktop app owns its own profile — `dsh plugin --profile desktop …` is refused by design, not by permissions. Install from inside the app instead: **Plugins** in the sidebar → **Add plugin** → enter the package name or the absolute path of a local tarball.
 
 ## 🚀 Quick start
 
@@ -88,6 +90,16 @@ npx @deepseek-ai/dsh web
 
 > `discussion.parallel` and `discussion.stopOnConsensus` are deprecated leftovers kept only for stored-config compatibility.
 
+## 🧮 Daily quota
+
+The plugin ships a cost safety valve: it counts **new consultations** per UTC calendar day, default cap 50, changeable or switchable on the settings page. Only new consultations count — resuming (「▶ continue」) and follow-ups never consume quota. The check and the increment happen inside one synchronous block, so two consultations cannot slip through the same window; the counter is written atomically to `$DSH_HOME/storages/advisor-group/daily-guard.json`, survives restarts, and resets at the UTC day boundary. When the cap is reached `ask_advisors` does not start and returns a one-line explanation; the settings page shows "today's remaining consultations X / Y", and with the cap off the plugin still counts for display without blocking.
+
+## 💸 Usage and cost
+
+One consultation is not one call but a chain of them. With the defaults (`maxRounds = 2`, at most 3 advisors) a new consultation costs roughly 9 model calls: 2 rounds × (1 driver follow-up + 1 per advisor) + 1 driver synthesis. Advisors that use tools add one more model call per tool round (at most 4 rounds per advisor plus one forced text-only round), so the real count can be noticeably higher than 9.
+
+Billing follows each channel: advisors bill on the route and model you gave them, while the driver bills on the current session's model. To keep costs down, lower `maxRounds`, configure fewer advisors, set `tools: 'off'` for advisors, and pick a daily cap you are comfortable with. Resuming after an interruption ("▶ continue") only asks the advisors that had not finished, so it costs less than starting over.
+
 ## 🔒 Security & privacy
 
 - Direct API keys can be stored in the DSH `settings.yaml` (marked secret, never returned to the browser by `describe`); prefer `apiKeyEnv` (env-var mode) if you don't want keys on disk.
@@ -100,7 +112,7 @@ npx @deepseek-ai/dsh web
 ## ⚠️ Known limitations
 
 - A hard crash of the DSH host can leave an already-open card showing **LIVE** until the page is refreshed (a disconnect notice now appears); refresh restores the true state from the session log.
-- Risk notes (truncation / cancellation / caution hints) are heuristically extracted from advisor text: users see them on **stopped or completed** cards and in the session log, and the main model receives them in the `ask_advisors` result; the heuristic may miss or over-trigger.
+- Risk notes are **fact-based, never text-based**: a consultation reports truncation (an advisor stream cut off by timeout or network) and cancellation/stop. Users see them on **stopped or completed** cards and in the session log, and the main model receives them in the `ask_advisors` result. Advisor prose is not scanned for keywords — the earlier text heuristic was removed in 0.1.1 because it also fired on plain negations such as 「没有任何风险」.
 
 ## 🛠️ Development
 

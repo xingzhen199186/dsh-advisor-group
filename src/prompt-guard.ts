@@ -4,7 +4,7 @@ import type { Config as ConfigShape } from './config'
 const REPLACEMENT = '\uFFFD'
 const BOM = '\uFEFF'
 
-export type PromptGuardAction = 'ok' | 'healed' | 'needs-manual'
+export type PromptGuardAction = 'ok' | 'healed' | 'stripped' | 'needs-manual'
 
 export interface PromptGuardResult {
   action: PromptGuardAction
@@ -37,8 +37,9 @@ function matchesTemplateWithReplacement(storedLines: string[], templateLines: st
 
 /**
  * Advisor system-prompt corruption guard (P1, 2026-09-27).
- * Fast path is free: prompts without replacement chars/BOM pass through
+ * Fast path is free: prompts without replacement chars pass through
  * untouched (a customized prompt is legitimate and must never be overwritten).
+ * A leading BOM alone is stripped (action 'stripped', no template involved).
  * Only on a replacement char do we compare against the built-in template:
  * unambiguous (line count + per-character match) -> heal to the template;
  * anything else keeps the stored value and reports it for manual handling.
@@ -55,7 +56,7 @@ export function healAdvisorSystemPrompt(
   }
   const replacements = (value.match(/\uFFFD/g) ?? []).length
   if (replacements === 0) {
-    if (hadBom) return { action: 'healed', value, reason: '开头含 BOM，已剥除' }
+    if (hadBom) return { action: 'stripped', value, reason: '开头含 BOM，已剥除' }
     return { action: 'ok', value: stored }
   }
   const storedLines = value.split('\n')
@@ -96,7 +97,7 @@ export function guardAdvisorPrompts(config: ConfigShape): {
     const result = healAdvisorSystemPrompt(advisor.systemPrompt)
     if (result.action === 'ok') return advisor
     findings.push({ advisorId: advisor.id, action: result.action, reason: result.reason ?? '' })
-    if (result.action === 'healed') {
+    if (result.action === 'healed' || result.action === 'stripped') {
       healedAny = true
       return { ...advisor, systemPrompt: result.value }
     }
@@ -108,16 +109,23 @@ export function guardAdvisorPrompts(config: ConfigShape): {
 /**
  * Shared logger for both call sites: one line per finding, stating the action
  * actually taken (healed vs left untouched) plus the concrete reason.
+ * Every line carries an ISO-8601 timestamp so the host console redirect
+ * (which does not timestamp lines itself) stays forensically usable.
  */
 export function reportPromptGuardFindings(findings: PromptGuardFinding[]): void {
+  const stamp = () => `[${new Date().toISOString()}]`
   for (const finding of findings) {
     if (finding.action === 'healed') {
       console.warn(
-        `[dsh-advisor-group] 顾问提示词损坏，已按内置模板回填：${finding.advisorId}（${finding.reason}）`,
+        `${stamp()} [dsh-advisor-group] 顾问提示词损坏，已按内置模板回填：${finding.advisorId}（${finding.reason}）`,
+      )
+    } else if (finding.action === 'stripped') {
+      console.warn(
+        `${stamp()} [dsh-advisor-group] 顾问提示词开头含 BOM，已剥除、正文未改动：${finding.advisorId}（${finding.reason}）`,
       )
     } else {
       console.warn(
-        `[dsh-advisor-group] 顾问提示词损坏且无法无歧义回填，未改动、需人工处理：${finding.advisorId}（${finding.reason}）`,
+        `${stamp()} [dsh-advisor-group] 顾问提示词损坏且无法无歧义回填，未改动、需人工处理：${finding.advisorId}（${finding.reason}）`,
       )
     }
   }

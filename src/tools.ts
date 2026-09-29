@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { advisorsMissingModel } from './model-validation'
-import { appendShadowSample } from './shadow'
+import { appendShadowSample, type ShadowSample } from './shadow'
 import { classifyRequest } from './classifier'
 import { classifyWithJev, type JevClassificationResult } from './providers/jev'
 import type { AdvisorGroupService } from './service'
@@ -93,7 +93,20 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
       const contextText = typeof args.context === 'string' ? args.context : ''
       const mentionedAdvisorGroup = /@顾问群|@顧問群/.test(`${questionText}\n${contextText}`)
       const repeatPressure = service.getRepeatPressure(sessionLog?.id)
-      const forcedByRepeat = (repeatPressure?.count ?? 0) >= 3
+      const repeatCount = repeatPressure?.count ?? 0
+      const forcedByRepeat = repeatCount >= 3
+      // Measurement (2026-09-29, advisor-review ruling): one shadow sample per
+      // routing decision, written where the branch resolves so `launched` states
+      // the real outcome instead of copying `shouldEscalate`. Forced runs
+      // (@ mention / repeat escalation) get a bypass sample, because a repeat
+      // escalation is direct evidence that earlier turns should have called.
+      let shadow: Omit<ShadowSample, 'launched'> | undefined
+      let shadowWritten = false
+      const recordShadow = (launched: boolean) => {
+        if (!shadow || shadowWritten) return
+        shadowWritten = true
+        appendShadowSample({ ...shadow, launched })
+      }
 
       // Continue an existing interactive consultation with a follow-up question.
       if (args.sessionId) {
@@ -157,8 +170,11 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
       if (cfg.trigger.requireClassifier && !mentionedAdvisorGroup && !forcedByRepeat) {
         let classification
         let jevResult: JevClassificationResult | undefined
+        let jevError: string | undefined
+        let jevLatencyMs: number | undefined
         const jev = cfg.trigger.jev
         if (jev?.enabled) {
+          const jevStartedAt = Date.now()
           try {
             jevResult = await classifyWithJev(
               args.question,
@@ -171,11 +187,14 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
             classification = jevResult
           } catch (error) {
             if (exec.signal.aborted) throw error
+            jevError = error instanceof Error ? error.message : String(error)
             console.warn(
               '[dsh-advisor-group] Jev 分类失败，回退到本地分类器：',
               sessionLog?.id ?? 'no-session',
-              error instanceof Error ? error.message : String(error),
+              jevError,
             )
+          } finally {
+            jevLatencyMs = Date.now() - jevStartedAt
           }
         }
         classification ??= classifyRequest(
@@ -185,23 +204,26 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
             args.confidence,
             cfg.trigger.confidenceThreshold,
           )
-        // Shadow sample: record every non-forced verdict for threshold tuning.
-        // Fire-and-forget; never influences behavior.
-        appendShadowSample({
+        // Shadow sample: every judged verdict, for threshold tuning. Fire-and-
+        // forget; never influences behavior.
+        shadow = {
           ts: Date.now(),
           question: args.question,
           ...(typeof args.confidence === 'number' ? { confidence: args.confidence } : {}),
           shouldEscalate: classification.shouldEscalate,
           reason: classification.reason,
           suggestWebSearch: classification.suggestWebSearch,
-          launched: classification.shouldEscalate,
           // Jev succeeded only when its verdict survived; otherwise this line
-          // documents the local classifier.
+          // documents the local classifier (and `jevError` says why).
           provider: jevResult ? 'jev' : 'local',
+          ...(jevError === undefined ? {} : { jevError }),
+          ...(jevLatencyMs === undefined ? {} : { jevLatencyMs }),
+          ...(repeatCount > 0 ? { repeatCount } : {}),
           ...(jevResult?.rawAnswers ? { scores: jevResult.rawAnswers } : {}),
           ...(jevResult?.model ? { model: jevResult.model } : {}),
-        })
+        }
         if (!classification.shouldEscalate) {
+          recordShadow(false)
           if (classification.suggestWebSearch && cfg.trigger.allowWebFallback) {
             return {
               sessionId: '',
@@ -217,12 +239,29 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
             reason: 'classifier-rejected',
           }
         }
+      } else if (cfg.trigger.requireClassifier) {
+        // The gate never judged this call: either the user typed @顾问群, or the
+        // same question came back a third time. Record it — a repeat escalation
+        // means the earlier turns should have called and did not.
+        shadow = {
+          ts: Date.now(),
+          question: args.question,
+          shouldEscalate: true,
+          reason: mentionedAdvisorGroup
+            ? '用户点名 @顾问群，跳过前置分类器。'
+            : `同一问题已重复 ${repeatCount} 次，强制升级跳过前置分类器。`,
+          suggestWebSearch: false,
+          provider: 'bypass',
+          bypass: mentionedAdvisorGroup ? 'mention' : 'repeat',
+          repeatCount,
+        }
       }
 
       if (args.advisorIds && args.advisorIds.length > 0) {
         const configuredIds = new Set(cfg.advisors.map((advisor) => advisor.id))
         const matched = args.advisorIds.filter((id) => configuredIds.has(id))
         if (matched.length === 0) {
+          recordShadow(false)
           return {
             sessionId: '',
             advice: '未匹配到任何指定顾问，请检查 advisorIds 是否与设置中的顾问 id 一致。',
@@ -234,6 +273,7 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
 
       const costGuard = service.tryStartConsultation()
       if (!costGuard.ok) {
+        recordShadow(false)
         return {
           sessionId: '',
           advice: costGuard.reason,
@@ -250,6 +290,7 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
         sessionLog ? sessionLog.id : undefined,
       )
       if (sessionLog) appendAdvisorStart(sessionLog, session)
+      recordShadow(true)
       // Auto-deepen pipeline (2026-09-05): one call runs the whole consultation
       // — up to maxRounds rounds of [driver deep-question → A → B(sees A) →
       // C(sees A+B) …], closed by a driver-generated conclusion.
@@ -294,9 +335,11 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
   return [askAdvisors, toggleAdvisorGroup]
 }
 
-// Delivery-tension ruling (2026-09-26): the card copy says "请主模型谨慎采用",
-// so the caution must actually reach the main model — append the structured risk
-// notes to BOTH assembly sites (new consultation and follow-up) whenever present.
+// Delivery-tension ruling (2026-09-26): risk notes must actually reach the main
+// model — append the structured risk notes to BOTH assembly sites (new
+// consultation and follow-up) whenever present. (The keyword-derived caution
+// note was removed 2026-09-29; the remaining notes are fact-based: truncation
+// and cancellation flags, see risk-notes.ts.)
 function formatRiskNotes(summary: ConsultSummary): string {
   return summary.riskNotes.length > 0 ? `\n\n【风险提示】\n${summary.riskNotes.join('\n')}` : ''
 }

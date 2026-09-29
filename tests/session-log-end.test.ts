@@ -70,9 +70,10 @@ describe('appendAdvisorEnd carries stopped/conclusion', () => {
 // 2026-09-26 实机会话（bab555f3）双端取证：卡片从本事件的 summary.riskNotes
 // 渲染琥珀风险块，ask_advisors 工具返回格式化的是同一个 summary 数组。此处锁
 // 卡片侧线格式——非空逐字节透传（与工具返回同文案），空数组必须整个键省略，
-// 否则卡片会画出空块。
+// 否则卡片会画出空块。（2026-09-29 起 riskNotes 只剩截断/取消两条事实性提示，
+// 关键词「谨慎采用」随规则删除；本用例只锁序列化，与提示来源无关。）
 describe('appendAdvisorEnd serializes riskNotes (card-side wire contract)', () => {
-  const RISK_NOTE = '部分顾问提到了风险、不确定性或置信度较低，请主模型谨慎采用。'
+  const RISK_NOTE = '有顾问输出在流式过程中被截断（超时或网络中断），其正文可能不完整，且该顾问本轮可能只提供了部分意见。'
 
   it('passes a non-empty riskNotes array through byte-exact', () => {
     const { log, captured } = fakeLog()

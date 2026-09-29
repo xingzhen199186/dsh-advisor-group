@@ -2,15 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.1.1] - 2026-09-29
 
 ### Added
 
+- **Classifier shadow-log measurement fields**: each sample now records `provider` (`jev` / `local` / `bypass`), `jevError`, `jevLatencyMs`, `bypass` (`mention` / `repeat`) and `repeatCount`, so the log separates *who judged* from *what was decided*; `launched` is written from the real branch outcome instead of copying the classifier's suggestion. New `tests/shadow-instrumentation.test.ts` covers the Jev-error fallback, the `@顾问群` and repeat-3 bypass paths, and the gate-off case.
 - **Advisor prompt corruption guard** (`src/prompt-guard.ts`): on plugin load and on custom-settings save, each stored advisor prompt is compared against the built-in template. A prompt damaged into replacement characters (U+FFFD) with an unambiguous fit is restored from the template; anything ambiguous is left untouched and reported via a console warning for manual repair — the earlier silent-corruption failure mode now leaves a trace.
 
 ### Changed
 
-- Risk-note detection extracted from `service.ts` into `src/risk-notes.ts` and its keyword rules revised (v2): the word list drops 「注意」 (the largest measured false-positive source), ASCII words gain boundaries so identifiers like `confidenceThreshold` no longer match, and negated assertions (「没有任何风险」/「no risk」…) are stripped before matching. Measured on a frozen 58-case corpus (24 real + 34 adversarial, split rule and acceptance criteria frozen before construction): holdout false positives 4 → 0 (hard gate now passes), keyword-scope recall 25/33 → 23/33 as the expected trade; truncation and cancel scopes unchanged at zero errors.
+- **Adapted to DeepSeek Harness `0.2.0-rc.1`**: every `@deepseek-ai/dsh*` peer dependency range widened from `<0.2.0` to `<0.3.0`. The old range admitted `0.2.0-rc.1` only by accident — a prerelease sorts below `0.2.0`, and the new admission check lets prereleases participate in range matching — and it would have disabled the plugin the moment `0.2.0` shipped (DSH denies an out-of-range row before importing it). Dev dependencies moved onto the `0.2.0-rc.1` line so type checking runs against the new API surface; `tsc --noEmit` is clean, the full suite passes, and the composed web profile reports no admission rejection.
+- **Desktop app support**: the desktop app serves the same `platform: 'web'` client bundle and its profile already carries the whole web-app stack, so no client code changed. Because the desktop app owns its own profile and refuses CLI management by design, both READMEs now document installing it from **Plugins → Add plugin** instead of `dsh plugin`.
+- **Docs**: both READMEs gained a "Daily quota" section (what the cap counts, what it does *not* count, where the counter lives, what happens when it is exhausted) and a "Usage and cost" section (what one consultation actually costs in model calls and how to bring it down).
+
+### Removed
+
+- **Keyword-derived caution note**: the hint 「部分顾问提到了风险、不确定性或置信度较低，请主模型谨慎采用。」 is gone, together with the text heuristic behind it. It guessed that an advisor had expressed a reservation by scanning prose for 风险 / 不确定 / confidence…, which cannot be made reliable: on a frozen 15-case blind set (labels written and the file hash-sealed before the single run, never re-labelled afterwards) it produced 4 false positives — all four plain negations (「从来没出过风险」/「查不到任何风险迹象」/「风险点一个都找不到」/「风险不用管」) — while its 3 real truncation and 2 real cancellation cases all passed. Rather than ship a detector that cries wolf on 「no risk here」, the rule was deleted: `buildRiskNotes` now reports only the two fact-based notes (truncation flag / cancellation flag), which cannot false-fire on wording. The 58-case keyword corpus and its tuning harness were removed with it; the five real cases remain as a committed regression fixture. The note did ship in 0.0.1, so this is a deliberate behaviour change rather than the removal of unreleased work.
 
 ## [0.1.0] - 2026-09-26
 

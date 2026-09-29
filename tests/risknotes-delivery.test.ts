@@ -3,9 +3,12 @@ import type { Context } from '@deepseek-ai/cordis'
 
 /**
  * 送达张力决议（2026-09-26 用户裁定「按建议来」）：riskNotes 必须进 ask_advisors
- * 工具返回——卡片文案「请主模型谨慎采用」的收信人就是主模型，风险提示要随它限定
- * 的对话与结论一起送达，而不是只留在卡片和会话日志里。
- * 锁两条组装路径（新会话带综合结论、followUp 追问）与「空 riskNotes 不出空块」。
+ * 工具返回——风险提示的收信人包含主模型，它要随限定的对话与结论一起送达，而不是
+ * 只留在卡片和会话日志里。锁两条组装路径（新会话带综合结论、followUp 追问）与
+ * 「空 riskNotes 不出空块」。
+ *
+ * 2026-09-29 起提示只由事实标志驱动（关键词规则已删，见 src/risk-notes.ts），
+ * 所以这里用「顾问流超时截断」造提示，并额外锁住「正文提风险不再产生提示」。
  */
 
 // See tools-schema.test.ts: the real @deepseek-ai/dsh-tools pulls a host
@@ -16,6 +19,7 @@ vi.mock('@deepseek-ai/dsh-tools', () => ({
 
 import { registerAdvisorTools } from '../src/tools'
 import { AdvisorGroupService } from '../src/service'
+import { TRUNCATION_NOTE } from '../src/risk-notes'
 import type { AdvisorConfig, Config } from '../src/config'
 
 const ADVISOR: AdvisorConfig = {
@@ -35,7 +39,7 @@ function config(maxRounds: number): Config {
       parallel: true,
       autoDeepen: true,
       stopOnConsensus: false,
-      advisorTimeoutMs: 10_000,
+      advisorTimeoutMs: 60,
     },
     // Skip the classifier block entirely: these tests exercise the assembly
     // sites, not escalation policy.
@@ -57,8 +61,28 @@ function config(maxRounds: number): Config {
   }
 }
 
-/** Every stream call (driver AND advisor) answers with the same text. */
-function makeService(answer: string): AdvisorGroupService {
+/** 顾问流只吐思考链，然后挂住直到超时把它掐断 → 消息带 truncated(timeout)。 */
+function makeTruncatingService(maxRounds: number): AdvisorGroupService {
+  const fakeCtx = {
+    on: () => {},
+    emit: () => {},
+    llm: {
+      listProviders: () => [{ id: 'fake-provider' }],
+      async *stream(options: { signal?: AbortSignal }) {
+        yield { type: 'reasoning-delta', text: '长思考链' } as never
+        await new Promise<never>((_resolve, reject) => {
+          options.signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          )
+        })
+      },
+    },
+  } as unknown as Context
+  return new AdvisorGroupService(fakeCtx, config(maxRounds))
+}
+
+/** 顾问正常作答（可塞满风险字眼）。 */
+function makeAnsweringService(answer: string): AdvisorGroupService {
   const fakeCtx = {
     on: () => {},
     emit: () => {},
@@ -82,21 +106,20 @@ function askTool(service: AdvisorGroupService) {
 }
 
 const exec = { agent: undefined, signal: undefined } as never
-const RISK_NOTE = '部分顾问提到了风险、不确定性或置信度较低，请主模型谨慎采用。'
 
 describe('riskNotes in the ask_advisors tool result (delivery-tension ruling)', () => {
-  it('new consultation: risk hit appends 【风险提示】 after the synthesis', async () => {
-    const ask = askTool(makeService('这个方案存在风险，需要谨慎评估。'))
+  it('new consultation: a truncated advisor appends 【风险提示】 after the synthesis', async () => {
+    const ask = askTool(makeTruncatingService(1))
     const result = (await ask.execute({ question: '测试问题' }, exec)) as AskResult
 
     expect(result.skipped).toBe(false)
     expect(result.advice).toContain('【综合结论】')
     expect(result.advice).toContain('【风险提示】')
-    expect(result.advice).toContain(RISK_NOTE)
+    expect(result.advice).toContain(TRUNCATION_NOTE)
   })
 
-  it('new consultation: no risk hit omits the block entirely (no empty header)', async () => {
-    const ask = askTool(makeService('顾问的常规回答。'))
+  it('new consultation: risk words in clean prose no longer produce a block', async () => {
+    const ask = askTool(makeAnsweringService('这个方案存在风险，不确定性较高，请谨慎评估。'))
     const result = (await ask.execute({ question: '测试问题' }, exec)) as AskResult
 
     expect(result.skipped).toBe(false)
@@ -107,19 +130,7 @@ describe('riskNotes in the ask_advisors tool result (delivery-tension ruling)', 
     // followUp needs a live session with rounds left: maxRounds 2, one direct
     // round already run, then the follow-up takes round 2 (same pattern as
     // followup-guard.test.ts).
-    const service = new AdvisorGroupService(
-      {
-        on: () => {},
-        emit: () => {},
-        llm: {
-          listProviders: () => [{ id: 'fake-provider' }],
-          async *stream() {
-            yield { type: 'text-delta', text: '此项存在风险。' } as never
-          },
-        },
-      } as unknown as Context,
-      config(2),
-    )
+    const service = makeTruncatingService(2)
     const ask = askTool(service)
     const session = service.createSession('测试问题', undefined, [], 'C:\\work')
     await service.runOneRoundAndSummarize(session)
@@ -131,21 +142,6 @@ describe('riskNotes in the ask_advisors tool result (delivery-tension ruling)', 
 
     expect(result.skipped).toBe(false)
     expect(result.advice).toContain('【风险提示】')
-    expect(result.advice).toContain(RISK_NOTE)
-  })
-
-  it('real advisor prose (live session bab555f3) still trips the keyword rule', async () => {
-    // Contract fixture captured 2026-09-26 from a real consultation whose
-    // delivery was verified end-to-end: ordinary multi-clause prose with
-    // full-width punctuation and markdown (not just a short synthetic line)
-    // must still hit the keyword rule and deliver the same golden note.
-    const realProse =
-      '（双证校对、门禁两轮全绿、本机冒烟通过），**当前最大的风险不在代码，而在「验证深度不足」与「发布链路状态不一致」**：真实顾问会话未走新代码路径。'
-    const ask = askTool(makeService(realProse))
-    const result = (await ask.execute({ question: '测试问题' }, exec)) as AskResult
-
-    expect(result.skipped).toBe(false)
-    expect(result.advice).toContain('【风险提示】')
-    expect(result.advice).toContain(RISK_NOTE)
+    expect(result.advice).toContain(TRUNCATION_NOTE)
   })
 })

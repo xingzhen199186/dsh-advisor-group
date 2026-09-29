@@ -827,14 +827,19 @@ function handleConfigRequest(
           sendJson(res, 400, { ok: false, error: securityError })
           return
         }
+        // Same prompt guard as apply(): corruption arriving through the save
+        // path is healed (or loudly reported) BEFORE it is persisted, so the
+        // disk copy stays clean instead of needing another boot to warn about.
+        const guarded = guardAdvisorPrompts(reconciled)
+        reportPromptGuardFindings(guarded.findings)
         // Persist first, then update memory: if persistence fails the running
         // instance keeps its previous config. expectedRevision refuses stale writes.
         await scopedCtx.settings.replace(
           namespace,
-          reconciled as unknown as object,
+          guarded.config as unknown as object,
           expectedRevision,
         )
-        service.setConfig(reconciled)
+        service.setConfig(guarded.config)
         sendJson(res, 200, {
           ok: true,
           config: sanitizeConfig(service.getConfig()),
