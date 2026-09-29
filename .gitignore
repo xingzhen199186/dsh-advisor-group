@@ -11,3 +11,14 @@ smoke-*
 
 # local backups
 .bak-*
+
+# 本机开发约定（含本机路径）——不上传 GitHub（2026-09-29 用户裁决）
+AGENTS.md
+
+# 与发布无关的本地物（仓库约定：不提交）
+tasks/
+subagents/
+DELIVERY-EVIDENCE.md
+session.v4.jsonl
+dsh-session-*.zip
+*.tgz.bak-*
