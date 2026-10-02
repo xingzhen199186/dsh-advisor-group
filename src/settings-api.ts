@@ -660,7 +660,37 @@ function handleStreamRequest(req: IncomingMessage, res: ServerResponse): Promise
   })
 }
 
-function handleConfigRequest(
+/** First value of a possibly repeated header field. */
+function headerValue(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? (value[0] ?? '') : (value ?? '')
+}
+
+/**
+ * True when the request provably comes from the app's own page. Browsers set
+ * `Sec-Fetch-Site` themselves and page script cannot forge it, so a cross-site
+ * page is refused there; a client without that header must instead carry an
+ * `Origin`/`Referer` whose host equals the request host. A non-browser local
+ * program can forge either — this is a CSRF boundary, not a defence against a
+ * program already running on the same machine.
+ */
+export function isSameOriginPageRequest(req: IncomingMessage): boolean {
+  if (headerValue(req.headers['sec-fetch-site']) === 'same-origin') return true
+  const host = headerValue(req.headers.host)
+  if (!host) return false
+  const origins = [headerValue(req.headers.origin), headerValue(req.headers.referer)].filter(
+    (value) => value !== '',
+  )
+  if (origins.length === 0) return false
+  return origins.some((value) => {
+    try {
+      return new URL(value).host === host
+    } catch {
+      return false
+    }
+  })
+}
+
+export function handleConfigRequest(
   ctx: Context,
   scopedCtx: ScopedContext,
   service: AdvisorGroupService,
@@ -672,6 +702,23 @@ function handleConfigRequest(
     const rawUrl = req.url ?? ''
     const url = new URL(rawUrl, 'http://localhost')
     const pathname = url.pathname.replace(/\/+$/, '') || '/'
+
+    // The desktop shell can compose its window before this plugin registers the
+    // index injection, so the page may never receive the injected token. Hand
+    // it over on demand instead — same-origin only, so a cross-site page still
+    // cannot read it.
+    if (
+      req.method === 'GET' &&
+      (pathname === '/advisor-group/boot-token' || pathname === '/advisor-group/boot-token/')
+    ) {
+      if (!isSameOriginPageRequest(req)) {
+        sendJson(res, 403, { ok: false, error: 'forbidden' })
+        return
+      }
+      sendJson(res, 200, { ok: true, token: authToken })
+      return
+    }
+
     const token = String(req.headers['x-advisor-group-token'] ?? url.searchParams.get('token') ?? '')
     if (authToken && token !== authToken) {
       sendJson(res, 401, { ok: false, error: 'unauthorized' })

@@ -46,13 +46,70 @@ import { renderMarkdown } from './markdown'
 import type { AdvisorConfig as AdvisorConfigShape, Config as AdvisorGroupConfig } from '../config'
 import { DEFAULT_ADVISOR_PROMPT } from '../defaults'
 
-function advisorGroupToken(): string {
+/** The per-boot token as injected into the page, when that injection arrived. */
+function injectedAdvisorGroupToken(): string {
   return (globalThis as { __ADVISOR_GROUP_TOKEN__?: string }).__ADVISOR_GROUP_TOKEN__ ?? ''
 }
 
-function authHeaders(): Record<string, string> {
-  const token = advisorGroupToken()
-  return token ? { 'x-advisor-group-token': token } : {}
+let advisorGroupTokenCache = ''
+let advisorGroupTokenFetch: Promise<string> | null = null
+
+/** Token known so far: the injected one wins, otherwise the last handshake. */
+function currentAdvisorGroupToken(): string {
+  return injectedAdvisorGroupToken() || advisorGroupTokenCache
+}
+
+/**
+ * The host normally injects the per-boot token into the served index. The
+ * desktop shell can compose its window before this plugin registers that
+ * injection, so the page may never receive it — fall back to fetching it from
+ * the plugin's own same-origin handshake route.
+ */
+async function resolveAdvisorGroupToken(force = false): Promise<string> {
+  if (!force) {
+    const known = currentAdvisorGroupToken()
+    if (known) return known
+  }
+  if (!advisorGroupTokenFetch) {
+    advisorGroupTokenFetch = (async (): Promise<string> => {
+      try {
+        const res = await fetch(`/advisor-group/boot-token`, {
+          headers: { accept: 'application/json' },
+        })
+        if (!res.ok) return ''
+        const body = (await res.json()) as { token?: unknown }
+        return typeof body.token === 'string' ? body.token : ''
+      } catch {
+        return ''
+      }
+    })().then((token) => {
+      advisorGroupTokenCache = token
+      advisorGroupTokenFetch = null
+      return token
+    })
+  }
+  const fetched = await advisorGroupTokenFetch
+  return fetched || injectedAdvisorGroupToken()
+}
+
+/**
+ * `fetch` with the per-boot token attached. A 401 means the token rotated (a
+ * live plugin reload mints a new one) or that the injected copy was stale, so
+ * refresh it once and retry before surfacing the failure.
+ */
+async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const send = (token: string): Promise<Response> =>
+    fetch(path, {
+      ...init,
+      headers: {
+        ...(init.headers as Record<string, string> | undefined),
+        ...(token ? { 'x-advisor-group-token': token } : {}),
+      },
+    })
+  const res = await send(await resolveAdvisorGroupToken())
+  if (res.status !== 401) return res
+  const refreshed = await resolveAdvisorGroupToken(true)
+  return refreshed ? send(refreshed) : res
 }
 
 /**
@@ -887,13 +944,30 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
     setTransientNotice((prev) => (prev && prev.kind === 'stream' ? null : prev))
   }
 
+  // EventSource cannot send headers and does not retry a 401, so wait until the
+  // per-boot token is known — injected into the page, or fetched from the
+  // plugin's handshake route — before opening the stream.
+  const [streamTokenReady, setStreamTokenReady] = useState(
+    () => currentAdvisorGroupToken() !== '',
+  )
   useEffect(() => {
-    if (!sessionId) return
+    if (streamTokenReady) return
+    let alive = true
+    void resolveAdvisorGroupToken().then((token) => {
+      if (alive && token) setStreamTokenReady(true)
+    })
+    return () => {
+      alive = false
+    }
+  }, [streamTokenReady])
+
+  useEffect(() => {
+    if (!sessionId || !streamTokenReady) return
     // Pass the last seen event id + boot id so the host can replay buffered
     // deltas after a page refresh or EventSource reconnect; the JSON payload
     // also carries eventId/bootId for dedup below.
     const es = new EventSource(
-      `/advisor-group/stream?sessionId=${encodeURIComponent(sessionId)}&lastEventId=${lastEventIdRef.current}&bootId=${encodeURIComponent(lastBootIdRef.current)}&token=${encodeURIComponent(advisorGroupToken())}`,
+      `/advisor-group/stream?sessionId=${encodeURIComponent(sessionId)}&lastEventId=${lastEventIdRef.current}&bootId=${encodeURIComponent(lastBootIdRef.current)}&token=${encodeURIComponent(currentAdvisorGroupToken())}`,
     )
     es.onopen = () => {
       // Connected (again): the outage notice no longer applies.
@@ -1010,7 +1084,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
         noticeTimerRef.current = null
       }
     }
-  }, [sessionId])
+  }, [sessionId, streamTokenReady])
 
   const mergedMessages = data.messages.map((message) => {
     if (message.role !== 'advisor') return message
@@ -1086,9 +1160,9 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
                 onClick: () => {
                   void (async () => {
                     try {
-                      const res = await fetch('/advisor-group/stop', {
+                      const res = await authedFetch('/advisor-group/stop', {
                         method: 'POST',
-                        headers: { 'content-type': 'application/json', ...authHeaders() },
+                        headers: { 'content-type': 'application/json' },
                         body: JSON.stringify({ sessionId }),
                       })
                       const body = (await res.json()) as { ok?: boolean; error?: string }
@@ -1124,9 +1198,9 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
                   onClick: () => {
                     void (async () => {
                       try {
-                        const res = await fetch('/advisor-group/resume', {
+                        const res = await authedFetch('/advisor-group/resume', {
                           method: 'POST',
-                          headers: { 'content-type': 'application/json', ...authHeaders() },
+                          headers: { 'content-type': 'application/json' },
                           body: JSON.stringify({ sessionId }),
                         })
                         const body = (await res.json()) as { ok?: boolean; error?: string }
@@ -1507,7 +1581,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
     setError('')
     try {
       const [configData, providerData] = await Promise.all([
-        fetch('/advisor-group/config', { headers: authHeaders() }).then(
+        authedFetch('/advisor-group/config').then(
           (r) => r.json() as Promise<{
             ok?: boolean
             config?: AdvisorGroupConfig
@@ -1516,7 +1590,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
             error?: string
           }>,
         ),
-        fetch('/advisor-group/providers', { headers: authHeaders() }).then(
+        authedFetch('/advisor-group/providers').then(
           (r) => r.json() as Promise<{ ok?: boolean; providers?: ProviderOption[]; error?: string }>,
         ),
       ])
@@ -1594,9 +1668,9 @@ function AdvisorGroupSettingsTab(): ReactNode {
     setError('')
     setMsg('')
     try {
-      const res = await fetch('/advisor-group/models', {
+      const res = await authedFetch('/advisor-group/models', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...authHeaders() },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           advisorId: advisor.id,
           provider: advisor.provider,
@@ -1627,9 +1701,9 @@ function AdvisorGroupSettingsTab(): ReactNode {
     setError('')
     setMsg('')
     try {
-      const res = await fetch('/advisor-group/test-connection', {
+      const res = await authedFetch('/advisor-group/test-connection', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...authHeaders() },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           advisorId: advisor.id,
           provider: advisor.provider,
@@ -1670,9 +1744,9 @@ function AdvisorGroupSettingsTab(): ReactNode {
         },
         advisors: config.advisors.map(({ apiKeyMetaByProvider: _meta, ...rest }) => rest),
       }
-      const res = await fetch('/advisor-group/config', {
+      const res = await authedFetch('/advisor-group/config', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...authHeaders() },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ config: configPayload, expectedRevision: revision }),
       })
       const data = (await res.json()) as {
