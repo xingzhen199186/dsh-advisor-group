@@ -1,6 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import {
   SettingsConflictError,
   type SettingsNamespace,
@@ -665,29 +668,75 @@ function headerValue(value: string | string[] | undefined): string {
   return Array.isArray(value) ? (value[0] ?? '') : (value ?? '')
 }
 
+/** Origin of an http(s) URL; `''` for absent, opaque (`null`) or non-web values. */
+function webOrigin(value: string): string {
+  if (value === '' || value === 'null') return ''
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : ''
+  } catch {
+    return ''
+  }
+}
+
 /**
- * True when the request provably comes from the app's own page. Browsers set
- * `Sec-Fetch-Site` themselves and page script cannot forge it, so a cross-site
- * page is refused there; a client without that header must instead carry an
- * `Origin`/`Referer` whose host equals the request host. A non-browser local
- * program can forge either — this is a CSRF boundary, not a defence against a
- * program already running on the same machine.
+ * True when the handshake request may be handed the token. Only a *provably
+ * foreign web page* is refused: an `Origin`/`Referer` that parses as http(s) on
+ * another host. Same-origin pages pass, and so do callers carrying no web
+ * provenance at all — the desktop shell, which forwards the page's request
+ * without those headers, and any local program, which could forge them anyway.
+ *
+ * What actually keeps the token from a foreign page is not this check but the
+ * absent CORS header: a cross-origin fetch cannot read a response body without
+ * `Access-Control-Allow-Origin`, and this route never sends one. The check only
+ * decides whether a foreign page is answered at all.
  */
-export function isSameOriginPageRequest(req: IncomingMessage): boolean {
-  if (headerValue(req.headers['sec-fetch-site']) === 'same-origin') return true
+export function mayReadBootToken(req: IncomingMessage): boolean {
   const host = headerValue(req.headers.host)
-  if (!host) return false
-  const origins = [headerValue(req.headers.origin), headerValue(req.headers.referer)].filter(
-    (value) => value !== '',
-  )
-  if (origins.length === 0) return false
-  return origins.some((value) => {
-    try {
-      return new URL(value).host === host
-    } catch {
-      return false
+  const fromForeignPage = (value: string): boolean => {
+    const origin = webOrigin(value)
+    if (origin === '' || host === '') return false
+    return origin !== `http://${host}` && origin !== `https://${host}`
+  }
+  if (fromForeignPage(headerValue(req.headers.origin))) return false
+  if (fromForeignPage(headerValue(req.headers.referer))) return false
+  return true
+}
+
+/** Set once the process has logged an accepted handshake (refusals always log). */
+let bootTokenAcceptedLogged = false
+
+/**
+ * Records one handshake attempt in
+ * `$DSH_HOME/storages/advisor-group/boot-token.log`. Whether the desktop shell's
+ * request even reaches this route is otherwise invisible from outside the app,
+ * so each decision leaves a line; the file keeps only its most recent lines.
+ * Query strings are dropped and the referer is reduced to its origin, so no
+ * token can land in the log. A write failure never breaks the handshake.
+ */
+function recordBootTokenAttempt(req: IncomingMessage, allowed: boolean): void {
+  if (allowed && bootTokenAcceptedLogged) return
+  bootTokenAcceptedLogged = true
+  try {
+    const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+    const target = join(dshHome, 'storages', 'advisor-group', 'boot-token.log')
+    const line = `${[
+      new Date().toISOString(),
+      allowed ? 'allow' : 'deny',
+      `site=${headerValue(req.headers['sec-fetch-site']) || '-'}`,
+      `origin=${headerValue(req.headers.origin) || '-'}`,
+      `referer=${webOrigin(headerValue(req.headers.referer)) || '-'}`,
+      `host=${headerValue(req.headers.host) || '-'}`,
+      `ua=${headerValue(req.headers['user-agent']).slice(0, 48) || '-'}`,
+    ].join(' ')}\n`
+    mkdirSync(dirname(target), { recursive: true })
+    appendFileSync(target, line)
+    if (statSync(target).size > 8192) {
+      writeFileSync(target, readFileSync(target, 'utf8').split('\n').slice(-20).join('\n'))
     }
-  })
+  } catch {
+    // Diagnostics must never break the handshake.
+  }
 }
 
 export function handleConfigRequest(
@@ -704,14 +753,16 @@ export function handleConfigRequest(
     const pathname = url.pathname.replace(/\/+$/, '') || '/'
 
     // The desktop shell can compose its window before this plugin registers the
-    // index injection, so the page may never receive the injected token. Hand
-    // it over on demand instead — same-origin only, so a cross-site page still
-    // cannot read it.
+    // index injection, so the page may never receive the injected token. Hand it
+    // over on demand instead; `mayReadBootToken` decides who may read it, and
+    // each decision is logged for diagnosis.
     if (
       req.method === 'GET' &&
       (pathname === '/advisor-group/boot-token' || pathname === '/advisor-group/boot-token/')
     ) {
-      if (!isSameOriginPageRequest(req)) {
+      const allowed = mayReadBootToken(req)
+      recordBootTokenAttempt(req, allowed)
+      if (!allowed) {
         sendJson(res, 403, { ok: false, error: 'forbidden' })
         return
       }

@@ -63,7 +63,7 @@ function currentAdvisorGroupToken(): string {
  * The host normally injects the per-boot token into the served index. The
  * desktop shell can compose its window before this plugin registers that
  * injection, so the page may never receive it — fall back to fetching it from
- * the plugin's own same-origin handshake route.
+ * the plugin's own handshake route.
  */
 async function resolveAdvisorGroupToken(force = false): Promise<string> {
   if (!force) {
