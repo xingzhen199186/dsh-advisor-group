@@ -714,7 +714,14 @@ export function buildStepSequence(
  *   💭 思考·1 → ⛭ 工具×1（输入/输出）→ 💭 思考·2 → ⛭ 工具×2 → … → 📄 正文
  * Main/system messages stay a single collapsible row.
  */
-function AdvisorSteps({ message }: { message: AdvisorGroupMessageData }): ReactNode {
+function AdvisorSteps({
+  message,
+  plain = false,
+}: {
+  message: AdvisorGroupMessageData
+  /** Ask card: one answer row — no round suffix, no 📄 正文 tag. */
+  plain?: boolean
+}): ReactNode {
   const isMain = message.role === 'main'
   const isSystem = message.role === 'system'
   const label = isMain
@@ -722,7 +729,7 @@ function AdvisorSteps({ message }: { message: AdvisorGroupMessageData }): ReactN
     : isSystem
       ? 'SYSTEM'
       : (message.advisorName ?? message.advisorId ?? 'ADVISOR')
-  const group = isMain ? 'YOU' : isSystem ? 'SYSTEM' : `${label} · R${message.round ?? 1}`
+  const group = isMain || isSystem || plain ? label : `${label} · R${message.round ?? 1}`
   const truncated = message.truncated
   const toolViews = buildToolStepViews(message.toolSteps)
   const thinkingSegments =
@@ -838,7 +845,7 @@ function AdvisorSteps({ message }: { message: AdvisorGroupMessageData }): ReactN
     children.push(
       createElement(StepRow, {
         key: `body-${index}`,
-        title: `${group} 📄 正文`,
+        title: plain ? group : `${group} 📄 正文`,
         badges: truncated
           ? [
               createElement(
@@ -1280,7 +1287,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
         : `ADVISORS: ${data.advisors.map((a) => (a.avatar ? `${a.avatar} ${a.name}` : a.name)).join(' · ')}`,
     ),
     mergedMessages.map((message, index) =>
-      createElement(AdvisorSteps, { key: index, message }),
+      createElement(AdvisorSteps, { key: index, message, plain: isAsk }),
     ),
     data.status === 'completed' && data.summary?.conclusion
       ? createElement(
