@@ -17,6 +17,7 @@
 - **Three ways to activate** — `@顾问群` mention (force-start), same question repeated 3 times without resolution, or main-model self-assessed confidence below the threshold.
 - **Optional Jev semantic pre-classification (off by default)** — when `trigger.jev.enabled` is on, a configured Jev model judges non-force-started consultations first (escalation / high-risk / web-search fit, thresholds under `trigger.jev.*`); if Jev is unavailable the local rules-based classifier still decides. With `trigger.jev.useEnglishState`, the judge reads the caller-supplied English gist (`questionEn`) instead of the Chinese question — display and session records stay Chinese.
 - **Retro CRT chat cards** — green/amber/blue CRT themes, scanlines, LIVE/DONE headers, auto-expanded thinking panel with auto-scroll; advisor Markdown rendered with a link-protocol whitelist (headings, lists, code, quotes, links, tables).
+- **Ask another session (`ask_session`)** — hand one question to another live session — by exact session id, exact title, or a natural partial name such as the workspace name (`极简遥控器`) — and read what that session said between the delivery receipt and its next whole-session idle. The result is explicitly **not** a one-to-one reply, and the asking side renders the exchange in the same retro chat-group card. Guards: hop ≤ 2, no self/subagent target, one wait per session, a 32 KB payload budget; the target's turn is never cancelled.
 - **Provider presets (11 platforms · 26 presets)** — DeepSeek, Moonshot Kimi, Kimi Code, Aliyun Bailian, Zhipu AI, OpenAI, Claude, Gemini, SiliconFlow, AIHubMix, OpenRouter (OpenAI/Anthropic-compatible variants included).
 - **Security-minded by design** — API keys use official `SecretField` semantics (never returned to the browser; `apiKeysByProvider` key history is server-side only), SSRF-guarded diagnostics (https-only / loopback, no IP literals, no redirects), per-boot token auth on `/advisor-group/*` routes, and an atomic **configurable daily consultation cap** (default 50, can be disabled) persisted across restarts.
 - **Runtime toggle** — `toggle_advisor_group` enables/disables the plugin and persists the flag to settings.
@@ -58,7 +59,7 @@ npx @deepseek-ai/dsh web
    - type `@顾问群` in your question to force a consultation, or
    - ask a professional/uncertain question — the plugin escalates automatically when appropriate.
 
-`ask_advisors` tools available to the model: `ask_advisors`, `toggle_advisor_group`.
+`ask_advisors` tools available to the model: `ask_advisors`, `toggle_advisor_group`, `ask_session`.
 
 ## ⚙️ Configuration
 
@@ -100,6 +101,8 @@ One consultation is not one call but a chain of them. With the defaults (`maxRou
 
 Billing follows each channel: advisors bill on the route and model you gave them, while the driver bills on the current session's model. To keep costs down, lower `maxRounds`, configure fewer advisors, set `tools: 'off'` for advisors, and pick a daily cap you are comfortable with. Resuming after an interruption ("▶ continue") only asks the advisors that had not finished, so it costs less than starting over.
 
+`ask_session` is outside the consultation quota: it wakes the target session, which answers with one ordinary turn billed on that session's own model, and it never counts as a new consultation.
+
 ## 🔒 Security & privacy
 
 - Direct API keys can be stored in the DSH `settings.yaml` (marked secret, never returned to the browser by `describe`); prefer `apiKeyEnv` (env-var mode) if you don't want keys on disk.
@@ -113,6 +116,7 @@ Billing follows each channel: advisors bill on the route and model you gave them
 
 - A hard crash of the DSH host can leave an already-open card showing **LIVE** until the page is refreshed (a disconnect notice now appears); refresh restores the true state from the session log.
 - Risk notes are **fact-based, never text-based**: a consultation reports truncation (an advisor stream cut off by timeout or network) and cancellation/stop. Users see them on **stopped or completed** cards and in the session log, and the main model receives them in the `ask_advisors` result. Advisor prose is not scanned for keywords — the earlier text heuristic was removed in 0.1.1 because it also fired on plain negations such as 「没有任何风险」.
+- Cross-session asking (`ask_session`) has no settings switch yet, so the tool is visible in every session and relies on its own description to keep use to explicit user requests; two sessions asking each other at the same time is not detected.
 
 ## 🛠️ Development
 

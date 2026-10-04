@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.2] - 2026-10-04
+
+### Added
+
+- **`ask_session` — ask another existing session**: hands one question to another live session (target given as an exact session id, an exact display title, or a natural partial name such as the workspace name) and wakes it. The result is what that session said between the delivery receipt and its next whole-session idle — explicitly **not** a one-to-one reply. Guards are plugin-owned: hop ≤ 2, no self or subagent target, one concurrent wait per session, a 32 KB payload budget; the target's turn is never cancelled, and a timeout returns what was already collected.
+- **Cross-session chat-group card**: the asking side renders the exchange in the existing retro card by reusing the `advisor-group/start|message|end` session events with `kind: 'ask'` — waiting line, the two session members, the answer bubble and the delivery note, with the stop/resume controls hidden. Guard rejections keep the plain tool-row error and open no card.
+- **Natural-name session targeting**: resolution ladder exact session id → exact display name → partial match on the session title or the workspace path (case-insensitive). Several hits become candidates ordered running-first then most-recently-active, and partial lists are capped; the matcher never guesses. The tool description now tells the model to pass the name the user said instead of digging session ids out of log directories.
+
+### Fixed
+
+- **Desktop boot-token handshake**: the client fetches the per-boot token from `GET /advisor-group/boot-token` when the index injection never reached the page (the desktop shell can compose its window before the plugin registers it) and retries once on 401, because a live plugin reload mints a new token. The route admits the desktop shell while still refusing requests that prove an external web origin, and the SSE stream waits for the token before opening (EventSource cannot send headers and does not retry a 401).
+
 ## [0.1.1] - 2026-09-29
 
 ### Added

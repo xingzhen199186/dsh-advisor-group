@@ -1,6 +1,6 @@
 {
   "name": "dsh-advisor-group",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DSH plugin: consult multiple expert advisor models in a retro chat-group card — auto-deepen consultation pipeline with real streaming, SSE replay, and 26 provider presets.",
   "repository": {
     "type": "git",
