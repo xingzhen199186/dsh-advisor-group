@@ -4,7 +4,7 @@
 
 [![dsh-plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
 
-📖 [中文文档 / Chinese: README.zh.md](README.zh.md)
+📖 [中文文档 / Chinese: README.md](README.md)
 
 ---
 
@@ -60,6 +60,18 @@ npx @deepseek-ai/dsh web
    - ask a professional/uncertain question — the plugin escalates automatically when appropriate.
 
 `ask_advisors` tools available to the model: `ask_advisors`, `toggle_advisor_group`, `ask_session`.
+
+## 🔗 Ask another session
+
+Besides consulting advisors, the plugin ships one more tool, `ask_session`: it hands a question to **another live session** (another window or tab in the same host) and wakes that session to answer.
+
+- **Picking the target**: an exact session id, an exact title, or a natural partial name — the workspace directory name is enough (a session under `I:\极简遥控器\…` is found by saying 「极简遥控器」). One match is used directly; several matches become a candidate list (**running** sessions and recently active ones first) for you or the model to choose from. It never guesses.
+- **What you get back**: everything the target said between the **delivery receipt** and its next **whole-session idle** — "what that session said in that window", **not** a one-to-one reply to your message. On timeout (180 s by default, configurable) it returns what it already collected and does **not** interrupt the target.
+- **What you see**: the asking side shows a chat-group card — first "已投递，等待对方回应…", then the target's answer bubble and the "📌 投递说明" note (which delivery channel was used and how the wait ended). A failed target lookup opens no card; the error stays in the tool row.
+- **Guards**: hop ≤ 2 (no ping-pong relay), no self or subagent target, one concurrent wait per session, a 32 KB payload budget; the target's turn is **never** cancelled.
+- **Cost**: one ordinary target turn, billed on the target session's own model; it does **not** count against the daily consultation quota.
+
+In one line: say "ask the 极简遥控器 session how far along it is".
 
 ## ⚙️ Configuration
 

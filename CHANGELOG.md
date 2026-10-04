@@ -14,6 +14,10 @@ All notable changes to this project are documented in this file.
 
 - **Desktop boot-token handshake**: the client fetches the per-boot token from `GET /advisor-group/boot-token` when the index injection never reached the page (the desktop shell can compose its window before the plugin registers it) and retries once on 401, because a live plugin reload mints a new token. The route admits the desktop shell while still refusing requests that prove an external web origin, and the SSE stream waits for the token before opening (EventSource cannot send headers and does not retry a 401).
 
+### Docs
+
+- The Chinese README is now the homepage `README.md` (GitHub and the npm page both show it); the English one moved to `README.en.md`, and the two cross-links were updated. Both gained an **Ask another session** section — how to name the target, what the delivery→idle interval does and does not mean, what the card shows, the guards, and what it costs — and their feature list, tool list, cost note and known limitations were refreshed for `ask_session`.
+
 ## [0.1.1] - 2026-09-29
 
 ### Added
