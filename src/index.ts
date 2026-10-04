@@ -25,7 +25,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const service = new AdvisorGroupService(ctx, guarded.config)
   registerAdvisorSettingsAndRoutes(ctx, guarded.config, service)
 
-  for (const tool of registerAdvisorTools(service)) {
+  for (const tool of registerAdvisorTools(service, ctx)) {
     ctx.tools.register(tool)
   }
 

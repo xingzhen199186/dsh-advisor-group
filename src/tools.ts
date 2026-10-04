@@ -4,10 +4,25 @@ import { appendShadowSample, type ShadowSample } from './shadow'
 import { classifyRequest } from './classifier'
 import { classifyWithJev, type JevClassificationResult } from './providers/jev'
 import type { AdvisorGroupService } from './service'
-import { appendAdvisorStart } from './session-log'
+import { appendAdvisorStart, appendAskAnswer, appendAskStart } from './session-log'
+import {
+  askSession,
+  sessionDisplayName,
+  ASK_WAIT_DEFAULT_MS,
+  ASK_WAIT_MAX_MS,
+  getSessionController,
+  renderAskResult,
+  type AskCardDelivery,
+  type AskCardSettle,
+  type CrossSessionLogEvent,
+} from './cross-session'
 import type { ConsultSession, ConsultSummary } from './types'
+import type { Session } from '@deepseek-ai/dsh-session'
 
-export function registerAdvisorTools(service: AdvisorGroupService): Array<ReturnType<typeof defineTool>> {
+export function registerAdvisorTools(
+  service: AdvisorGroupService,
+  ctx?: unknown,
+): Array<ReturnType<typeof defineTool>> {
   const askAdvisors = defineTool({
     name: 'ask_advisors',
     description:
@@ -332,7 +347,220 @@ export function registerAdvisorTools(service: AdvisorGroupService): Array<Return
     },
   })
 
-  return [askAdvisors, toggleAdvisorGroup]
+  const askSessionTool = defineTool({
+    name: 'ask_session',
+    description:
+      'Ask another EXISTING ordinary session (another window/tab the user opened) a question, wake it, and return what that session said. Use ONLY when the user explicitly asks to ask another session/window (「去问另一个会话」「问一下那个窗口」). It wakes the target session and consumes its quota. The returned text is NOT a one-to-one reply: it is everything the target said between the delivery receipt and its next whole-session idle, so never present it as "the answer to my message". When the target title is ambiguous you MUST return the candidates and let the user choose — never guess. Never use it for subagent sessions or for yourself.',
+    parameters: {
+      target: {
+        type: 'string',
+        description:
+          'The target session: its full sessionId, its exact display title, or a natural partial name — the workspace/directory name the user mentioned is enough (「极简遥控器」 matches sessions under I:\\极简遥控器\\…). One unique match is used directly; several matches return the candidates (running / most recently active first) for the user to choose — never guess. Pass the name the user said — do NOT search log files or directories for session ids.',
+        required: true,
+      },
+      question: {
+        type: 'string',
+        description: 'The question to hand over. It is permanently recorded in the target session log, so write it self-contained.',
+        required: true,
+      },
+      context: {
+        type: 'string',
+        description:
+          'Optional background the target needs. Default: none. Anything sent here stays in the target session log forever, so send only what is necessary.',
+      },
+      waitMs: {
+        type: 'number',
+        description: `How long to wait for the target to finish, in milliseconds (default ${ASK_WAIT_DEFAULT_MS}, max ${ASK_WAIT_MAX_MS}). On timeout the already-collected text is returned and the target is NOT interrupted.`,
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          target: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              sessionId: { type: 'string', required: true },
+              name: { type: 'string', required: true },
+            },
+          },
+          delivered: { type: 'string', enum: ['native', 'fallback'] },
+          askId: { type: 'string' },
+          interval: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              from: { type: 'string', required: true },
+              // The enforced schema subset has one scalar `type` per node, so a
+              // nullable ISO time is expressed as string-or-null.
+              to: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+              endedBecause: { type: 'string', enum: ['idle', 'timeout', 'error'], required: true },
+            },
+            required: true,
+          },
+          answer: { type: 'string', required: true },
+          note: { type: 'string', required: true },
+          error: { type: 'string' },
+          message: { type: 'string' },
+          candidates: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                sessionId: { type: 'string', required: true },
+                name: { type: 'string', required: true },
+                hint: { type: 'string', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) =>
+        value.ok === true
+          ? renderAskResult({ answer: String(value.answer ?? ''), note: String(value.note ?? '') })
+          : [
+              {
+                type: 'text',
+                text: `【ask_session 未完成：${String(value.error ?? 'unknown')}】\n${String(value.message ?? '')}${
+                  Array.isArray(value.candidates) && value.candidates.length > 0
+                    ? `\n候选会话：\n${value.candidates
+                        .map(
+                          (item) =>
+                            `- ${String((item as { readonly name?: unknown }).name ?? '')} · ${String(
+                              (item as { readonly sessionId?: unknown }).sessionId ?? '',
+                            )}`,
+                        )
+                        .join('\n')}`
+                    : ''
+                }`,
+              },
+            ],
+    },
+    async execute(args, exec) {
+      const controller = getSessionController(ctx)
+      if (!controller) {
+        return {
+          ok: false,
+          error: 'service-missing',
+          message:
+            '此功能需要较新的 DSH 宿主：当前宿主没有提供 sessionController 服务，无法向其他会话投递问题。',
+          answer: '',
+          note: '',
+          interval: errorInterval(),
+        }
+      }
+
+      const session = exec.agent?.session ?? getCurrentSessionFrom(exec)
+      const sessionId = session?.id
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        return {
+          ok: false,
+          error: 'service-missing',
+          message: '无法确定当前会话的身份（工具执行上下文没有暴露会话），已拒绝投递。',
+          answer: '',
+          note: '',
+          interval: errorInterval(),
+        }
+      }
+
+      const question = typeof args.question === 'string' ? args.question : ''
+      const context = typeof args.context === 'string' ? args.context : undefined
+
+      let senderName = '未命名会话'
+      try {
+        const listed = await controller.list({}, exec.signal)
+        const own = listed.items.find((item) => item.sessionId === sessionId)
+        if (own) senderName = sessionDisplayName(own)
+      } catch {
+        // Naming is cosmetic: a failed list must not block the ask.
+      }
+
+      // Cross-session card: append start/end events to this session's log so
+      // the client assembles the chat-group card exactly like the advisor
+      // flow. Card writes are cosmetic — never let them break the ask.
+      const cardLog = session
+      const onDelivered = (info: AskCardDelivery): void => {
+        if (!cardLog) return
+        try {
+          appendAskStart(cardLog, info)
+        } catch (error) {
+          console.warn('[dsh-advisor-group] 跨会话卡片（开始）写入失败：', error)
+        }
+      }
+      const onSettled = (info: AskCardSettle): void => {
+        if (!cardLog) return
+        try {
+          appendAskAnswer(cardLog, info)
+        } catch (error) {
+          console.warn('[dsh-advisor-group] 跨会话卡片（结束）写入失败：', error)
+        }
+      }
+
+      const value = (await askSession(ctx, exec.signal, {
+        onDelivered,
+        onSettled,
+        currentSessionId: sessionId,
+        senderName,
+        currentEvents: readCurrentEvents(session),
+        target: typeof args.target === 'string' ? args.target : '',
+        question,
+        context,
+        waitMs: args.waitMs,
+        log: (message) => console.log(`[dsh-advisor-group] ask_session: ${message}`),
+      })) as Record<string, unknown>
+
+      if (value.ok !== true) {
+        return {
+          ok: false,
+          error: String(value.error ?? 'delivery-failed'),
+          message: String(value.message ?? ''),
+          ...(Array.isArray(value.candidates) ? { candidates: value.candidates } : {}),
+          answer: '',
+          note: '',
+          interval: errorInterval(),
+        }
+      }
+      return {
+        ok: true,
+        target: value.target as { sessionId: string; name: string },
+        delivered: value.delivered as 'native' | 'fallback',
+        askId: String(value.askId ?? ''),
+        interval: value.interval as { from: string; to: string | null; endedBecause: 'idle' | 'timeout' | 'error' },
+        answer: String(value.answer ?? ''),
+        note: String(value.note ?? ''),
+      }
+    },
+  })
+
+  return [askAdvisors, toggleAdvisorGroup, askSessionTool]
+}
+
+/**
+ * Current session id from the tool execution context. `exec.agent.session` is
+ * the Agent on whose behalf the call runs (same access `ask_advisors` uses for
+ * `exec.agent?.session`); the fallback covers hosts that only expose a raw
+ * session object on the execution input.
+ */
+function getCurrentSessionFrom(exec: unknown): Session | undefined {
+  return (exec as { readonly session?: Session } | undefined)?.session
+}
+
+/** Read this session's own log for the inbound-source / hop guard; empty on failure. */
+function readCurrentEvents(session: Session | undefined): readonly CrossSessionLogEvent[] {
+  try {
+    return (session?.snapshotEvents() as readonly CrossSessionLogEvent[] | undefined) ?? []
+  } catch {
+    return []
+  }
+}
+
+/** Empty interval carried on every not-ok result (no reply window ever opened). */
+function errorInterval(): { from: string; endedBecause: 'error' } {
+  return { from: new Date().toISOString(), endedBecause: 'error' }
 }
 
 // Delivery-tension ruling (2026-09-26): risk notes must actually reach the main

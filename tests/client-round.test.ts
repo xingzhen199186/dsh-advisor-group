@@ -263,3 +263,88 @@ describe('action description extraction (📋 行动·N before 💭 思考·N)',
     expect(extractActionDescription('')).toBe('')
   })
 })
+
+describe('cross-session ask card state', () => {
+  function startState(data: Record<string, unknown>): AdvisorGroupState {
+    return advisorGroupDefinition.start(
+      {} as Parameters<typeof advisorGroupDefinition.start>[0],
+      {
+        event: { type: 'advisor-group/start', data },
+      } as Parameters<typeof advisorGroupDefinition.start>[1],
+      {} as Parameters<typeof advisorGroupDefinition.start>[2],
+    )
+  }
+
+  it('builds the waiting state with mode ask from a kind:ask start', () => {
+    const state = startState({
+      sessionId: 'ask-1',
+      turn: 2,
+      step: 3,
+      question: '问题原文',
+      kind: 'ask',
+      advisors: [
+        { id: 'ask-sender', name: '提问方' },
+        { id: 'ask-target', name: '构建会话' },
+      ],
+    })
+    expect(state.mode).toBe('ask')
+    expect(state.status).toBe('running')
+    expect(state.turn).toBe(2)
+    expect(state.step).toBe(3)
+    expect(state.messages).toHaveLength(1)
+    expect(state.messages[0]?.role).toBe('main')
+    expect(state.messages[0]?.content).toBe('问题原文')
+  })
+
+  it('keeps regular consultations mode-free', () => {
+    const state = startState({
+      sessionId: 'session-1',
+      turn: 1,
+      step: 1,
+      question: '问题',
+      advisors: [{ id: 'advisor-a', name: '顾问A' }],
+    })
+    expect(state.mode).toBeUndefined()
+  })
+
+  it('closes the ask card with the answer bubble and the conclusion note', () => {
+    let state = startState({
+      sessionId: 'ask-1',
+      turn: 2,
+      step: 3,
+      question: '问题原文',
+      kind: 'ask',
+      advisors: [
+        { id: 'ask-sender', name: '提问方' },
+        { id: 'ask-target', name: '构建会话' },
+      ],
+    })
+    state = update(state, 'advisor-group/message', {
+      sessionId: 'ask-1',
+      turn: 2,
+      step: 3,
+      role: 'advisor',
+      advisorId: 'ask-target',
+      advisorName: '构建会话',
+      content: 'B 已收到并回复',
+    })
+    const answer = state.messages.find((message) => message.role === 'advisor')
+    expect(answer?.content).toBe('B 已收到并回复')
+
+    state = update(state, 'advisor-group/end', {
+      sessionId: 'ask-1',
+      turn: 2,
+      step: 3,
+      summary: {
+        question: '问题原文',
+        advisors: [{ advisorId: 'ask-target', advisorName: '构建会话', corePoints: [] }],
+        conclusion: '区间语义说明',
+      },
+    })
+    // The generic end handling must close the ask card too: completed (never
+    // cancelled — no stopped flag) with the note as conclusion, and mode kept.
+    expect(state.status).toBe('completed')
+    expect(state.summary?.conclusion).toBe('区间语义说明')
+    expect(state.mode).toBe('ask')
+  })
+})

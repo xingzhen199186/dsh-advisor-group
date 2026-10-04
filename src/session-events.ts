@@ -19,6 +19,12 @@ export interface AdvisorGroupStartData {
   readonly question: string
   readonly context?: string
   readonly advisors: AdvisorGroupAdvisorInfo[]
+  /**
+   * Card flavor. `'ask'` marks this start as a cross-session `ask_session`
+   * exchange (the client renders the waiting/answer card and skips the
+   * stop/resume controls); absent = a regular advisor consultation.
+   */
+  readonly kind?: 'ask'
 }
 
 export interface AdvisorGroupMessageData {

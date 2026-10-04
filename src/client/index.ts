@@ -144,6 +144,8 @@ export interface AdvisorGroupState {
   readonly messages: readonly AdvisorGroupMessageData[]
   readonly status: 'running' | 'completed' | 'cancelled'
   readonly summary?: AdvisorGroupEndData['summary']
+  /** Card flavor: 'ask' = cross-session ask_session exchange (own layout). */
+  readonly mode?: 'ask'
 }
 
 interface AdvisorGroupChatData {
@@ -154,6 +156,7 @@ interface AdvisorGroupChatData {
   readonly advisors: readonly AdvisorGroupAdvisorInfo[]
   readonly messages: readonly AdvisorGroupMessageData[]
   readonly summary?: AdvisorGroupEndData['summary']
+  readonly mode?: 'ask'
 }
 
 declare module '@deepseek-ai/dsh-client-ui-chat/client' {
@@ -181,6 +184,7 @@ function viewData(state: AdvisorGroupState): AdvisorGroupChatData {
     advisors: state.advisors,
     messages: state.messages,
     ...(state.summary === undefined ? {} : { summary: state.summary }),
+    ...(state.mode === undefined ? {} : { mode: state.mode }),
   }
 }
 
@@ -206,7 +210,7 @@ export const advisorGroupDefinition: ConversationNodeDefinition<AdvisorGroupStat
       throw new Error('advisor-group requires advisor-group/start')
     }
     const data = match.event.data
-    return {
+    const base = {
       sessionId: data.sessionId,
       turn: data.turn,
       step: data.step,
@@ -218,12 +222,18 @@ export const advisorGroupDefinition: ConversationNodeDefinition<AdvisorGroupStat
           sessionId: data.sessionId,
           turn: data.turn,
           step: data.step,
-          role: 'main',
+          role: 'main' as const,
           content: data.question,
         },
       ],
-      status: 'running',
+      status: 'running' as const,
     }
+    // Cross-session ask: same event stream, own layout (no stop/resume, the
+    // two roster slots are 提问方 / 目标会话 rather than advisors).
+    if (data.kind === 'ask') {
+      return { ...base, mode: 'ask' as const }
+    }
+    return base
   },
   update: (context, match) => {
     if (match.event.type === 'advisor-group/message') {
@@ -890,6 +900,10 @@ const NOTICE_TTL_MS = 6000
 function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactNode {
   const data = props.node.data
   const sessionId = data.sessionId
+  // Cross-session ask card: same shell, own labels/controls (see start()).
+  // `mode` never changes over a node's lifetime, so it is safe to read inside
+  // effects without adding it to their dependency list.
+  const isAsk = data.mode === 'ask'
   // SSE live overlay bucketed by `advisorId::round` so multi-round relays never
   // leak a later round's deltas into an earlier round's bubble (see the
   // sequential auto-deepen pipeline). Durable messages stay the base of truth.
@@ -962,7 +976,10 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
   }, [streamTokenReady])
 
   useEffect(() => {
-    if (!sessionId || !streamTokenReady) return
+    // The ask card has no live SSE overlay (its events are durable state
+    // transitions only — nothing ever publishes frames for the askId), so it
+    // never opens a stream.
+    if (!sessionId || isAsk || !streamTokenReady) return
     // Pass the last seen event id + boot id so the host can replay buffered
     // deltas after a page refresh or EventSource reconnect; the JSON payload
     // also carries eventId/bootId for dedup below.
@@ -1131,8 +1148,11 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
   })
 
   const shortId = data.sessionId.length > 8 ? data.sessionId.slice(0, 8) : data.sessionId
-  const title =
-    data.status === 'completed'
+  const title = isAsk
+    ? data.status === 'completed'
+      ? '跨会话提问 · 已完成'
+      : '跨会话提问 · 等待应答'
+    : data.status === 'completed'
       ? 'ADVISOR GROUP · DONE'
       : data.status === 'cancelled'
         ? 'ADVISOR GROUP · STOPPED'
@@ -1152,7 +1172,9 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
           key: 'stop',
           style: { display: 'flex', alignItems: 'center', gap: 8 },
         },
-        data.status === 'running'
+        // Stop/resume drive the consultation service; the ask card has no
+        // consultation to stop, so ask mode shows neither control.
+        data.status === 'running' && !isAsk
           ? createElement(
               'button',
               {
@@ -1190,7 +1212,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
               },
               '⏹ 停止',
             )
-          : data.status === 'cancelled'
+          : data.status === 'cancelled' && !isAsk
             ? createElement(
                 'button',
                 {
@@ -1253,7 +1275,9 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
     createElement(
       'div',
       { style: advisorsLineStyle },
-      `ADVISORS: ${data.advisors.map((a) => (a.avatar ? `${a.avatar} ${a.name}` : a.name)).join(' · ')}`,
+      isAsk
+        ? `提问方: ${data.advisors[0]?.name ?? '?'} → 目标会话: ${data.advisors[1]?.name ?? '?'}`
+        : `ADVISORS: ${data.advisors.map((a) => (a.avatar ? `${a.avatar} ${a.name}` : a.name)).join(' · ')}`,
     ),
     mergedMessages.map((message, index) =>
       createElement(AdvisorSteps, { key: index, message }),
@@ -1271,7 +1295,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
           createElement(
             'div',
             { style: { color: '#86efac', fontWeight: 700, marginBottom: 4 } },
-            '📌 综合结论',
+            isAsk ? '📌 投递说明' : '📌 综合结论',
           ),
           createElement('div', null, renderMarkdown(data.summary.conclusion)),
         )
@@ -1320,7 +1344,11 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
         )
       : null,
     data.status === 'running'
-      ? createElement('div', { style: waitingStyle }, '▊ AWAITING RESPONSES…')
+      ? createElement(
+          'div',
+          { style: waitingStyle },
+          isAsk ? '▊ 已投递，等待对方回应…' : '▊ AWAITING RESPONSES…',
+        )
       : null,
     transientNotice
       ? createElement('div', { style: noticeStyle }, transientNotice.text)
