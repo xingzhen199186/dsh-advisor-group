@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.3] - 2026-10-05
+
+### Fixed
+
+- **Advisor calls on session-routed plan routes came back empty**: `callViaCtxLlm` now stamps `GenerateOptions.sessionId` (the DSH session id, falling back to the consultation id). A built-in plan route attaches its required per-conversation routing header only when the call carries that identity — `opencode-go` sends `x-opencode-session`, and an identity-less request is answered with an empty stream **without any error**. The card therefore showed 「（顾问未返回正文）」, the driver quietly fell back to its static text, and every call returned in one or two seconds. The agent loop stamps the identity on ordinary turns; a plugin call has to pass it explicitly. Both the advisor path and the driver path (deepen question and conclusion) pass it now, and the `ctx.llm` contract test asserts the field is forwarded.
+- **The driver counted rounds as people**: with a single configured advisor answering three rounds, the synthesis opened with 「三位顾问一致认定」. The transcript now labels every advisor turn with its round (`[名字 · 第 N 轮]`), and both driver prompts carry a roster line stating how many distinct advisors took part plus an explicit instruction to speak in terms of advisors rather than messages. Two tests capture the prompt the driver actually sends and pin both shapes.
+
 ## [0.1.2] - 2026-10-04
 
 ### Added
