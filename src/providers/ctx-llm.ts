@@ -51,6 +51,14 @@ export async function callViaCtxLlm(
   signal?: AbortSignal,
   onDelta?: (delta: CtxLlmDelta) => void,
   timeoutMs?: number,
+  /**
+   * Session identity for route metadata. The agent loop stamps this on ordinary
+   * turns; some built-in routes need it to attach their per-conversation routing
+   * header (the `opencode-go` plan route sends `x-opencode-session` and answers
+   * an identity-less request with an empty stream), so a plugin call passes it
+   * explicitly instead of relying on the loop.
+   */
+  sessionId?: string,
 ): Promise<CtxLlmResult> {
   const userText = formatTranscript(transcript)
   const messages = [
@@ -78,6 +86,9 @@ export async function callViaCtxLlm(
     // spend everything on the thinking chain and truncate the body (see
     // ADVISOR_OUTPUT_POLICY).
     maxTokens: advisor.maxTokens ?? 16384,
+    ...(sessionId === undefined
+      ? {}
+      : { sessionId: sessionId as unknown as GenerateOptions['sessionId'] }),
     signal: pair.signal,
   }
 

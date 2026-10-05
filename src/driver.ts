@@ -93,6 +93,10 @@ async function generateWith(
       // "3 段中文结论" 与一句追问都不大，但推理型模型可能把预算吃在思考上
       // 导致正文为空；给足余量（原 600）。
       maxTokens: 2048,
+      // Route metadata: same reason as the advisor path — a built-in plan route
+      // (e.g. `opencode-go`) attaches its per-conversation routing header only
+      // when the call carries the session identity.
+      sessionId: sessionId as unknown as GenerateOptions['sessionId'],
       // Long discussions (24k-char transcript + accumulated tool results)
       // need a real budget: default 10 min (configurable via
       // `discussion.driverTimeoutMs`).
@@ -152,7 +156,7 @@ export async function generateDeepenQuestion(
   const produced = await generateWith(
     ctx,
     source,
-    session.id,
+    session.dshSessionId ?? session.id,
     DRIVER_SYSTEM_PROMPT,
     `以下是一轮顾问群的讨论记录：\n\n${transcriptOf(session)}\n\n请给出下一步的深入追问。`,
     signal,
@@ -173,7 +177,7 @@ export async function generateConclusion(
   const produced = await generateWith(
     ctx,
     source,
-    session.id,
+    session.dshSessionId ?? session.id,
     CONCLUSION_SYSTEM_PROMPT,
     `以下是顾问群全部 ${session.messages.filter((m) => m.role === 'advisor').length} 条顾问回答的讨论记录：\n\n${transcriptOf(session)}\n\n请给出综合结论。`,
     signal,

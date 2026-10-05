@@ -1009,6 +1009,15 @@ export class AdvisorGroupService {
       ts: Date.now(),
     }
 
+    // Route metadata for `ctx.llm`: the DSH session identity (falling back to the
+    // consultation id) so adapters that attach per-conversation routing headers
+    // (the `opencode-go` plan route needs `x-opencode-session`) get one. Without
+    // it the upstream answers an empty stream and the card shows a blank bubble.
+    const routingSessionId =
+      session.dshSessionId !== undefined && isSafeDshSessionId(session.dshSessionId)
+        ? session.dshSessionId
+        : session.id
+
     try {
       let content: string
       let isDshLlmProvider = false
@@ -1181,7 +1190,15 @@ export class AdvisorGroupService {
           truncated = streamResult.truncated
         }
       } else {
-        const result = await callViaCtxLlm(this.ctx, relational, transcript, signal, emitDelta, advisorTimeoutMs)
+        const result = await callViaCtxLlm(
+          this.ctx,
+          relational,
+          transcript,
+          signal,
+          emitDelta,
+          advisorTimeoutMs,
+          routingSessionId,
+        )
         flush()
         content = result.content
         truncated = result.truncated

@@ -290,6 +290,7 @@ describe('ctx.llm provider contract', () => {
       system?: string
       messages?: unknown[]
       signal?: AbortSignal
+      sessionId?: string
     } = {}
     const fakeCtx = {
       llm: {
@@ -299,6 +300,7 @@ describe('ctx.llm provider contract', () => {
           system?: string
           messages?: unknown[]
           signal?: AbortSignal
+          sessionId?: string
         }) {
           captured = options
           yield { type: 'reasoning-delta', text: '理由' } as never
@@ -315,6 +317,9 @@ describe('ctx.llm provider contract', () => {
       new AbortController().signal,
       (delta) => deltas.push(delta),
       77_000,
+      // Route metadata: a built-in plan route (e.g. `opencode-go`) attaches its
+      // per-conversation routing header only when the call carries this.
+      'session-abc',
     )
 
     expect(captured.provider).toBe('contract-test')
@@ -322,6 +327,7 @@ describe('ctx.llm provider contract', () => {
     expect(captured.system).toContain('契约测试专家')
     expect(captured.messages).toHaveLength(1)
     expect(captured.signal).toBeDefined()
+    expect(captured.sessionId).toBe('session-abc')
     expect(result.content).toBe('答复')
     expect(result.truncated).toBeUndefined()
     expect(deltas).toEqual([{ thinking: '理由' }, { text: '答复' }])
