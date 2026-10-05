@@ -180,3 +180,59 @@ describe('driver cancellation semantics (stop during generation)', () => {
     }
   })
 })
+
+describe('driver advisor accounting (rounds are not extra advisors)', () => {
+  /** Capture the system prompt and the user prompt the driver actually sends. */
+  function captureCtx(): { ctx: Context; seen: () => { system: string; prompt: string } } {
+    let system = ''
+    let prompt = ''
+    const ctx = {
+      llm: {
+        async *stream(options: { system?: string; messages?: Array<{ content?: Array<{ text?: string }> }> }) {
+          system = options.system ?? ''
+          prompt = options.messages?.[0]?.content?.[0]?.text ?? ''
+          yield { type: 'text-delta', text: '追问' } as never
+        },
+      },
+    } as unknown as Context
+    return { ctx, seen: () => ({ system, prompt }) }
+  }
+
+  it('says how many advisors took part and labels each turn with its round', async () => {
+    const { ctx, seen } = captureCtx()
+    const session = {
+      id: 'sess-1',
+      messages: [
+        { role: 'main', content: '原始问题', ts: 0 },
+        { role: 'advisor', advisorId: 'a1', advisorName: '顾问', content: '第一轮意见', round: 1, ts: 1 },
+        { role: 'advisor', advisorId: 'a1', advisorName: '顾问', content: '第二轮意见', round: 2, ts: 2 },
+      ],
+    } as never
+
+    await generateDeepenQuestion(ctx, session, { provider: 'fake-provider', model: 'fake-model' }, undefined)
+
+    const { system, prompt } = seen()
+    // One advisor answered twice → the roster must say one, not two.
+    expect(system).toContain('本次讨论共有 1 位顾问（顾问）')
+    expect(system).toContain('不要把同一位顾问的多轮发言数成多位顾问')
+    // …and the transcript keeps each repeated turn distinguishable by round.
+    expect(prompt).toContain('[顾问 · 第 1 轮]')
+    expect(prompt).toContain('[顾问 · 第 2 轮]')
+  })
+
+  it('counts distinct advisors rather than transcript entries', async () => {
+    const { ctx, seen } = captureCtx()
+    const session = {
+      id: 'sess-2',
+      messages: [
+        { role: 'advisor', advisorId: 'a1', advisorName: '甲', content: 'x', round: 1, ts: 1 },
+        { role: 'advisor', advisorId: 'a2', advisorName: '乙', content: 'y', round: 1, ts: 2 },
+        { role: 'advisor', advisorId: 'a1', advisorName: '甲', content: 'z', round: 2, ts: 3 },
+      ],
+    } as never
+
+    await generateDeepenQuestion(ctx, session, { provider: 'fake-provider', model: 'fake-model' }, undefined)
+
+    expect(seen().system).toContain('本次讨论共有 2 位顾问（甲、乙）')
+  })
+})

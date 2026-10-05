@@ -24,13 +24,15 @@ export const DRIVER_SYSTEM_PROMPT = `
 你是顾问群的主持人（驱动模型）。你的职责：
 1. 阅读项目背景、主模型问题与全部顾问回答；
 2. 提出一个更深入、聚焦的追问，推动讨论走向更细的根因、分歧或行动方案；
-3. 只输出追问本身（一句话，不超过 80 字），不要回答、不要打招呼、不要解释。
+3. 只输出追问本身（一句话，不超过 80 字），不要回答、不要打招呼、不要解释；
+4. 同一位顾问在多轮里多次发言，是**同一个人的多轮观点**，不要当成多位顾问。
 `
 
 export const CONCLUSION_SYSTEM_PROMPT = `
 你是顾问群的主持人（驱动模型）。请综合全部讨论，输出最终结论：
 - 用 3 段以内：共识、关键分歧（简要列出）、最可靠的行动建议；
-- 不要复述每个顾问的完整回答，只提炼差异与要点。
+- 不要复述每个顾问的完整回答，只提炼差异与要点；
+- 提到顾问时按**顾问人数**说：同一位顾问多轮发言仍是一位顾问，不要把发言条数数成人数。
 `
 
 export interface DriverSource {
@@ -57,13 +59,33 @@ export function resolveDriverSource(
   return undefined
 }
 
+/**
+ * Tell the driver how many advisors actually took part. One advisor can appear
+ * in several rounds, and without this the model counts turns as people (it once
+ * wrote 「三位顾问一致认定」 when a single advisor had answered three times).
+ */
+function advisorRoster(session: ConsultSession): string {
+  const names = [
+    ...new Set(
+      session.messages
+        .filter((message) => message.role === 'advisor')
+        .map((message) => message.advisorName ?? message.advisorId ?? '顾问'),
+    ),
+  ]
+  if (names.length === 0) return ''
+  return `\n\n本次讨论共有 ${names.length} 位顾问（${names.join('、')}）。同一位顾问可能在多轮中重复发言——提到顾问时按**顾问人数**说，不要把同一位顾问的多轮发言数成多位顾问。`
+}
+
 function transcriptOf(session: ConsultSession): string {
   return session.messages
     .filter((message) => message.role !== 'system')
     .map((message) => {
-      const speaker =
-        message.role === 'main' ? '主模型' : message.advisorName ?? message.advisorId ?? '顾问'
-      return `[${speaker}]\n${message.content}`
+      if (message.role === 'main') return `[主模型]\n${message.content}`
+      const name = message.advisorName ?? message.advisorId ?? '顾问'
+      // Keep the round visible: the same advisor speaks once per round, and the
+      // driver must not read those repeated turns as extra advisors.
+      const round = typeof message.round === 'number' ? ` · 第 ${message.round} 轮` : ''
+      return `[${name}${round}]\n${message.content}`
     })
     .join('\n\n')
     .slice(-24_000)
@@ -157,7 +179,7 @@ export async function generateDeepenQuestion(
     ctx,
     source,
     session.dshSessionId ?? session.id,
-    DRIVER_SYSTEM_PROMPT,
+    `${DRIVER_SYSTEM_PROMPT}${advisorRoster(session)}`,
     `以下是一轮顾问群的讨论记录：\n\n${transcriptOf(session)}\n\n请给出下一步的深入追问。`,
     signal,
     timeoutMs,
@@ -178,7 +200,7 @@ export async function generateConclusion(
     ctx,
     source,
     session.dshSessionId ?? session.id,
-    CONCLUSION_SYSTEM_PROMPT,
+    `${CONCLUSION_SYSTEM_PROMPT}${advisorRoster(session)}`,
     `以下是顾问群全部 ${session.messages.filter((m) => m.role === 'advisor').length} 条顾问回答的讨论记录：\n\n${transcriptOf(session)}\n\n请给出综合结论。`,
     signal,
     timeoutMs,
