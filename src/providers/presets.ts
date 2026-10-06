@@ -18,8 +18,21 @@ export interface ProviderPreset {
   /** Optional OpenAI-compatible base URL used for model-list fetching. */
   modelsBaseURL?: string
   modelsAuthMode?: ProviderAuthMode
+  /**
+   * Extra request headers the gateway requires on every call. OpenCode Go asks
+   * for a stable `x-opencode-session` routing key (KB X:
+   * `01-AI大模型供应/opencode/05-Console/05-Go.md`).
+   */
+  headers?: Record<string, string>
   notes?: string
 }
+
+/**
+ * Stable routing key OpenCode Go asks every client for. A fixed value makes the
+ * same trade-off the DSH-side route took on 2026-09-17 (static header: works
+ * immediately, costs cache locality) — per-conversation ids stay an upgrade.
+ */
+const OPENCODE_GO_SESSION_ID = 'dsh-advisor-group'
 
 export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
   deepseek: {
@@ -299,6 +312,63 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     modelsBaseURL: 'https://openrouter.ai/api/v1',
     modelsAuthMode: 'bearer',
     notes: 'OpenRouter Anthropic Skin；使用 ANTHROPIC_BASE_URL=https://openrouter.ai/api + ANTHROPIC_AUTH_TOKEN=OpenRouter Key（Bearer）。',
+  },
+  /**
+   * OpenCode Go — subscription plan ($10/月 Go、$40/月 Go Plus). KB X:
+   * `01-AI大模型供应/opencode/05-Console/05-Go.md`（2026-10-06 收录）。
+   *
+   * The gateway serves a different API family per model, so this provider is
+   * split the same way DeepSeek / Moonshot / OpenRouter are: this entry covers
+   * the OpenAI-compatible `/v1/chat/completions` models, `opencode-go-anthropic`
+   * the `/v1/messages` ones. Six models (Grok 4.6/4.7、GPT 5.6/6 Luna、Muse
+   * Spark 1.2/1.3) live on `/v1/responses`, which neither the direct-HTTP path
+   * nor these presets speak — use the DSH route for those.
+   */
+  'opencode-go': {
+    id: 'opencode-go',
+    label: 'OpenCode Go（订阅制 · OpenAI 兼容）',
+    protocol: 'openai',
+    baseURL: 'https://opencode.ai/zen/go/v1',
+    apiKeyEnv: 'OPENCODE_GO_API_KEY',
+    defaultModels: [
+      'glm-5.3',
+      'glm-5.3-flash',
+      'glm-5.2',
+      'kimi-k3',
+      'kimi-k2.7-code',
+      'kimi-k2.6',
+      'deepseek-v4-pro',
+      'deepseek-v4.1-flash',
+      'deepseek-v4-flash',
+      'deepseek-v4-flash-vision-exp',
+      'mimo-v2.6-pro',
+      'mimo-v2.6-flash',
+      'mimo-v2.5-pro',
+      'mimo-v2.5',
+      'longcat-2.0',
+      'longcat-2.5-preview-free',
+      'hy4-preview',
+      'hy3',
+      'space-bunny',
+    ],
+    authMode: 'bearer',
+    modelsBaseURL: 'https://opencode.ai/zen/go/v1',
+    modelsAuthMode: 'bearer',
+    headers: { 'x-opencode-session': OPENCODE_GO_SESSION_ID },
+    notes: '订阅制：在 opencode.ai/console 订阅后复制 API key（Go $10/月、Go Plus $40/月）。网关为 OpenAI 兼容（/zen/go/v1/chat/completions），并要求每次请求带稳定的 x-opencode-session 会话号——直连通道用固定标识 dsh-advisor-group，DSH 线路则由宿主按会话自动带。走 /v1/responses 的模型（Grok 4.6/4.7、GPT 5.6/6 Luna、Muse Spark 1.2/1.3）不经此通道。',
+  },
+  'opencode-go-anthropic': {
+    id: 'opencode-go-anthropic',
+    label: 'OpenCode Go（订阅制 · Anthropic 兼容）',
+    protocol: 'anthropic',
+    baseURL: 'https://opencode.ai/zen/go/v1',
+    apiKeyEnv: 'OPENCODE_GO_API_KEY',
+    defaultModels: ['minimax-m3', 'minimax-m2.7', 'qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus'],
+    authMode: 'bearer',
+    modelsBaseURL: 'https://opencode.ai/zen/go/v1',
+    modelsAuthMode: 'bearer',
+    headers: { 'x-opencode-session': OPENCODE_GO_SESSION_ID },
+    notes: '同一份订阅与 key：这几个模型在 Go 上走 Anthropic 的 /v1/messages（同样需要 x-opencode-session）。',
   },
 }
 

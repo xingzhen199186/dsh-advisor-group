@@ -213,9 +213,9 @@ export async function callDirectHttp(
 
   switch (protocol) {
     case 'openai':
-      return callOpenAICompatible(baseURL, advisor, apiKey, transcriptText, signal, timeoutMs)
+      return callOpenAICompatible(baseURL, advisor, apiKey, transcriptText, signal, timeoutMs, preset?.headers)
     case 'anthropic':
-      return callAnthropic(baseURL, advisor, apiKey, transcriptText, signal, authMode, timeoutMs)
+      return callAnthropic(baseURL, advisor, apiKey, transcriptText, signal, authMode, timeoutMs, preset?.headers)
     case 'gemini':
       return callGemini(baseURL, advisor, apiKey, transcriptText, signal, timeoutMs)
     default:
@@ -268,10 +268,10 @@ export async function streamDirectHttp(
   let result: StreamResult
   switch (protocol) {
     case 'openai':
-      result = await streamOpenAICompatible(baseURL, advisor, apiKey, transcriptText, onDelta, signal, timeoutMs, tools)
+      result = await streamOpenAICompatible(baseURL, advisor, apiKey, transcriptText, onDelta, signal, timeoutMs, tools, preset?.headers)
       break
     case 'anthropic':
-      result = await streamAnthropic(baseURL, advisor, apiKey, transcriptText, authMode, onDelta, signal, timeoutMs, tools)
+      result = await streamAnthropic(baseURL, advisor, apiKey, transcriptText, authMode, onDelta, signal, timeoutMs, tools, preset?.headers)
       break
     case 'gemini': {
       const content = await callGemini(baseURL, advisor, apiKey, transcriptText, signal, timeoutMs)
@@ -318,6 +318,8 @@ async function streamOpenAICompatible(
   signal?: AbortSignal,
   timeoutMs?: number,
   tools?: AdvisorToolSchema[],
+  /** Preset-supplied headers (OpenCode Go's `x-opencode-session`, …). */
+  extraHeaders?: Record<string, string>,
 ): Promise<StreamResult> {
   const endpoint = baseURL.endsWith('/chat/completions')
     ? baseURL
@@ -349,6 +351,7 @@ async function streamOpenAICompatible(
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${apiKey}`,
+      ...extraHeaders,
     },
     body: JSON.stringify(body),
     signal: pair.signal,
@@ -466,6 +469,8 @@ async function streamAnthropic(
   signal?: AbortSignal,
   timeoutMs?: number,
   tools?: AdvisorToolSchema[],
+  /** Preset-supplied headers (OpenCode Go's `x-opencode-session`, …). */
+  extraHeaders?: Record<string, string>,
 ): Promise<StreamResult> {
   const endpoint = baseURL.endsWith('/v1/messages')
     ? baseURL
@@ -475,6 +480,7 @@ async function streamAnthropic(
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     'anthropic-version': '2023-06-01',
+    ...extraHeaders,
   }
   if (authMode === 'bearer') {
     headers['authorization'] = `Bearer ${apiKey}`
@@ -596,6 +602,8 @@ async function callOpenAICompatible(
   transcriptText: string,
   signal?: AbortSignal,
   timeoutMs?: number,
+  /** Preset-supplied headers (OpenCode Go's `x-opencode-session`, …). */
+  extraHeaders?: Record<string, string>,
 ): Promise<string> {
   const endpoint = baseURL.endsWith('/chat/completions')
     ? baseURL
@@ -605,6 +613,7 @@ async function callOpenAICompatible(
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${apiKey}`,
+      ...extraHeaders,
     },
     body: JSON.stringify({
       model: advisor.model,
@@ -636,6 +645,8 @@ async function callAnthropic(
   signal?: AbortSignal,
   authMode: 'x-api-key' | 'bearer' = 'x-api-key',
   timeoutMs?: number,
+  /** Preset-supplied headers (OpenCode Go's `x-opencode-session`, …). */
+  extraHeaders?: Record<string, string>,
 ): Promise<string> {
   const endpoint = baseURL.endsWith('/v1/messages')
     ? baseURL
@@ -645,6 +656,7 @@ async function callAnthropic(
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     'anthropic-version': '2023-06-01',
+    ...extraHeaders,
   }
   if (authMode === 'bearer') {
     headers['authorization'] = `Bearer ${apiKey}`

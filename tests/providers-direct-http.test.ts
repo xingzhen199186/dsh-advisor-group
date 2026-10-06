@@ -24,11 +24,14 @@ describe('direct-http provider contract', () => {
   let baseURL: string
   let lastOpenAiBody: unknown
   let lastAnthropicBody: unknown
+  /** Headers of the most recent POST the fake server saw. */
+  let lastHeaders: Record<string, string | string[] | undefined> = {}
 
   beforeAll(async () => {
     server = createServer((req: IncomingMessage, res: ServerResponse) => {
       const path = req.url ?? ''
       if (path.includes('/chat/completions') && req.method === 'POST') {
+        lastHeaders = req.headers
         const chunks: Buffer[] = []
         req.on('data', (chunk: Buffer) => chunks.push(chunk))
         req.on('end', () => {
@@ -279,6 +282,19 @@ describe('direct-http provider contract', () => {
     expect(Date.now() - started).toBeLessThan(700)
     expect(result.truncated?.reason).toBe('timeout')
     expect(result.thinking).toBe('慢思考')
+  })
+
+  it('sends the preset gateway headers a route demands (OpenCode Go x-opencode-session)', async () => {
+    lastHeaders = {}
+    const result = await streamDirectHttp(
+      // `opencode-go` supplies the headers; the local fake server takes the call
+      // so the assertion never touches the real gateway.
+      advisor({ provider: 'opencode-go', baseURL, model: 'deepseek-v4-pro', apiKey: 'sk-opencode-go' }),
+      transcript,
+      () => {},
+    )
+    expect(result.content).toBe('你好，世界')
+    expect(lastHeaders['x-opencode-session']).toBe('dsh-advisor-group')
   })
 })
 
