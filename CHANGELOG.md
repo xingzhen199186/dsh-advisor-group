@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **OpenCode Go provider presets**: `opencode-go` (OpenAI-compatible, `/zen/go/v1/chat/completions`, 19 models) and `opencode-go-anthropic` (the five `/v1/messages` models). Sourced from the local knowledge base (`01-AI大模型供应/opencode/05-Console/05-Go.md`, captured 2026-10-06) — the Go subscription gateway serves a **different API family per model**, so the provider is split the way DeepSeek / Moonshot / OpenRouter already are. The six `/v1/responses` models (Grok 4.6/4.7, GPT 5.6/6 Luna, Muse Spark 1.2/1.3) are deliberately left out of the model lists because the direct-HTTP path does not speak that API. `ProviderPreset` gained an optional `headers` field that the direct-HTTP request builders merge into every call, so the stable `x-opencode-session` routing key the gateway asks every client for is actually sent. The plugin now ships **28 presets across 12 platforms**, and `OPENCODE_GO_API_KEY` joins the API-key environment whitelist along with them.
+
 ## [0.1.3] - 2026-10-05
 
 ### Fixed

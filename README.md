@@ -20,7 +20,7 @@
 - **Jev 语义前置分类（可选，默认关闭）**：开启 `trigger.jev.enabled` 后，未强制启动的咨询先由配置的 Jev 模型语义判断（是否该找顾问 / 是否高风险 / 是否更适合联网，阈值在 `trigger.jev.*`）；Jev 不可用时仍由本地规则分类器判定。`trigger.jev.useEnglishState` 开启后，判定改读主模型附带的英文概要（`questionEn`），展示与会话记录仍用中文。
 - **复古 CRT 聊天组卡片**：绿/琥珀/蓝三主题、扫描线、LIVE/DONE 标题、💭 思考面板默认展开自动滚底；顾问正文走轻量 Markdown 渲染（链接协议白名单，支持标题/列表/代码/引用/链接/表格）。
 - **跨会话提问（`ask_session`）**：把一个问题交给另一个**活着的**会话——用完整会话号、一字不差的标题，或者自然的名字（例如工作目录名「极简遥控器」）都可以——并唤醒它；拿回的是**从投递回执到对方下一次整体空闲**之间它说的话，明确**不是**逐条对应的回答。提问方一侧用同一套复古聊天组卡片呈现这次对话。护栏：跳数 ≤ 2、不能问自己或子会话、同一会话同时只等一个、载荷上限 32 KB；**永不取消对方的回合**。
-- **供应商预设（11 平台 · 26 预设）**：DeepSeek、月之暗面 Kimi、Kimi Code、阿里云百炼、智谱 AI、OpenAI、Claude、Gemini、硅基流动、AIHubMix、OpenRouter（含 OpenAI / Anthropic 兼容变体）。
+- **供应商预设（12 平台 · 28 预设）**：DeepSeek、月之暗面 Kimi、Kimi Code、阿里云百炼、智谱 AI、OpenAI、Claude、Gemini、硅基流动、AIHubMix、OpenRouter、**OpenCode Go**（含 OpenAI / Anthropic 兼容变体）。
 - **注重安全**：API Key 采用官方 `SecretField` 语义（浏览器永不回显；`apiKeysByProvider` 供应商密钥档案仅存服务端）；诊断端点 SSRF 加固（仅 https/loopback、拒绝 IP 字面量与重定向）；`/advisor-group/*` 路由启动期 token 鉴权；每日新咨询**可配置原子配额**（默认 50，可关闭），持久化跨重启。
 - **运行时开关**：`toggle_advisor_group` 启停插件并持久化到设置。
 
