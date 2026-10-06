@@ -18,8 +18,16 @@ import { PROVIDER_PRESETS } from '../src/providers/presets'
  *    path does not speak.
  */
 describe('OpenCode Go presets', () => {
-  const openai = PROVIDER_PRESETS['opencode-go']
+  const openai = PROVIDER_PRESETS['opencode-go-openai']
   const anthropic = PROVIDER_PRESETS['opencode-go-anthropic']
+
+  it('keeps the OpenAI-compatible preset off the DSH route name', () => {
+    // `opencode-go` is a DSH built-in plan route: a preset sharing that id is
+    // shadowed by the route in the provider list (kind:'llm') and never shows up
+    // in the settings dropdown, which is exactly what happened on 2026-10-06.
+    expect(openai).toBeDefined()
+    expect(PROVIDER_PRESETS['opencode-go']).toBeUndefined()
+  })
 
   it('registers both API families against the Go gateway', () => {
     expect(openai?.protocol).toBe('openai')

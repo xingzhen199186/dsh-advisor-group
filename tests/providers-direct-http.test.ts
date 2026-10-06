@@ -289,7 +289,7 @@ describe('direct-http provider contract', () => {
     const result = await streamDirectHttp(
       // `opencode-go` supplies the headers; the local fake server takes the call
       // so the assertion never touches the real gateway.
-      advisor({ provider: 'opencode-go', baseURL, model: 'deepseek-v4-pro', apiKey: 'sk-opencode-go' }),
+      advisor({ provider: 'opencode-go-openai', baseURL, model: 'deepseek-v4-pro', apiKey: 'sk-opencode-go' }),
       transcript,
       () => {},
     )

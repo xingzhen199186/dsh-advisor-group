@@ -327,8 +327,11 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
    * the `/v1/responses` API, which neither the direct-HTTP path nor these
    * presets speak.
    */
-  'opencode-go': {
-    id: 'opencode-go',
+  // id 刻意不叫 `opencode-go`：那个名字与 DSH 内置计划线路同名，插件列出来时会被
+  // 内置线路盖住（`kind:'llm'`），用户在设置页根本看不到这条预置。加 `-openai`
+  // 后缀，正好与 `opencode-go-anthropic` 对称。
+  'opencode-go-openai': {
+    id: 'opencode-go-openai',
     label: 'OpenCode Go（订阅制 · OpenAI 兼容）',
     protocol: 'openai',
     baseURL: 'https://opencode.ai/zen/go/v1',
