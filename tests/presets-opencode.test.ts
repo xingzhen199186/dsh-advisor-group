@@ -3,9 +3,11 @@ import { PROVIDER_PRESETS } from '../src/providers/presets'
 
 /**
  * The OpenCode Go presets come from the local knowledge base
- * (`01-AI大模型供应/opencode/05-Console/05-Go.md`, captured 2026-10-06): the Go
- * gateway serves a **different API family per model**, so the provider is split
- * exactly the way DeepSeek / Moonshot / OpenRouter already are.
+ * (`01-AI大模型供应/opencode/05-Console/05-Go.md`, captured 2026-10-06) and were
+ * then corrected against the live gateway: both surfaces serve nearly the whole
+ * catalogue, the Anthropic one authenticates with `x-api-key` (a Bearer header
+ * there is answered with 「Missing API key」), and only `grok-4.6`/`grok-4.7`
+ * are `/v1/responses`-only, i.e. unusable through the direct-HTTP path.
  */
 describe('OpenCode Go presets', () => {
   const openai = PROVIDER_PRESETS['opencode-go']
@@ -20,6 +22,14 @@ describe('OpenCode Go presets', () => {
     expect(anthropic?.apiKeyEnv).toBe('OPENCODE_GO_API_KEY')
   })
 
+  it('uses the auth scheme each surface accepts (Bearer vs x-api-key)', () => {
+    // Live probe: /chat/completions reads `authorization: Bearer …`, while
+    // /v1/messages only reads `x-api-key` — sending Bearer there returns 401
+    // 「Missing API key.」, which is exactly how the first release shipped broken.
+    expect(openai?.authMode).toBe('bearer')
+    expect(anthropic?.authMode).toBe('x-api-key')
+  })
+
   it('carries the session header the gateway asks every client for', () => {
     expect(openai?.headers?.['x-opencode-session']).toBeTypeOf('string')
     expect(openai?.headers?.['x-opencode-session']).not.toBe('')
@@ -27,31 +37,26 @@ describe('OpenCode Go presets', () => {
     expect(anthropic?.headers?.['x-opencode-session']).toBe(openai?.headers?.['x-opencode-session'])
   })
 
-  it('lists the chat-completions models it can drive, and not the responses ones', () => {
+  it('lists the live catalogue minus the responses-only models', () => {
     const models = openai?.defaultModels ?? []
     expect(models).toContain('deepseek-v4-pro')
     expect(models).toContain('glm-5.3')
     expect(models).toContain('kimi-k3')
     expect(models).toContain('mimo-v2.6-pro')
-    expect(models).toHaveLength(19)
-    // `/v1/responses` models cannot go through the direct-HTTP path at all.
+    expect(models).toHaveLength(41)
+    // `grok-4.6/4.7` answer 「not supported for format oa-compat/anthropic」.
+    expect(models).not.toContain('grok-4.6')
     expect(models).not.toContain('grok-4.7')
-    expect(models).not.toContain('gpt-5.6-luna')
   })
 
-  it('lists the anthropic-family models separately', () => {
-    expect(anthropic?.defaultModels).toEqual([
-      'minimax-m3',
-      'minimax-m2.7',
-      'qwen3.8-max',
-      'qwen3.8-flash',
-      'qwen3.7-plus',
-    ])
+  it('offers the same models through the Anthropic surface', () => {
+    expect(anthropic?.defaultModels).toEqual(openai?.defaultModels)
   })
 
-  it('documents the subscription, the key source and the responses exclusion', () => {
+  it('documents the subscription, the key source and the auth trap', () => {
     expect(openai?.notes).toContain('opencode.ai/console')
     expect(openai?.notes).toContain('x-opencode-session')
     expect(openai?.notes).toContain('/v1/responses')
+    expect(anthropic?.notes).toContain('x-api-key')
   })
 })
