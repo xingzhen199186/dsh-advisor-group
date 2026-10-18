@@ -904,7 +904,7 @@ describe('ask_session tool contract', () => {
 
   it('requires target and question, and never claims the reply is a one-to-one answer', () => {
     const params = tool?.parameters as Record<string, { description?: string; required?: boolean }>
-    expect(params.target?.required).toBe(true)
+    expect(params.target?.required).toBeFalsy()
     expect(params.question?.required).toBe(true)
     const description = String(tool?.description ?? '')
     expect(description).toContain('NOT a one-to-one reply')

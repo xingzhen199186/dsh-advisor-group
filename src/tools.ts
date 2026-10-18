@@ -363,7 +363,7 @@ export function registerAdvisorTools(
         type: 'string',
         description:
           'The target session, named the way the user names it: its exact title as shown in the session list (the session name in the sidebar), a natural partial name, or a full sessionId. A title or the workspace/directory name is usually enough (「极简遥控器」 matches sessions under I:\\极简遥控器\\…). One unique match is used directly; several matches return the candidates (running / most recently active first) and a miss returns the recent sessions — both for the USER to choose: never guess, and do NOT search session logs or directories for session ids.',
-        required: true,
+        // Optional on purpose: omit it (with routing enabled) to get candidates.
       },
       question: {
         type: 'string',
