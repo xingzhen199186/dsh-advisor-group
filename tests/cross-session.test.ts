@@ -74,7 +74,10 @@ function summary(overrides: Partial<CrossSessionSummary> & { sessionId: string }
 }
 
 function titled(sessionId: string, title: string, extra: Partial<CrossSessionSummary> = {}): CrossSessionSummary {
-  return summary({ sessionId, projections: { values: { title: { title } } }, ...extra })
+  // The host publishes the `title` projection as a PLAIN STRING
+  // (`dsh-session-title`: `z.string().min(1).nullable()`); using the real shape
+  // here is what keeps the resolver honest (the wrapper form is covered below).
+  return summary({ sessionId, projections: { values: { title } }, ...extra })
 }
 
 /**
@@ -306,6 +309,11 @@ describe('target resolution', () => {
     })
   })
 
+  it('still accepts the legacy { title } wrapper', () => {
+    const legacy = summary({ sessionId: 'old', projections: { values: { title: { title: '旧形态会话' } } } })
+    expect(sessionDisplayName(legacy)).toBe('旧形态会话')
+  })
+
   it('degrades to the fallback for malformed or empty title projections', () => {
     expect(sessionDisplayName(summary({ sessionId: 'x', cwd: 'C:\\w' }))).toContain('C:\\w')
     expect(sessionDisplayName(summary({ sessionId: 'x', projections: { values: { title: null } } }))).toContain(
@@ -398,14 +406,19 @@ describe('ask guards', () => {
     expect(rejection?.candidates).toHaveLength(1)
   })
 
-  it('reports a missing target rather than picking something close', () => {
+  it('reports a missing target and hands back the recent sessions instead of an id hunt', () => {
     const rejection = checkAskGuards({
       guards: { currentSessionId: SELF, hop: 0 },
       match: { kind: 'missing' },
-      sessions: [],
+      sessions: [
+        titled('s1', '构建会话', { updatedAt: 1700000000000 }),
+        titled('s2', '文档会话', { updatedAt: 1700000001000 }),
+      ],
       question: 'q',
     })
     expect(rejection?.code).toBe('target-not-found')
+    expect(rejection?.candidates?.map((candidate) => candidate.name)).toEqual(['文档会话', '构建会话'])
+    expect(rejection?.message).toContain('最近的会话')
   })
 
   it('refuses a payload over the byte budget', () => {

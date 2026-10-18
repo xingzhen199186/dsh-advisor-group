@@ -355,7 +355,7 @@ export function registerAdvisorTools(
       target: {
         type: 'string',
         description:
-          'The target session: its full sessionId, its exact display title, or a natural partial name — the workspace/directory name the user mentioned is enough (「极简遥控器」 matches sessions under I:\\极简遥控器\\…). One unique match is used directly; several matches return the candidates (running / most recently active first) for the user to choose — never guess. Pass the name the user said — do NOT search log files or directories for session ids.',
+          'The target session, named the way the user names it: its exact title as shown in the session list (the session name in the sidebar), a natural partial name, or a full sessionId. A title or the workspace/directory name is usually enough (「极简遥控器」 matches sessions under I:\\极简遥控器\\…). One unique match is used directly; several matches return the candidates (running / most recently active first) and a miss returns the recent sessions — both for the USER to choose: never guess, and do NOT search session logs or directories for session ids.',
         required: true,
       },
       question: {

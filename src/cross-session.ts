@@ -210,16 +210,21 @@ export function fallbackSessionName(cwd: string | undefined, updatedAt: number |
 }
 
 /**
- * Model-visible name of one listed session. The title lives in the `title`
- * projection (a snapshot object), is optional, and may be a stale cache value,
- * so every failure degrades to the cwd+time fallback instead of throwing.
+ * Model-visible name of one listed session. The host publishes the `title`
+ * projection as a **plain string** (`dsh-session-title`: `z.string().min(1).nullable()`),
+ * so a string is the normal shape here; the `{ title }` wrapper is accepted as
+ * well because older cached rows used it. Every miss degrades to the cwd+time
+ * fallback instead of throwing.
  */
 export function sessionDisplayName(summary: CrossSessionSummary): string {
   const raw = summary.projections?.values?.title
-  const title =
-    raw !== null && typeof raw === 'object' && typeof (raw as { readonly title?: unknown }).title === 'string'
-      ? (raw as { readonly title: string }).title.trim()
-      : ''
+  const text =
+    typeof raw === 'string'
+      ? raw
+      : raw !== null && typeof raw === 'object' && typeof (raw as { readonly title?: unknown }).title === 'string'
+        ? (raw as { readonly title: string }).title
+        : ''
+  const title = text.trim()
   if (title.length > 0) return title
   return fallbackSessionName(summary.cwd, summary.updatedAt)
 }
@@ -248,6 +253,9 @@ function orderCandidates(rows: readonly CrossSessionSummary[]): readonly CrossSe
 
 /** Partial candidates are capped: a broad needle must stay a readable list. */
 const PARTIAL_CANDIDATE_LIMIT = 10
+
+/** When nothing matches, this many recent sessions come back as candidates. */
+const NOT_FOUND_CANDIDATE_LIMIT = 8
 
 /**
  * Resolve a user/model-supplied target reference against the session list.
@@ -766,9 +774,15 @@ export function checkAskGuards(input: {
 }): AskSessionRejection | undefined {
   const { guards, match } = input
   if (match.kind === 'missing') {
+    // A miss is the moment the caller is tempted to dig session ids out of log
+    // directories: hand over the recent sessions instead, titled as the user
+    // sees them, so the choice can go back to the user.
+    const recent = orderCandidates(input.sessions).slice(0, NOT_FOUND_CANDIDATE_LIMIT).map(candidateOf)
     return {
       code: 'target-not-found',
-      message: '没有找到匹配的会话。请用会话列表里的标题或 sessionId 指定目标；不确认时先列出候选再让用户选择。',
+      message:
+        '没有找到匹配的会话。下面列出最近的会话，请把候选交给用户挑选（标题或 sessionId 都可以）；不要再去翻会话日志或目录找 id。',
+      candidates: recent,
     }
   }
   if (match.kind === 'ambiguous') {
