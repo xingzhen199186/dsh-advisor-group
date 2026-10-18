@@ -412,6 +412,7 @@ export function registerAdvisorTools(
             required: true,
           },
           answer: { type: 'string', required: true },
+          status: { type: 'string', enum: ['ok', 'partial', 'failed'] },
           reply: {
             type: 'object',
             additionalProperties: false,
@@ -443,6 +444,11 @@ export function registerAdvisorTools(
           ? renderAskResult({
               answer: String(value.answer ?? ''),
               note: String(value.note ?? ''),
+              targetName: String((value.target as { readonly name?: unknown } | undefined)?.name ?? ''),
+              askId: String(value.askId ?? ''),
+              ...(value.status === 'ok' || value.status === 'partial' || value.status === 'failed'
+                ? { status: value.status }
+                : {}),
               ...(value.reply === null || typeof value.reply !== 'object'
                 ? {}
                 : { reply: value.reply as AskReply }),
@@ -669,7 +675,7 @@ export function registerAdvisorTools(
   const askResultTool = defineTool({
     name: 'ask_result',
     description:
-      "Read the result of a detached ask_session (called with detach: true). Pass askId for one result, or omit it to list this session's recent asks. States: waiting (the peer is still working), done (answer ready), timeout (the wait window ended; a partial answer may exist), error. Read-only: it never wakes the target.",
+      "Read the result of a detached ask_session (called with detach: true). Pass askId for one result, or omit it to list this session's recent asks. States: waiting (the peer is still working — this is NOT a failure and NOT a reason to ask again; the send was already durable), done (answer ready), timeout (the wait window ended; a partial answer may exist), error. Read-only: it never wakes the target.",
     parameters: {
       askId: {
         type: 'string',

@@ -26,6 +26,8 @@ export interface AskRecord {
   from: string
   answer?: string
   reply?: { conclusion?: string; basis?: string; uncertainty?: string }
+  /** Confidence of a settled answer: ok / partial / failed. */
+  status?: 'ok' | 'partial' | 'failed'
   note?: string
   error?: string
 }

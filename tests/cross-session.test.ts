@@ -7,7 +7,6 @@ vi.mock('@deepseek-ai/dsh-tools', () => ({
 }))
 
 import {
-  ASK_ANSWER_MAX_CHARS,
   ASK_CONTENT_MAX_BYTES,
   ASK_HOP_LIMIT,
   ASK_REPLY_FORMAT,
@@ -15,9 +14,9 @@ import {
   ASK_WAIT_MAX_MS,
   askContentBytes,
   askSession,
+  askStatus,
   buildAskEnvelope,
   buildAskMessage,
-  capAnswer,
   checkAskGuards,
   collectAnswer,
   fallbackSessionName,
@@ -633,7 +632,7 @@ describe('ask_session orchestration', () => {
     }
     expect(delivered.source.kind).toBe('session-ask')
     expect(delivered.source.hop).toBe(0)
-    expect(delivered.content[0]).toEqual({ type: 'text', text: '【来自会话「提问方」的提问】' })
+    expect(delivered.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('【来自会话「提问方」的提问') })
   })
 
   it('times out on a still-busy target, returns what it has, and never cancels it', async () => {
@@ -698,7 +697,7 @@ describe('ask_session orchestration', () => {
     expect(delivered.mode).toBe('queue')
     expect(delivered.sessionId).toBe(TARGET)
     expect(delivered.requestId).toBe(value.askId)
-    expect(delivered.content[0].text).toBe('【来自会话「提问方」的提问】')
+    expect(String(delivered.content[0].text)).toContain('【来自会话「提问方」的提问')
   })
 
   it('returns subagent-target when the host rejects subagent delivery', async () => {
@@ -929,6 +928,7 @@ describe('ask_session tool contract', () => {
       'note',
       'ok',
       'reply',
+      'status',
       'target',
     ])
   })
@@ -978,14 +978,12 @@ describe('structured reply protocol', () => {
     })
   })
 
-  it('caps an over-long answer and marks the cut', () => {
-    const long = 'x'.repeat(ASK_ANSWER_MAX_CHARS + 10)
-    const capped = capAnswer(long)
-    expect(capped.truncated).toBe(true)
-    expect(capped.text.length).toBeLessThan(long.length)
-    expect(capped.text).toContain('已截断')
-    expect(capAnswer('short').truncated).toBe(false)
-    expect(capAnswer('short').text).toBe('short')
+  it('states how much of an answer can be trusted', () => {
+    expect(askStatus({ endedBecause: 'idle', answer: '结论：甲', reply: { conclusion: '甲' } })).toBe('ok')
+    expect(askStatus({ endedBecause: 'timeout', answer: '结论：甲', reply: { conclusion: '甲' } })).toBe('partial')
+    expect(askStatus({ endedBecause: 'idle', answer: '一大段话' })).toBe('partial')
+    expect(askStatus({ endedBecause: 'error', answer: '结论：甲' })).toBe('failed')
+    expect(askStatus({ endedBecause: 'idle', answer: '   ' })).toBe('failed')
   })
 
   it('renders the parsed reply instead of the raw answer when both exist', () => {

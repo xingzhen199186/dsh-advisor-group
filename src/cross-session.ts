@@ -181,9 +181,13 @@ export function buildAskEnvelope(
   senderName: string,
   question: string,
   context?: string,
+  askId?: string,
 ): ContentBlock[] {
+  const header = askId === undefined || askId.length === 0
+    ? `【来自会话「${senderName}」的提问】`
+    : `【来自会话「${senderName}」的提问 · askId=${askId}】`
   const blocks: ContentBlock[] = [
-    { type: 'text', text: `【来自会话「${senderName}」的提问】` },
+    { type: 'text', text: header },
     { type: 'text', text: question },
   ]
   if (context !== undefined && context.trim().length > 0) {
@@ -374,9 +378,6 @@ export function joinAnswerPieces(pieces: readonly string[]): string {
   return pieces.join('\n\n')
 }
 
-/** Longest answer the tool result carries; the full text stays in the target log. */
-export const ASK_ANSWER_MAX_CHARS = 4000
-
 /** Structured view of a target's answer; every field is optional. */
 export interface AskReply {
   readonly conclusion?: string
@@ -404,17 +405,24 @@ export function parseAskReply(answer: string): AskReply | undefined {
     : fields
 }
 
-/** Inline marker appended when an answer is cut, kept inside the char budget. */
-const TRUNCATION_MARK = '\n…（已截断：完整内容在对方会话日志里）'
+/** How much of an answer can be trusted, mirroring the host's stop-reason split. */
+export type AskStatus = 'ok' | 'partial' | 'failed'
 
-/** Cut an over-long answer at the char budget and say so inline (never over budget). */
-export function capAnswer(
-  answer: string,
-  maxChars = ASK_ANSWER_MAX_CHARS,
-): { readonly text: string; readonly truncated: boolean } {
-  if (answer.length <= maxChars) return { text: answer, truncated: false }
-  const room = Math.max(0, maxChars - TRUNCATION_MARK.length)
-  return { text: `${answer.slice(0, room)}${TRUNCATION_MARK}`, truncated: true }
+/**
+ * `ok` = the peer settled idle and named a conclusion; `partial` = a timeout, a
+ * missing conclusion, or prose that ignored the convention; `failed` = an error
+ * or nothing said. An unfinished async ask is still `waiting`, never `failed`.
+ */
+export function askStatus(input: {
+  readonly endedBecause: 'idle' | 'timeout' | 'error' | 'detached'
+  readonly answer: string
+  readonly reply?: AskReply
+}): AskStatus {
+  if (input.endedBecause === 'error') return 'failed'
+  if (input.answer.trim().length === 0) return 'failed'
+  if (input.endedBecause !== 'idle') return 'partial'
+  if (input.reply === undefined || input.reply.conclusion === undefined) return 'partial'
+  return 'ok'
 }
 
 /** Highest event seq present, or -1 for an empty log (the session-cursor convention). */
@@ -431,6 +439,9 @@ export function renderAskResult(value: {
   readonly answer: string
   readonly note: string
   readonly reply?: AskReply
+  readonly targetName?: string
+  readonly askId?: string
+  readonly status?: AskStatus
 }): ContentBlock[] {
   const reply = value.reply
   const structured =
@@ -449,7 +460,15 @@ export function renderAskResult(value: {
       : value.answer.trim().length > 0
         ? value.answer
         : '（该区间内对方没有产出正文。）'
-  return [{ type: 'text', text: `${body}\n\n${value.note}` }]
+  const who = [
+    value.targetName === undefined ? '' : `来自「${value.targetName}」`,
+    value.askId === undefined || value.askId.length === 0 ? '' : `askId=${value.askId}`,
+    value.status === undefined ? '' : `状态 ${value.status}`,
+  ]
+    .filter((part) => part.length > 0)
+    .join(' · ')
+  const header = who.length > 0 ? `【${who}】\n` : ''
+  return [{ type: 'text', text: `${header}${body}\n\n${value.note}` }]
 }
 
 /**
@@ -585,7 +604,7 @@ export async function deliverAsk(
     readonly targetWasRunning: boolean
   },
 ): Promise<{ readonly ok: true; readonly receipt: CrossSessionDeliveryReceipt } | { readonly ok: false; readonly code: CrossSessionErrorCode; readonly message: string }> {
-  const envelope = buildAskEnvelope(input.source.senderName, input.question, input.context)
+  const envelope = buildAskEnvelope(input.source.senderName, input.question, input.context, input.source.askId)
   try {
     const resolved = await controller.resolveAgent(input.target.sessionId)
     if ('agent' in resolved && resolved.agent) {
@@ -1125,15 +1144,17 @@ async function runAsk(
         })
         const collected = await collectTargetAnswer(controller, target.sessionId, delivery.receipt.fromSeq)
         const rawAnswer = joinAnswerPieces(collected.pieces)
-        const capped = capAnswer(rawAnswer)
         const reply = parseAskReply(rawAnswer)
         settled = {
           state: outcome.endedBecause === 'idle' ? 'done' : outcome.endedBecause === 'timeout' ? 'timeout' : 'error',
-          answer: capped.text,
+          answer: rawAnswer,
           ...(reply === undefined ? {} : { reply }),
-          note: [outcome.note, capped.truncated ? `answer 已按 ${ASK_ANSWER_MAX_CHARS} 字截断。` : '']
-            .filter((line) => line.length > 0)
-            .join('\n'),
+          status: askStatus({
+            endedBecause: outcome.endedBecause,
+            answer: rawAnswer,
+            ...(reply === undefined ? {} : { reply }),
+          }),
+          note: outcome.note,
         }
       } catch (error) {
         settled = { state: 'error', error: error instanceof Error ? error.message : String(error) }
@@ -1174,15 +1195,18 @@ async function runAsk(
     delivery.receipt.fromSeq,
   )
   const rawAnswer = joinAnswerPieces(collected.pieces)
-  const capped = capAnswer(rawAnswer)
-  const answer = capped.text
+  const answer = rawAnswer
   const reply = parseAskReply(rawAnswer)
+  const status = askStatus({
+    endedBecause: outcome.endedBecause,
+    answer,
+    ...(reply === undefined ? {} : { reply }),
+  })
   const to = outcome.endedBecause === 'idle' ? new Date().toISOString() : null
   const notes = [
     '区间语义：从投递回执到对方会话下一次整体空闲，这两个时刻之间对方产出的文字都算在内——这是「这个区间里对方说的话」，不是逐条对应的回答。',
     delivery.receipt.note,
     outcome.note,
-    capped.truncated ? `answer 已按 ${ASK_ANSWER_MAX_CHARS} 字截断，完整内容在对方会话日志里。` : '',
     delivery.receipt.targetWasRunning
       ? '投递时对方正在忙，问题已排队，会在它当前回合结束后进入新回合。'
       : '投递时对方不忙，宿主已唤醒它开一个新回合。',
@@ -1206,6 +1230,7 @@ async function runAsk(
     interval: { from, to, endedBecause: outcome.endedBecause },
     answer,
     ...(reply === undefined ? {} : { reply }),
+    status,
     note,
   }
 }
