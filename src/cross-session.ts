@@ -459,7 +459,9 @@ export function renderAskResult(value: {
       ? structured
       : value.answer.trim().length > 0
         ? value.answer
-        : '（该区间内对方没有产出正文。）'
+        : value.status === undefined && value.askId !== undefined
+          ? '（已异步投递，结果稍后用 ask_result 读取。）'
+          : '（该区间内对方没有产出正文。）'
   const who = [
     value.targetName === undefined ? '' : `来自「${value.targetName}」`,
     value.askId === undefined || value.askId.length === 0 ? '' : `askId=${value.askId}`,

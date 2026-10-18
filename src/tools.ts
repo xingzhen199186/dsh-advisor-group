@@ -698,6 +698,10 @@ export function registerAdvisorTools(
               additionalProperties: false,
               properties: {
                 askId: { type: 'string', required: true },
+                sessionId: { type: 'string' },
+                targetSessionId: { type: 'string' },
+                from: { type: 'string' },
+                status: { type: 'string', enum: ['ok', 'partial', 'failed'] },
                 targetName: { type: 'string', required: true },
                 question: { type: 'string', required: true },
                 state: { type: 'string', required: true },
