@@ -159,15 +159,6 @@ export interface CrossSessionInterval {
 // ---------------------------------------------------------------------------
 
 /**
- * Reply convention appended to every delivered question. The target answers from
- * its own context and the caller only reads the returned text, so asking for
- * 「结论 / 依据 / 不确定」 keeps the message small and lets the caller parse it
- * (`parseAskReply`) instead of re-reading a wall of prose.
- */
-export const ASK_REPLY_FORMAT =
-  '【回复格式】请用三行短句回答，不要复述问题：\n结论：…\n依据：…\n（确有不确定时再加一行）不确定：…\n每行不超过 200 字。'
-
-/**
  * Envelope the receiving model reads. The Host offers no registration point for
  * this framing (the official Agent Teams build their own too), so the identity
  * is carried in the content itself: a header block naming the asking session,
@@ -193,7 +184,6 @@ export function buildAskEnvelope(
   if (context !== undefined && context.trim().length > 0) {
     blocks.push({ type: 'text', text: `【对方补充的背景】\n${context}` })
   }
-  blocks.push({ type: 'text', text: ASK_REPLY_FORMAT })
   return blocks
 }
 
@@ -416,12 +406,10 @@ export type AskStatus = 'ok' | 'partial' | 'failed'
 export function askStatus(input: {
   readonly endedBecause: 'idle' | 'timeout' | 'error' | 'detached'
   readonly answer: string
-  readonly reply?: AskReply
 }): AskStatus {
   if (input.endedBecause === 'error') return 'failed'
   if (input.answer.trim().length === 0) return 'failed'
   if (input.endedBecause !== 'idle') return 'partial'
-  if (input.reply === undefined || input.reply.conclusion === undefined) return 'partial'
   return 'ok'
 }
 
@@ -1151,11 +1139,7 @@ async function runAsk(
           state: outcome.endedBecause === 'idle' ? 'done' : outcome.endedBecause === 'timeout' ? 'timeout' : 'error',
           answer: rawAnswer,
           ...(reply === undefined ? {} : { reply }),
-          status: askStatus({
-            endedBecause: outcome.endedBecause,
-            answer: rawAnswer,
-            ...(reply === undefined ? {} : { reply }),
-          }),
+          status: askStatus({ endedBecause: outcome.endedBecause, answer: rawAnswer }),
           note: outcome.note,
         }
       } catch (error) {
@@ -1199,11 +1183,7 @@ async function runAsk(
   const rawAnswer = joinAnswerPieces(collected.pieces)
   const answer = rawAnswer
   const reply = parseAskReply(rawAnswer)
-  const status = askStatus({
-    endedBecause: outcome.endedBecause,
-    answer,
-    ...(reply === undefined ? {} : { reply }),
-  })
+  const status = askStatus({ endedBecause: outcome.endedBecause, answer })
   const to = outcome.endedBecause === 'idle' ? new Date().toISOString() : null
   const notes = [
     '区间语义：从投递回执到对方会话下一次整体空闲，这两个时刻之间对方产出的文字都算在内——这是「这个区间里对方说的话」，不是逐条对应的回答。',

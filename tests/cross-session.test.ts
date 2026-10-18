@@ -9,7 +9,6 @@ vi.mock('@deepseek-ai/dsh-tools', () => ({
 import {
   ASK_CONTENT_MAX_BYTES,
   ASK_HOP_LIMIT,
-  ASK_REPLY_FORMAT,
   ASK_WAIT_DEFAULT_MS,
   ASK_WAIT_MAX_MS,
   askContentBytes,
@@ -181,14 +180,13 @@ describe('ask envelope', () => {
       { type: 'text', text: '【来自会话「构建会话」的提问】' },
       { type: 'text', text: '那个报错改了吗？' },
       { type: 'text', text: '【对方补充的背景】\n报错在 build 第二步' },
-      { type: 'text', text: ASK_REPLY_FORMAT },
     ])
   })
 
   it('omits the background block entirely when no context is given', () => {
-    // Sender + question + reply convention; no background block.
-    expect(buildAskEnvelope('构建会话', '问题')).toHaveLength(3)
-    expect(buildAskEnvelope('构建会话', '问题', '   ')).toHaveLength(3)
+    // Sender + question; no background block.
+    expect(buildAskEnvelope('构建会话', '问题')).toHaveLength(2)
+    expect(buildAskEnvelope('构建会话', '问题', '   ')).toHaveLength(2)
   })
 
   it('carries the declared session-ask source on the identified message', () => {
@@ -949,14 +947,15 @@ describe('ask_session tool contract', () => {
 // ---------------------------------------------------------------------------
 
 describe('structured reply protocol', () => {
-  it('appends the reply convention to every delivered question', () => {
+  it('delivers the sender, the question and the background, nothing else', () => {
     const texts = buildAskEnvelope('甲会话', '问题正文', '一点背景').map(
-      (block) => (block as unknown as { readonly text: string }).text,
+      (block) => String((block as unknown as { readonly text: string }).text),
     )
-    expect(texts[0]).toContain('甲会话')
-    expect(texts).toContain(ASK_REPLY_FORMAT)
-    // The convention comes last so the question reads first.
-    expect(texts[texts.length - 1]).toBe(ASK_REPLY_FORMAT)
+    expect(texts).toEqual([
+      '【来自会话「甲会话」的提问】',
+      '问题正文',
+      '【对方补充的背景】\n一点背景',
+    ])
   })
 
   it('parses the three fields, tolerating markdown bullets and bold markers', () => {
@@ -979,10 +978,9 @@ describe('structured reply protocol', () => {
   })
 
   it('states how much of an answer can be trusted', () => {
-    expect(askStatus({ endedBecause: 'idle', answer: '结论：甲', reply: { conclusion: '甲' } })).toBe('ok')
-    expect(askStatus({ endedBecause: 'timeout', answer: '结论：甲', reply: { conclusion: '甲' } })).toBe('partial')
-    expect(askStatus({ endedBecause: 'idle', answer: '一大段话' })).toBe('partial')
-    expect(askStatus({ endedBecause: 'error', answer: '结论：甲' })).toBe('failed')
+    expect(askStatus({ endedBecause: 'idle', answer: '一大段自然的话' })).toBe('ok')
+    expect(askStatus({ endedBecause: 'timeout', answer: '一大段自然的话' })).toBe('partial')
+    expect(askStatus({ endedBecause: 'error', answer: '出错了' })).toBe('failed')
     expect(askStatus({ endedBecause: 'idle', answer: '   ' })).toBe('failed')
   })
 

@@ -354,7 +354,7 @@ export function registerAdvisorTools(
   const askSessionTool = defineTool({
     name: 'ask_session',
     description:
-      'Ask another EXISTING ordinary session (another window/tab the user opened) a question, wake it, and return what that session said. Use ONLY when the user explicitly asks to ask another session/window (「去问另一个会话」「问一下那个窗口」). It wakes the target session and consumes its quota. The returned text is NOT a one-to-one reply: it is everything the target said between the delivery receipt and its next whole-session idle, so never present it as "the answer to my message". The delivered question asks the target for 结论/依据/不确定; the result carries a parsed `reply` when it complies (otherwise read the raw `answer`). When the target title is ambiguous you MUST return the candidates and let the user choose — never guess. Never use it for subagent sessions or for yourself.',
+      'Ask another EXISTING ordinary session (another window/tab the user opened) a question, wake it, and return what that session said. Use ONLY when the user explicitly asks to ask another session/window (「去问另一个会话」「问一下那个窗口」). It wakes the target session and consumes its quota. The returned text is NOT a one-to-one reply: it is everything the target said between the delivery receipt and its next whole-session idle, so never present it as "the answer to my message". When the target title is ambiguous you MUST return the candidates and let the user choose — never guess. Never use it for subagent sessions or for yourself.',
     parameters: {
       target: {
         type: 'string',
