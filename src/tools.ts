@@ -14,9 +14,11 @@ import {
   renderAskResult,
   type AskCardDelivery,
   type AskCardSettle,
+  type AskReply,
   type CrossSessionLogEvent,
 } from './cross-session'
 import type { ConsultSession, ConsultSummary } from './types'
+import { buildSessionRoster, renderRoster, type RosterRow } from './session-roster'
 import type { Session } from '@deepseek-ai/dsh-session'
 
 export function registerAdvisorTools(
@@ -350,7 +352,7 @@ export function registerAdvisorTools(
   const askSessionTool = defineTool({
     name: 'ask_session',
     description:
-      'Ask another EXISTING ordinary session (another window/tab the user opened) a question, wake it, and return what that session said. Use ONLY when the user explicitly asks to ask another session/window (「去问另一个会话」「问一下那个窗口」). It wakes the target session and consumes its quota. The returned text is NOT a one-to-one reply: it is everything the target said between the delivery receipt and its next whole-session idle, so never present it as "the answer to my message". When the target title is ambiguous you MUST return the candidates and let the user choose — never guess. Never use it for subagent sessions or for yourself.',
+      'Ask another EXISTING ordinary session (another window/tab the user opened) a question, wake it, and return what that session said. Use ONLY when the user explicitly asks to ask another session/window (「去问另一个会话」「问一下那个窗口」). It wakes the target session and consumes its quota. The returned text is NOT a one-to-one reply: it is everything the target said between the delivery receipt and its next whole-session idle, so never present it as "the answer to my message". The delivered question asks the target for 结论/依据/不确定; the result carries a parsed `reply` when it complies (otherwise read the raw `answer`). When the target title is ambiguous you MUST return the candidates and let the user choose — never guess. Never use it for subagent sessions or for yourself.',
     parameters: {
       target: {
         type: 'string',
@@ -402,6 +404,15 @@ export function registerAdvisorTools(
             required: true,
           },
           answer: { type: 'string', required: true },
+          reply: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              conclusion: { type: 'string' },
+              basis: { type: 'string' },
+              uncertainty: { type: 'string' },
+            },
+          },
           note: { type: 'string', required: true },
           error: { type: 'string' },
           message: { type: 'string' },
@@ -421,7 +432,13 @@ export function registerAdvisorTools(
       },
       render: (_args, value) =>
         value.ok === true
-          ? renderAskResult({ answer: String(value.answer ?? ''), note: String(value.note ?? '') })
+          ? renderAskResult({
+              answer: String(value.answer ?? ''),
+              note: String(value.note ?? ''),
+              ...(value.reply === null || typeof value.reply !== 'object'
+                ? {}
+                : { reply: value.reply as AskReply }),
+            })
           : [
               {
                 type: 'text',
@@ -531,12 +548,110 @@ export function registerAdvisorTools(
         askId: String(value.askId ?? ''),
         interval: value.interval as { from: string; to: string | null; endedBecause: 'idle' | 'timeout' | 'error' },
         answer: String(value.answer ?? ''),
+        ...(value.reply === null || typeof value.reply !== 'object'
+          ? {}
+          : { reply: value.reply as AskReply }),
         note: String(value.note ?? ''),
       }
     },
   })
 
-  return [askAdvisors, toggleAdvisorGroup, askSessionTool]
+  /**
+   * Session roster: the read-only map the model needs before it can hand work
+   * to a peer. Titles come from the host's `title` projection (the name the
+   * session list shows), so no session-id hunting is required.
+   */
+  const listSessionsTool = defineTool({
+    name: 'list_sessions',
+    description:
+      'List the sessions this host knows: the title shown in the session list, its sessionId, working directory, how long ago it was active, and whether it is running. Use it when the user names a session but you are unsure which one they mean, or after ask_session returns target-not-found / target-ambiguous — show the rows to the user instead of digging session ids out of log files. Read-only: it never wakes a session and costs no model call.',
+    parameters: {
+      query: {
+        type: 'string',
+        description:
+          'Optional case-insensitive filter over the session title, its working directory, or its activity hint. Empty lists the most recent sessions (running first).',
+      },
+      limit: {
+        type: 'number',
+        description: 'Maximum rows (default 30, clamped to 1–50).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          count: { type: 'number', required: true },
+          sessions: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                sessionId: { type: 'string', required: true },
+                name: { type: 'string', required: true },
+                cwd: { type: 'string' },
+                updatedAt: { type: 'number', required: true },
+                running: { type: 'boolean', required: true },
+                subagent: { type: 'boolean', required: true },
+                hint: { type: 'string', required: true },
+              },
+            },
+          },
+          error: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+      render: (args, value) =>
+        value.ok === true
+          ? [
+              {
+                type: 'text',
+                text: renderRoster(value.sessions as RosterRow[], {
+                  filtered: String(args.query ?? '').trim().length > 0,
+                }),
+              },
+            ]
+          : [
+              {
+                type: 'text',
+                text: `【list_sessions 失败：${String(value.error ?? 'unknown')}】\n${String(value.message ?? '')}`,
+              },
+            ],
+    },
+    async execute(args, exec) {
+      const controller = getSessionController(ctx)
+      if (controller === undefined) {
+        return {
+          ok: false,
+          count: 0,
+          sessions: [],
+          error: 'service-missing',
+          message: '宿主没有提供 sessionController，无法列出会话。',
+        }
+      }
+      try {
+        const listed = await controller.list({}, exec.signal)
+        const rows = buildSessionRoster(listed.items, {
+          query: typeof args.query === 'string' ? args.query : '',
+          limit: typeof args.limit === 'number' ? args.limit : undefined,
+        })
+        return { ok: true, count: rows.length, sessions: rows }
+      } catch (error) {
+        return {
+          ok: false,
+          count: 0,
+          sessions: [],
+          error: 'list-failed',
+          message: String(error instanceof Error ? error.message : error),
+        }
+      }
+    },
+  })
+
+  return [askAdvisors, toggleAdvisorGroup, askSessionTool, listSessionsTool]
 }
 
 /**

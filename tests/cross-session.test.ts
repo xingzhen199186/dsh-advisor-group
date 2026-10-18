@@ -7,14 +7,17 @@ vi.mock('@deepseek-ai/dsh-tools', () => ({
 }))
 
 import {
+  ASK_ANSWER_MAX_CHARS,
   ASK_CONTENT_MAX_BYTES,
   ASK_HOP_LIMIT,
+  ASK_REPLY_FORMAT,
   ASK_WAIT_DEFAULT_MS,
   ASK_WAIT_MAX_MS,
   askContentBytes,
   askSession,
   buildAskEnvelope,
   buildAskMessage,
+  capAnswer,
   checkAskGuards,
   collectAnswer,
   fallbackSessionName,
@@ -25,6 +28,7 @@ import {
   matchTargetSession,
   nextAskHop,
   normalizeWaitMs,
+  parseAskReply,
   renderAskResult,
   resetPendingWaits,
   sessionDisplayName,
@@ -178,12 +182,14 @@ describe('ask envelope', () => {
       { type: 'text', text: '【来自会话「构建会话」的提问】' },
       { type: 'text', text: '那个报错改了吗？' },
       { type: 'text', text: '【对方补充的背景】\n报错在 build 第二步' },
+      { type: 'text', text: ASK_REPLY_FORMAT },
     ])
   })
 
   it('omits the background block entirely when no context is given', () => {
-    expect(buildAskEnvelope('构建会话', '问题')).toHaveLength(2)
-    expect(buildAskEnvelope('构建会话', '问题', '   ')).toHaveLength(2)
+    // Sender + question + reply convention; no background block.
+    expect(buildAskEnvelope('构建会话', '问题')).toHaveLength(3)
+    expect(buildAskEnvelope('构建会话', '问题', '   ')).toHaveLength(3)
   })
 
   it('carries the declared session-ask source on the identified message', () => {
@@ -894,6 +900,7 @@ describe('ask_session tool contract', () => {
       'ask_advisors',
       'toggle_advisor_group',
       'ask_session',
+      'list_sessions',
     ])
   })
 
@@ -919,6 +926,7 @@ describe('ask_session tool contract', () => {
       'message',
       'note',
       'ok',
+      'reply',
       'target',
     ])
   })
@@ -931,5 +939,73 @@ describe('ask_session tool contract', () => {
     const value = await execute({ target: TARGET, question: 'q' }, { signal: new AbortController().signal })
     expect(value).toMatchObject({ ok: false, error: 'service-missing', answer: '', note: '' })
     expect((value.interval as { endedBecause: string }).endedBecause).toBe('error')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Structured reply protocol (结论 / 依据 / 不确定)
+// ---------------------------------------------------------------------------
+
+describe('structured reply protocol', () => {
+  it('appends the reply convention to every delivered question', () => {
+    const texts = buildAskEnvelope('甲会话', '问题正文', '一点背景').map(
+      (block) => (block as unknown as { readonly text: string }).text,
+    )
+    expect(texts[0]).toContain('甲会话')
+    expect(texts).toContain(ASK_REPLY_FORMAT)
+    // The convention comes last so the question reads first.
+    expect(texts[texts.length - 1]).toBe(ASK_REPLY_FORMAT)
+  })
+
+  it('parses the three fields, tolerating markdown bullets and bold markers', () => {
+    expect(parseAskReply('**结论**：版本是 0.2.2\n- 依据：四处一致\n不确定：无')).toEqual({
+      conclusion: '版本是 0.2.2',
+      basis: '四处一致',
+      uncertainty: '无',
+    })
+  })
+
+  it('returns undefined for prose that ignores the convention', () => {
+    expect(parseAskReply('它回了一大段话，没有分行，也没有那三个词。')).toBeUndefined()
+  })
+
+  it('takes the first value per field and skips empty ones', () => {
+    expect(parseAskReply('结论：A\n结论：B\n依据：\n不确定：C')).toEqual({
+      conclusion: 'A',
+      uncertainty: 'C',
+    })
+  })
+
+  it('caps an over-long answer and marks the cut', () => {
+    const long = 'x'.repeat(ASK_ANSWER_MAX_CHARS + 10)
+    const capped = capAnswer(long)
+    expect(capped.truncated).toBe(true)
+    expect(capped.text.length).toBeLessThan(long.length)
+    expect(capped.text).toContain('已截断')
+    expect(capAnswer('short').truncated).toBe(false)
+    expect(capAnswer('short').text).toBe('short')
+  })
+
+  it('renders the parsed reply instead of the raw answer when both exist', () => {
+    const text = (
+      renderAskResult({
+        answer: '结论：甲\n依据：乙\n\n一大段原文',
+        note: '备注一行',
+        reply: { conclusion: '甲', basis: '乙' },
+      })[0] as unknown as { readonly text: string }
+    ).text
+    expect(text).toContain('结论：甲')
+    expect(text).toContain('依据：乙')
+    expect(text).not.toContain('一大段原文')
+    expect(text).toContain('备注一行')
+  })
+
+  it('falls back to the raw answer when the target ignored the convention', () => {
+    const text = (
+      renderAskResult({ answer: '一段自由发挥的话', note: '备注' })[0] as unknown as {
+        readonly text: string
+      }
+    ).text
+    expect(text).toContain('一段自由发挥的话')
   })
 })

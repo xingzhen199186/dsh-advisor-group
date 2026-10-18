@@ -156,10 +156,19 @@ export interface CrossSessionInterval {
 // ---------------------------------------------------------------------------
 
 /**
+ * Reply convention appended to every delivered question. The target answers from
+ * its own context and the caller only reads the returned text, so asking for
+ * 「结论 / 依据 / 不确定」 keeps the message small and lets the caller parse it
+ * (`parseAskReply`) instead of re-reading a wall of prose.
+ */
+export const ASK_REPLY_FORMAT =
+  '【回复格式】请用三行短句回答，不要复述问题：\n结论：…\n依据：…\n（确有不确定时再加一行）不确定：…\n每行不超过 200 字。'
+
+/**
  * Envelope the receiving model reads. The Host offers no registration point for
  * this framing (the official Agent Teams build their own too), so the identity
  * is carried in the content itself: a header block naming the asking session,
- * then the question, then optional background.
+ * then the question, then optional background, then the reply convention.
  * @param senderName - title (or cwd+time fallback) of the asking session.
  * @param question - the question to hand over.
  * @param context - optional background; permanently recorded in the target log.
@@ -177,6 +186,7 @@ export function buildAskEnvelope(
   if (context !== undefined && context.trim().length > 0) {
     blocks.push({ type: 'text', text: `【对方补充的背景】\n${context}` })
   }
+  blocks.push({ type: 'text', text: ASK_REPLY_FORMAT })
   return blocks
 }
 
@@ -361,6 +371,49 @@ export function joinAnswerPieces(pieces: readonly string[]): string {
   return pieces.join('\n\n')
 }
 
+/** Longest answer the tool result carries; the full text stays in the target log. */
+export const ASK_ANSWER_MAX_CHARS = 4000
+
+/** Structured view of a target's answer; every field is optional. */
+export interface AskReply {
+  readonly conclusion?: string
+  readonly basis?: string
+  readonly uncertainty?: string
+}
+
+/** One 「结论：…」-style line, tolerating markdown bullets and bold markers. */
+const REPLY_FIELD = /^[\s>*#`-]*(结论|依据|不确定)[*\s]*[:：]\s*(.*)$/u
+
+/** Best-effort parse of the reply convention; undefined when the text ignores it. */
+export function parseAskReply(answer: string): AskReply | undefined {
+  const fields: { conclusion?: string; basis?: string; uncertainty?: string } = {}
+  for (const line of answer.split(/\r?\n/u)) {
+    const match = REPLY_FIELD.exec(line)
+    if (match === null) continue
+    const value = (match[2] ?? '').trim()
+    if (value.length === 0) continue
+    if (match[1] === '结论' && fields.conclusion === undefined) fields.conclusion = value
+    else if (match[1] === '依据' && fields.basis === undefined) fields.basis = value
+    else if (match[1] === '不确定' && fields.uncertainty === undefined) fields.uncertainty = value
+  }
+  return fields.conclusion === undefined && fields.basis === undefined && fields.uncertainty === undefined
+    ? undefined
+    : fields
+}
+
+/** Inline marker appended when an answer is cut, kept inside the char budget. */
+const TRUNCATION_MARK = '\n…（已截断：完整内容在对方会话日志里）'
+
+/** Cut an over-long answer at the char budget and say so inline (never over budget). */
+export function capAnswer(
+  answer: string,
+  maxChars = ASK_ANSWER_MAX_CHARS,
+): { readonly text: string; readonly truncated: boolean } {
+  if (answer.length <= maxChars) return { text: answer, truncated: false }
+  const room = Math.max(0, maxChars - TRUNCATION_MARK.length)
+  return { text: `${answer.slice(0, room)}${TRUNCATION_MARK}`, truncated: true }
+}
+
 /** Highest event seq present, or -1 for an empty log (the session-cursor convention). */
 export function logWatermark(events: readonly CrossSessionLogEvent[]): number {
   let highest = -1
@@ -374,8 +427,25 @@ export function logWatermark(events: readonly CrossSessionLogEvent[]): number {
 export function renderAskResult(value: {
   readonly answer: string
   readonly note: string
+  readonly reply?: AskReply
 }): ContentBlock[] {
-  const body = value.answer.trim().length > 0 ? value.answer : '（该区间内对方没有产出正文。）'
+  const reply = value.reply
+  const structured =
+    reply === undefined
+      ? ''
+      : [
+          reply.conclusion === undefined ? '' : `结论：${reply.conclusion}`,
+          reply.basis === undefined ? '' : `依据：${reply.basis}`,
+          reply.uncertainty === undefined ? '' : `不确定：${reply.uncertainty}`,
+        ]
+          .filter((line) => line.length > 0)
+          .join('\n')
+  const body =
+    structured.length > 0
+      ? structured
+      : value.answer.trim().length > 0
+        ? value.answer
+        : '（该区间内对方没有产出正文。）'
   return [{ type: 'text', text: `${body}\n\n${value.note}` }]
 }
 
@@ -1015,12 +1085,16 @@ async function runAsk(
     target.sessionId,
     delivery.receipt.fromSeq,
   )
-  const answer = joinAnswerPieces(collected.pieces)
+  const rawAnswer = joinAnswerPieces(collected.pieces)
+  const capped = capAnswer(rawAnswer)
+  const answer = capped.text
+  const reply = parseAskReply(rawAnswer)
   const to = outcome.endedBecause === 'idle' ? new Date().toISOString() : null
   const notes = [
     '区间语义：从投递回执到对方会话下一次整体空闲，这两个时刻之间对方产出的文字都算在内——这是「这个区间里对方说的话」，不是逐条对应的回答。',
     delivery.receipt.note,
     outcome.note,
+    capped.truncated ? `answer 已按 ${ASK_ANSWER_MAX_CHARS} 字截断，完整内容在对方会话日志里。` : '',
     delivery.receipt.targetWasRunning
       ? '投递时对方正在忙，问题已排队，会在它当前回合结束后进入新回合。'
       : '投递时对方不忙，宿主已唤醒它开一个新回合。',
@@ -1033,7 +1107,7 @@ async function runAsk(
     askId,
     question: input.question,
     targetName: target.name,
-    answer,
+    answer: rawAnswer,
     note,
   })
   return {
@@ -1043,6 +1117,7 @@ async function runAsk(
     askId,
     interval: { from, to, endedBecause: outcome.endedBecause },
     answer,
+    ...(reply === undefined ? {} : { reply }),
     note,
   }
 }
