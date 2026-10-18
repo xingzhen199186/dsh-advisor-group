@@ -53,6 +53,7 @@ import {
   clearRouteCache,
   loadAliases,
   normalizeAliasKey,
+  ROUTE_MIN_CONTEXT_BYTES,
   routeSessions,
   saveAlias,
   type RouteCandidate,
@@ -351,7 +352,9 @@ describe('routeSessions — accumulated-context tie-break', () => {
       { topN: 8, cache: false },
     )
     expect(ids(candidates)).toEqual(['big', 'small'])
-    // The bigger context decided the order here: without it the newer row won.
+    // 100 B is below the substantive-context floor, so the newer row is
+    // demoted behind the substantive one; the bigger row also claims 积累多
+    // because its size separates the two inside one band and project.
     expect(candidates[0].reason).toContain('积累多')
     expect(candidates[1].reason).not.toContain('积累多')
   })
@@ -374,7 +377,9 @@ describe('routeSessions — accumulated-context tie-break', () => {
     const candidates = routeSessions(
       [
         row('huge-other', 'alpha beta', { cwd: 'I:\\other', updatedAt: BASE, sizeBytes: 9_000_000 }),
-        row('small-here', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE + 10_000, sizeBytes: 1 }),
+        // Both clear the substantive-context floor: only the magnitude is at
+        // stake, and cross-project magnitudes stay incomparable.
+        row('small-here', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE + 10_000, sizeBytes: 900_000 }),
       ],
       'alpha beta',
       { topN: 8, cache: false },
@@ -419,8 +424,9 @@ describe('routeSessions — accumulated-context tie-break', () => {
   })
 
   // Live regression (2026-10-18): a 14-day-old 冷 session outranked a
-  // 2-hour-old 温 one only because it held far more context. Freshness bands
-  // come first; size only orders two rows inside the same band.
+  // 2-hour-old 温 one only because it held far more context. Both rows clear the
+  // substantive-context floor here, so freshness bands come first; size only
+  // orders two rows inside the same band.
   it('never lets a bigger context outrank a fresher recency band', () => {
     vi.useFakeTimers()
     try {
@@ -435,7 +441,7 @@ describe('routeSessions — accumulated-context tie-break', () => {
           row('warm-small', 'alpha beta', {
             cwd: 'I:\\proj',
             updatedAt: BASE - 2 * ONE_HOUR,
-            sizeBytes: 100,
+            sizeBytes: 900_000,
           }),
         ],
         'alpha beta',
@@ -457,7 +463,8 @@ describe('routeSessions — accumulated-context tie-break', () => {
       vi.setSystemTime(BASE)
       const candidates = routeSessions(
         [
-          // Both 热: the band ties, so the bigger context wins.
+          // Both 热 and both above the floor: the band ties, so the bigger
+          // context wins.
           row('big-older', 'alpha beta', {
             cwd: 'I:\\proj',
             updatedAt: BASE - 30 * 60_000,
@@ -466,7 +473,7 @@ describe('routeSessions — accumulated-context tie-break', () => {
           row('small-newer', 'alpha beta', {
             cwd: 'I:\\proj',
             updatedAt: BASE - 60_000,
-            sizeBytes: 100,
+            sizeBytes: 500_000,
           }),
         ],
         'alpha beta',
@@ -507,6 +514,130 @@ describe('routeSessions — accumulated-context tie-break', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('routeSessions — substantive-context floor', () => {
+  it('exports a non-zero substantive-context floor', () => {
+    expect(Number.isFinite(ROUTE_MIN_CONTEXT_BYTES)).toBe(true)
+    expect(ROUTE_MIN_CONTEXT_BYTES).toBeGreaterThan(0)
+  })
+
+  it('sorts a thin but warm row behind a substantive cold one', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(BASE)
+      const candidates = routeSessions(
+        [
+          // 温, but its log is below the floor.
+          row('thin-warm', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 2 * ONE_HOUR,
+            sizeBytes: ROUTE_MIN_CONTEXT_BYTES - 1,
+          }),
+          // 冷, but it has accumulated real context.
+          row('solid-cold', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 3 * ONE_DAY,
+            sizeBytes: ROUTE_MIN_CONTEXT_BYTES * 4,
+          }),
+        ],
+        'alpha beta',
+        { topN: 8, cache: false },
+      )
+      expect(ids(candidates)).toEqual(['solid-cold', 'thin-warm'])
+      // The bands still describe the rows; they just do not decide the order.
+      expect(candidates[0].reason).toContain(' · 冷')
+      expect(candidates[1].reason).toContain(' · 温')
+      expect(candidates[0].reason).not.toContain('体积小')
+      expect(candidates[1].reason).toContain('体积小')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('treats an unknown size as substantive, never thin', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(BASE)
+      const candidates = routeSessions(
+        [
+          // No probe result: an old unknown row must not be punished for the miss.
+          row('unknown-cold', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE - 30 * ONE_DAY }),
+          // Same project, much fresher, but below the floor.
+          row('thin-hot', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 60_000,
+            sizeBytes: ROUTE_MIN_CONTEXT_BYTES - 1,
+          }),
+        ],
+        'alpha beta',
+        { topN: 8, cache: false },
+      )
+      expect(ids(candidates)).toEqual(['unknown-cold', 'thin-hot'])
+      expect(candidates[0].reason).not.toContain('体积小')
+      expect(candidates[1].reason).toContain('体积小')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('adds 体积小 only to the rows the floor demotes', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(BASE)
+      const candidates = routeSessions(
+        [
+          row('solid', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 50 * 60_000,
+            sizeBytes: ROUTE_MIN_CONTEXT_BYTES * 4,
+          }),
+          row('unknown', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE - 30 * 60_000 }),
+          row('thin', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 60_000,
+            sizeBytes: 1_000,
+          }),
+        ],
+        'alpha beta',
+        { topN: 8, cache: false },
+      )
+      // All 热: the substantive pair keeps its recency order, the thin row drops
+      // behind both of them.
+      expect(ids(candidates)).toEqual(['unknown', 'solid', 'thin'])
+      const reasonOf = (sessionId: string): string =>
+        candidates.find((candidate) => candidate.sessionId === sessionId)?.reason ?? ''
+      expect(reasonOf('unknown')).not.toContain('体积小')
+      expect(reasonOf('solid')).not.toContain('体积小')
+      expect(reasonOf('thin')).toContain('体积小')
+      for (const candidate of candidates) expect(candidate.reason).toContain(' · 热')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the live fixture titled row ahead of the throwaway 询问顾问群项目开发进度', () => {
+    // Measured log sizes: the long-running titled row is 27,436,715 B; the
+    // one-turn throwaway is 118,787 B, below the floor.
+    const sessions: RosterSource[] = liveRoster().map((session) =>
+      session.sessionId === 'titled-main' ? { ...session, sizeBytes: 27_436_715 } : session,
+    )
+    sessions.push({
+      sessionId: 'ask-progress',
+      updatedAt: BASE - 2 * 60_000,
+      running: false,
+      cwd: 'I:\\DSH\\dsh-advisor-group',
+      sizeBytes: 118_787,
+      projections: { values: { title: '询问顾问群项目开发进度' } },
+    })
+    const all = routeSessions(sessions, LIVE_QUESTION, { topN: 8, cache: false })
+    const titled = all.findIndex((candidate) => candidate.sessionId === 'titled-main')
+    const thin = all.findIndex((candidate) => candidate.sessionId === 'ask-progress')
+    expect(titled).toBe(0)
+    expect(thin).toBeGreaterThan(titled)
+    expect(all[thin].reason).toContain('体积小')
+    expect(all[titled].reason).not.toContain('体积小')
   })
 })
 

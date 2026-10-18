@@ -61,6 +61,20 @@ const RUNNING_BONUS = 10
 const HOT_WINDOW_MS = 3_600_000
 const WARM_WINDOW_MS = 86_400_000
 
+/**
+ * Substantive-context floor, in bytes of a session's own log — the same number
+ * `sizeHint` carries. Measured 2026-10-18 over the host's real logs: the 1885
+ * sessions with both a readable title and a log file gave
+ * min 337 · p25 1,137 · median 160,380 · p75 641,417 · max 56,873,747 bytes.
+ * The distribution is bimodal: the bottom quarter is a ~1.1 KB greeting-session
+ * cluster, real work starts around 38 KB (this project's smallest), and the
+ * median is 157 KB. The reported throwaway 「询问顾问群项目开发进度」 measured
+ * 118,787 bytes (one turn, six steps) — below the median — so the median is the
+ * line: at or above it a session has accumulated at least typical context,
+ * below it the row is demoted behind every substantive row however fresh it is.
+ */
+export const ROUTE_MIN_CONTEXT_BYTES = 160_380
+
 /** Route cache: the same question inside this window reuses one routing pass. */
 const ROUTE_CACHE_TTL_MS = 180_000
 const ROUTE_CACHE_MAX = 64
@@ -430,19 +444,34 @@ function bandRank(updatedAt: number, now: number): number {
 }
 
 /**
+ * True when the row's log size is known AND below {@link ROUTE_MIN_CONTEXT_BYTES}.
+ * An unknown size is never thin: a probe miss must not cost a session a slot.
+ */
+function tooThin(row: IndexedSession): boolean {
+  return row.sizeHint !== undefined && row.sizeHint < ROUTE_MIN_CONTEXT_BYTES
+}
+
+/**
  * Deterministic order: score desc, a title hit above a directory-only hit,
- * running first, then the recency band (热 > 温 > 冷), then the bigger known
- * context inside one project of the SAME band, then recency, then shorter
- * title.
+ * running first, then substance (a known-small row behind every row that
+ * clears the floor), then the recency band (热 > 温 > 冷), then the bigger
+ * known context inside one project of the SAME band, then recency, then
+ * shorter title.
  */
 function compareScored(a: ScoredRow, b: ScoredRow, now: number): number {
   if (a.score !== b.score) return b.score - a.score
   // Equal scores must never rank a directory-only match above a title match.
   if (a.titleHit !== b.titleHit) return a.titleHit ? -1 : 1
   if (a.row.running !== b.row.running) return a.row.running ? -1 : 1
-  // Freshness outranks accumulated context: a 14-day-old row holding far more
-  // context must never come before a two-hour-old one. The size key only
-  // applies inside one band.
+  // Substance outranks freshness: a known-small row sorts behind every row at
+  // or above the floor BEFORE the recency band is consulted, so a thin but
+  // fresh session loses to a substantive cold one. An unknown size counts as
+  // substantive (never punished for a probe miss).
+  const thinA = tooThin(a.row)
+  const thinB = tooThin(b.row)
+  if (thinA !== thinB) return thinA ? 1 : -1
+  // Freshness outranks the size magnitude among substantive rows: a 14-day-old
+  // row holding far more context must never come before a two-hour-old one.
   const bandA = bandRank(a.row.updatedAt, now)
   const bandB = bandRank(b.row.updatedAt, now)
   if (bandA !== bandB) return bandA - bandB
@@ -491,13 +520,16 @@ function aliasHits(questionPhrase: string, aliases: Map<string, string>): Map<st
 }
 
 function candidateOf(scored: ScoredRow, now: number): RouteCandidate {
+  // A known-small row is deliberately demoted behind every substantive row; the
+  // label says why it lost, so the caller can tell "small" from "cold".
+  const thin = tooThin(scored.row) ? ' · 体积小' : ''
   return {
     sessionId: scored.row.sessionId,
     name: shortSessionName(scored.row.name, scored.row.cwd),
     score: scored.score,
     // The activity label is informational: it tells the caller how fresh the
     // peer is without excluding anything.
-    reason: `${scored.reason} · ${activityLabel(scored.row.updatedAt, now)}`,
+    reason: `${scored.reason} · ${activityLabel(scored.row.updatedAt, now)}${thin}`,
   }
 }
 
