@@ -263,7 +263,24 @@ const ALLOWED_API_KEY_ENVS = new Set(
 ALLOWED_API_KEY_ENVS.add('TYPESAFE_API_KEY')
 ALLOWED_API_KEY_ENVS.add('OPENROUTER_API_KEY')
 
-function validateSecurity(input: ConfigShape): string | null {
+/**
+ * Env names the diagnostics may read. Presets contribute their fixed names; on top of that we
+ * trust every name the user has already **saved** in this plugin's config — that is what lets a
+ * custom provider use its own variable. Trusting the saved config keeps the guard meaningful: a
+ * caller cannot invent a name, only reuse one the user declared here.
+ */
+export function allowedApiKeyEnvs(config: ConfigShape): Set<string> {
+  const allowed = new Set(ALLOWED_API_KEY_ENVS)
+  for (const advisor of config.advisors ?? []) {
+    const env = advisor.apiKeyEnv?.trim()
+    if (env) allowed.add(env)
+  }
+  const jevEnv = config.trigger?.jev?.apiKeyEnv?.trim()
+  if (jevEnv) allowed.add(jevEnv)
+  return allowed
+}
+
+export function validateSecurity(input: ConfigShape): string | null {
   if (input.trigger.jev?.baseURL) {
     const url = input.trigger.jev.baseURL.trim()
     if (!(url.startsWith('https://') || url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost'))) {
@@ -292,9 +309,12 @@ function validateSecurity(input: ConfigShape): string | null {
     }
 
     if (advisor.apiKeyEnv) {
+      // A name outside the preset list is legal — custom providers bring their own variable.
+      // Only the shape is checked here; what a name may *read* is decided by
+      // `allowedApiKeyEnvs` at diagnostic time.
       const env = advisor.apiKeyEnv.trim()
-      if (!ALLOWED_API_KEY_ENVS.has(env)) {
-        return `顾问 ${advisor.id} 的 API Key 不被允许：${env}。请使用预设供应商对应的 API Key。`
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(env)) {
+        return `顾问 ${advisor.id} 的 API Key 环境变量名无效：${env}`
       }
     }
   }
@@ -494,8 +514,11 @@ async function handleModelsRequest(
     sendJson(res, 400, { ok: false, error: '该预设缺少 baseURL 或 API Key' })
     return
   }
-  if (!apiKey && effectiveEnv && !ALLOWED_API_KEY_ENVS.has(effectiveEnv)) {
-    sendJson(res, 400, { ok: false, error: 'API Key 不能使用该环境变量名' })
+  if (!apiKey && effectiveEnv && !allowedApiKeyEnvs(service.getConfig()).has(effectiveEnv)) {
+    sendJson(res, 400, {
+      ok: false,
+      error: `环境变量 ${effectiveEnv} 还不能用于测试：自定义供应商请先保存设置，或直接在「API Key」里填密钥。`,
+    })
     return
   }
   const baseError = assertSafeDiagnosticBase(effectiveBase)
@@ -586,8 +609,11 @@ async function handleTestConnectionRequest(
     sendJson(res, 400, { ok: false, error: '该预设缺少 baseURL 或 API Key' })
     return
   }
-  if (!apiKey && effectiveEnv && !ALLOWED_API_KEY_ENVS.has(effectiveEnv)) {
-    sendJson(res, 400, { ok: false, error: 'API Key 不能使用该环境变量名' })
+  if (!apiKey && effectiveEnv && !allowedApiKeyEnvs(service.getConfig()).has(effectiveEnv)) {
+    sendJson(res, 400, {
+      ok: false,
+      error: `环境变量 ${effectiveEnv} 还不能用于测试：自定义供应商请先保存设置，或直接在「API Key」里填密钥。`,
+    })
     return
   }
   const baseError = assertSafeDiagnosticBase(effectiveBase)
