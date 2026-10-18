@@ -10,6 +10,8 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **Sessions resolve by the title the sidebar shows** (report: mentioning a session by its list name still made the model hunt for the session-id string). The `title` projection is a **plain string** in `dsh-session-title` (`z.string().min(1).nullable()`), but `sessionDisplayName` only accepted a `{ title }` wrapper — so every row fell back to `cwd · time`, no title could ever match, and only the workspace directory name worked (which is why the earlier verification passed). The resolver now reads the string shape and keeps the wrapper as a legacy alternative; the test helper emits the real shape so the regression cannot return. A miss also stops the id hunt: `target-not-found` now returns the **eight most recent sessions** (titled, running first) as candidates for the user to choose, and the tool description names the sidebar title explicitly.
+
 - **A custom provider can use its own API-key environment variable** (report: 「API Key 不能使用该环境变量名」). Saving a custom provider refused any variable name outside the preset list, and the model-list and test-connection diagnostics refused them too, so pasting the key was the only way through. Saving now checks the name's *shape* only, and the diagnostics accept the presets' names plus **every name the user has saved** in this plugin's config — the saved config is server-side state, so a caller still cannot invent a name, and the guard keeps its purpose (the diagnostics can never read an arbitrary environment variable and send it to an address of the caller's choosing). The refusal message now says what to do: save the settings first, or fill in the key.
 
 ## [0.1.3] - 2026-10-05
