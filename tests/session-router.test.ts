@@ -105,6 +105,14 @@ describe('routeSessions — matches', () => {
     expect(ids(candidates)).toEqual(['path'])
   })
 
+  it('shortens a title-less candidate to the last path segment', () => {
+    const candidates = routeSessions(
+      [{ sessionId: 'p', updatedAt: BASE, running: false, cwd: 'I:\\极简遥控器\\极简遥控器' }],
+      '极简遥控器 怎么改',
+    )
+    expect(candidates[0]).toMatchObject({ sessionId: 'p', name: '极简遥控器' })
+  })
+
   it('matches a pure-ASCII question word for word', () => {
     const candidates = routeSessions([row('en', 'Advisor Group plugin')], 'advisor group')
     expect(candidates[0]).toMatchObject({ sessionId: 'en', score: 100 })
@@ -114,7 +122,27 @@ describe('routeSessions — matches', () => {
   it('matches a mixed CJK/ASCII question', () => {
     const candidates = routeSessions([row('mix', 'DSH 插件配置说明')], 'dsh 插件怎么配')
     expect(candidates[0]).toMatchObject({ sessionId: 'mix', reason: '标题命中「dsh」' })
-    expect(candidates[0].score).toBe(66)
+    // Dice (36, capped by 40) + title keyword 40.
+    expect(candidates[0].score).toBe(76)
+  })
+
+  it('caps the pure-fuzzy score and keeps real hits decisive', () => {
+    const candidates = routeSessions(
+      [
+        // Shares only the 简遥/遥控 bigrams: a fuzzy match, no keyword inside.
+        row('fuzzy', '简遥控'),
+        // A real title keyword hit.
+        row('titled', '极简遥控器改造'),
+        // A real cwd-segment hit.
+        row('cwd', '别的会话', { cwd: 'I:\\极简遥控器\\src' }),
+      ],
+      '极简遥控器 的构建脚本',
+      { topN: 8 },
+    )
+    expect(ids(candidates)).toEqual(['titled', 'cwd', 'fuzzy'])
+    const fuzzy = candidates.find((candidate) => candidate.sessionId === 'fuzzy')
+    expect(fuzzy?.score).toBeLessThanOrEqual(40)
+    expect(candidates[0].score).toBeGreaterThan(fuzzy?.score ?? 0)
   })
 
   it('ignores a 2-character title that shares only one bigram', () => {
@@ -134,7 +162,7 @@ describe('routeSessions — hard channels and order', () => {
       '遥控器怎么改',
     )
     expect(candidates).toEqual([
-      expect.objectContaining({ sessionId: 'busy', score: 0, reason: '运行中' }),
+      expect.objectContaining({ sessionId: 'busy', score: 10, reason: '运行中' }),
     ])
   })
 
@@ -150,6 +178,35 @@ describe('routeSessions — hard channels and order', () => {
       { topN: 8 },
     )
     expect(ids(candidates)).toEqual(['running-old', 'idle-new', 'idle-new-long', 'idle-old'])
+  })
+
+  it('adds the running bonus on top of the match score', () => {
+    const candidates = routeSessions([row('busy', '简遥控', { running: true })], '极简遥控器 的构建脚本')
+    expect(candidates[0]).toMatchObject({ sessionId: 'busy', score: 50 })
+  })
+})
+
+describe('routeSessions — noise rows', () => {
+  it('drops blank sessions and title-generation leftovers, keeping real rows', () => {
+    const candidates = routeSessions(
+      [
+        row('blank', '遥控器改造', { blank: true }),
+        row('generated', '生成会话标题'),
+        row('greeting', '你好，'),
+        row('real', '遥控器维护'),
+      ],
+      '遥控器怎么改',
+      { topN: 8 },
+    )
+    expect(ids(candidates)).toEqual(['real'])
+  })
+
+  it('drops the asking session when its id is passed', () => {
+    const sessions = [row('self', '遥控器改造'), row('other', '遥控器维护')]
+    expect(ids(routeSessions(sessions, '遥控器怎么改', { currentSessionId: 'self', topN: 8 }))).toEqual(['other'])
+    // The fallback pool must hide it too.
+    const fallback = routeSessions(sessions, 'zzz 无匹配问题', { currentSessionId: 'self', topN: 8 })
+    expect(ids(fallback)).toEqual(['other'])
   })
 })
 
@@ -374,6 +431,87 @@ describe('ask_session without a target', () => {
       expect(value).toMatchObject({ ok: false, error: 'target-not-found' })
       expect(value.routeCandidates).toBeUndefined()
       expect(world.asks).toHaveLength(1)
+    } finally {
+      world.roster = savedRoster
+    }
+  })
+
+  it('never offers the asking session itself as a candidate', async () => {
+    const savedRoster = world.roster
+    world.roster = [
+      ...savedRoster,
+      {
+        sessionId: 'self',
+        updatedAt: 1_700_000_050_000,
+        running: false,
+        cwd: 'I:\\极简遥控器',
+        projections: { values: { title: '遥控器维护' } },
+      },
+    ]
+    try {
+      const value = await runTool(toolConfig(), 'ask_session', { question: '遥控器界面怎么改' }, selfExec())
+      const routeCandidates = value.routeCandidates as RouteCandidate[]
+      expect(routeCandidates.map((candidate) => candidate.sessionId)).not.toContain('self')
+      expect(routeCandidates.length).toBeGreaterThan(0)
+    } finally {
+      world.roster = savedRoster
+    }
+  })
+})
+
+describe('list_sessions row diagnostics', () => {
+  it('declares hasTitle as a required row field', () => {
+    const tools = registerAdvisorTools({ getConfig: () => toolConfig() } as unknown as AdvisorGroupService)
+    const tool = tools.find((candidate) => candidate.name === 'list_sessions') as unknown as {
+      output: {
+        schema: {
+          properties: {
+            sessions: { items: { properties: Record<string, { type?: string; required?: boolean }> } }
+          }
+        }
+      }
+    }
+    expect(tool.output.schema.properties.sessions.items.properties.hasTitle).toEqual({
+      type: 'boolean',
+      required: true,
+    })
+  })
+
+  it('reports hasTitle, drops noise rows, and shortens fallback names', async () => {
+    const savedRoster = world.roster
+    const updatedAt = 1_700_000_000_000
+    world.roster = [
+      ...savedRoster,
+      {
+        sessionId: 'blank',
+        updatedAt,
+        running: false,
+        blank: true,
+        cwd: 'I:\\blank',
+        projections: { values: { title: '看起来正常的标题' } },
+      },
+      {
+        sessionId: 'generated',
+        updatedAt,
+        running: false,
+        cwd: 'I:\\generated',
+        projections: { values: { title: '生成会话标题' } },
+      },
+      { sessionId: 'untitled', updatedAt, running: false, cwd: 'I:\\极简遥控器\\极简遥控器' },
+    ]
+    try {
+      const value = await runTool(toolConfig(), 'list_sessions', {}, {
+        signal: new AbortController().signal,
+      })
+      expect(value.ok).toBe(true)
+      const sessions = value.sessions as Array<Record<string, unknown>>
+      const ids = sessions.map((session) => session.sessionId)
+      expect(ids).not.toContain('blank')
+      expect(ids).not.toContain('generated')
+      expect(sessions.find((session) => session.sessionId === 'remote-1')?.hasTitle).toBe(true)
+      const untitled = sessions.find((session) => session.sessionId === 'untitled')
+      expect(untitled?.hasTitle).toBe(false)
+      expect(untitled?.name).toBe('极简遥控器')
     } finally {
       world.roster = savedRoster
     }

@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildSessionRoster,
+  isNoiseSession,
+  NOISE_TITLE_PATTERN,
   renderRoster,
+  shortSessionName,
   type RosterRow,
   type RosterSource,
 } from '../src/session-roster'
@@ -52,6 +55,43 @@ describe('buildSessionRoster', () => {
       ['sub', true],
       ['ordinary', false],
     ])
+  })
+
+  it('reports hasTitle: true only when the host published a real title', () => {
+    const rows = buildSessionRoster([
+      source({ sessionId: 'titled', projections: { values: { title: '真标题' } } }),
+      source({ sessionId: 'untitled' }),
+    ])
+    const flags = rows.map((row) => [row.sessionId, row.hasTitle])
+    expect(flags).toEqual([
+      ['titled', true],
+      ['untitled', false],
+    ])
+  })
+
+  it('drops blank sessions and title-generation leftovers', () => {
+    const rows = buildSessionRoster([
+      source({ sessionId: 'blank', blank: true, projections: { values: { title: '看起来正常的标题' } } }),
+      source({ sessionId: 'generated', projections: { values: { title: '生成会话标题' } } }),
+      source({ sessionId: 'greeting', projections: { values: { title: '你好，' } } }),
+      source({ sessionId: 'real', projections: { values: { title: '你好世界' } } }),
+    ])
+    expect(rows.map((row) => row.sessionId)).toEqual(['real'])
+    // The exclusion list is one exported constant, so tests can pin it.
+    expect(NOISE_TITLE_PATTERN.test('生成会话标题')).toBe(true)
+    expect(NOISE_TITLE_PATTERN.test('你好')).toBe(true)
+    expect(NOISE_TITLE_PATTERN.test('你好， ')).toBe(true)
+    expect(NOISE_TITLE_PATTERN.test('你好世界')).toBe(false)
+    expect(isNoiseSession({ blank: true })).toBe(true)
+    expect(isNoiseSession({ projections: { values: { title: '生成会话标题' } } })).toBe(true)
+    expect(isNoiseSession({ sessionId: 'self' }, 'self')).toBe(true)
+    expect(isNoiseSession({ sessionId: 'self' }, 'other')).toBe(false)
+  })
+
+  it('hides subagent rows only when asked to', () => {
+    const sessions = [source({ sessionId: 'main' }), source({ sessionId: 'sub', origin: 'subagent' })]
+    expect(buildSessionRoster(sessions, { hideSubagents: true }).map((row) => row.sessionId)).toEqual(['main'])
+    expect(buildSessionRoster(sessions).map((row) => row.sessionId).sort()).toEqual(['main', 'sub'])
   })
 
   it('matches the query over the name, case-insensitively', () => {
@@ -134,6 +174,33 @@ describe('buildSessionRoster', () => {
   })
 })
 
+describe('shortSessionName', () => {
+  const stamp = '2023-11-14T22:13:20.000Z'
+
+  it('turns the fallback label into the last path segment', () => {
+    const name = `I:\\极简遥控器\\极简遥控器 · ${stamp}`
+    expect(shortSessionName(name, 'I:\\极简遥控器\\极简遥控器')).toBe('极简遥控器')
+    // Without cwd the drive-rooted shape is still recognised.
+    expect(shortSessionName(name)).toBe('极简遥控器')
+  })
+
+  it('leaves real titles alone, even ones containing a middle dot', () => {
+    expect(shortSessionName('修插件', 'I:\\demo')).toBe('修插件')
+    expect(shortSessionName(`修插件 · ${stamp}`, 'I:\\demo')).toBe(`修插件 · ${stamp}`)
+    expect(shortSessionName('')).toBe('')
+  })
+
+  it('adds 未命名 when the last segment names nothing', () => {
+    expect(shortSessionName(`I: · ${stamp}`, 'I:')).toBe('I: · 未命名')
+    expect(shortSessionName(`I:\\ · ${stamp}`, 'I:\\')).toBe('I: · 未命名')
+    expect(shortSessionName(`/ · ${stamp}`, '/')).toBe('未命名')
+  })
+
+  it('leaves the unknown-directory fallback alone', () => {
+    expect(shortSessionName(`（未知工作目录） · ${stamp}`)).toBe(`（未知工作目录） · ${stamp}`)
+  })
+})
+
 describe('renderRoster', () => {
   const rows: RosterRow[] = [
     {
@@ -144,6 +211,7 @@ describe('renderRoster', () => {
       running: true,
       subagent: false,
       hint: 'I:\\demo · 刚刚',
+      hasTitle: true,
     },
     {
       sessionId: 'b',
@@ -152,6 +220,7 @@ describe('renderRoster', () => {
       running: false,
       subagent: true,
       hint: '（未知工作目录） · 2 天前',
+      hasTitle: true,
     },
   ]
 
@@ -167,6 +236,17 @@ describe('renderRoster', () => {
     expect(renderRoster([])).toBe('没有匹配的会话。')
     expect(renderRoster([rows[0]], { filtered: true })).toBe(
       ['匹配 1 个会话', '- 修插件 — I:\\demo · 刚刚 · 运行中'].join('\n'),
+    )
+  })
+
+  it('keeps hasTitle out of the model-facing text', () => {
+    expect(renderRoster(rows)).not.toContain('hasTitle')
+  })
+
+  it('shows a title-less session by its last path segment, not the whole path twice', () => {
+    const titleless = buildSessionRoster([source({ cwd: 'I:\\极简遥控器\\极简遥控器', updatedAt: Date.now() })])
+    expect(renderRoster(titleless)).toBe(
+      ['共 1 个会话', '- 极简遥控器 — I:\\极简遥控器\\极简遥控器 · 刚刚'].join('\n'),
     )
   })
 })

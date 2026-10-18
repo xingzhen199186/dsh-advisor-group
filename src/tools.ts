@@ -22,7 +22,7 @@ import {
 import { loadAliases, routeSessions, type RouteCandidate } from './session-router'
 import type { ConsultSession, ConsultSummary } from './types'
 import type { Config } from './config'
-import { buildSessionRoster, renderRoster, type RosterRow, type RosterSource } from './session-roster'
+import { buildSessionRoster, renderRoster, shortSessionName, type RosterRow, type RosterSource } from './session-roster'
 import { listAskRecords, pruneAskRecords, readAskRecord, type AskRecord } from './ask-store'
 import type { Session } from '@deepseek-ai/dsh-session'
 
@@ -550,6 +550,7 @@ export function registerAdvisorTools(
         const routeCandidates = routeSessions(roster, question, {
           topN: swarm.routingTopN,
           aliases: knownRoutingAliases(routingAliasFile(), roster),
+          currentSessionId: sessionId,
         })
         if (routeCandidates.length > 0) {
           return {
@@ -673,6 +674,9 @@ export function registerAdvisorTools(
                 running: { type: 'boolean', required: true },
                 subagent: { type: 'boolean', required: true },
                 hint: { type: 'string', required: true },
+                // Diagnostic only: whether the row carried a real title. It is
+                // deliberately absent from the rendered text.
+                hasTitle: { type: 'boolean', required: true },
               },
             },
           },
@@ -720,14 +724,15 @@ export function registerAdvisorTools(
       }
       try {
         const listed = await controller.list({}, exec.signal)
-        const rows = buildSessionRoster(
-          visibleRosterSessions(listed.items, swarm.rosterIncludeSubagents),
-          {
-            query: typeof args.query === 'string' ? args.query : '',
-            limit: typeof args.limit === 'number' ? args.limit : undefined,
-          },
-        )
-        return { ok: true, count: rows.length, sessions: rows }
+        const rows = buildSessionRoster(listed.items, {
+          query: typeof args.query === 'string' ? args.query : '',
+          limit: typeof args.limit === 'number' ? args.limit : undefined,
+          hideSubagents: swarm.rosterIncludeSubagents !== true,
+        })
+        // Same short display names the rendered text uses, so the structured
+        // rows never show a full path twice for a title-less session.
+        const sessions = rows.map((row) => ({ ...row, name: shortSessionName(row.name, row.cwd) }))
+        return { ok: true, count: sessions.length, sessions }
       } catch (error) {
         return {
           ok: false,

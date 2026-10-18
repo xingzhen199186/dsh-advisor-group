@@ -17,6 +17,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { RosterSource } from './session-roster'
+import { isNoiseSession, shortSessionName } from './session-roster'
 
 /** One routed session: a choice handed to the user, never an auto-pick. */
 export interface RouteCandidate {
@@ -40,11 +41,20 @@ const MIN_KEYWORD_LENGTH = 2
  */
 const BIGRAM_MIN_HITS = 2
 
-/** Hard-channel bonuses, added on top of the Dice score and clamped at 100. */
-const TITLE_KEYWORD_BONUS = 30
-const CWD_KEYWORD_BONUS = 20
-const FULL_PHRASE_BONUS = 50
+/**
+ * The Dice/bigram contribution is a fuzzy signal: it is capped here so a
+ * merely similar title can never outrank a real hit, whatever its length.
+ */
+const DICE_SCORE_CAP = 40
+/**
+ * Hard-channel bonuses, added on top of the capped Dice score and clamped at
+ * 100. They stay decisive: any one of them lifts the row above the fuzzy cap.
+ */
+const TITLE_KEYWORD_BONUS = 40
+const CWD_KEYWORD_BONUS = 30
+const FULL_PHRASE_BONUS = 60
 const ALIAS_BONUS = 60
+const RUNNING_BONUS = 10
 
 /** Zero-hit fallback pool: fuzzy top 20 ∪ most recent 10, deduped. */
 const WIDE_FUZZY_LIMIT = 20
@@ -74,6 +84,8 @@ interface TokenSet {
 interface IndexedSession {
   sessionId: string
   name: string
+  /** Working directory, used to shorten a fallback display name. */
+  cwd?: string
   /** Normalised title, for exact-keyword and whole-phrase substrings. */
   titleText: string
   /** Normalised cwd path segments (never the drive letter). */
@@ -178,9 +190,13 @@ function indexSession(session: unknown): IndexedSession | undefined {
     addText(tokens, segment)
     cwdTexts.push(normalizeAliasKey(segment))
   }
+  // Without a title the candidate is named after the project folder, never the
+  // whole path (the roster renderer shows that path once, in the hint).
+  const folderName = cwdSegments.length > 0 ? cwdSegments[cwdSegments.length - 1] : ''
   return {
     sessionId,
-    name: title.length > 0 ? title : cwd.length > 0 ? cwd : sessionId,
+    name: title.length > 0 ? title : folderName.length > 0 ? folderName : cwd.length > 0 ? cwd : sessionId,
+    ...(cwd.length > 0 ? { cwd } : {}),
     titleText: normalizeAliasKey(title),
     cwdTexts,
     tokens,
@@ -239,11 +255,13 @@ function scoreRow(row: IndexedSession, query: QuestionQuery, aliasHit: string | 
   const fullPhrase =
     query.phrase.length >= MIN_KEYWORD_LENGTH &&
     (row.titleText.includes(query.phrase) || row.cwdTexts.some((text) => text.includes(query.phrase)))
-  let score = matched ? Math.round(diceScore(query.tokens, row.tokens) * 100) : 0
+  // Fuzzy base first, capped so similarity alone stays below every hard channel.
+  let score = matched ? Math.min(DICE_SCORE_CAP, Math.round(diceScore(query.tokens, row.tokens) * 100)) : 0
   if (titleKeyword !== undefined) score += TITLE_KEYWORD_BONUS
   else if (cwdKeyword !== undefined) score += CWD_KEYWORD_BONUS
   if (fullPhrase) score += FULL_PHRASE_BONUS
   if (aliasHit !== undefined) score += ALIAS_BONUS
+  if (row.running) score += RUNNING_BONUS
   score = Math.min(100, Math.max(0, score))
   const hard = titleKeyword !== undefined || cwdKeyword !== undefined || fullPhrase || aliasHit !== undefined || row.running
   if (!matched && !hard) return undefined
@@ -305,7 +323,7 @@ function aliasHits(questionPhrase: string, aliases: Map<string, string>): Map<st
 function candidateOf(scored: ScoredRow): RouteCandidate {
   return {
     sessionId: scored.row.sessionId,
-    name: scored.row.name,
+    name: shortSessionName(scored.row.name, scored.row.cwd),
     score: scored.score,
     reason: scored.reason,
   }
@@ -326,7 +344,7 @@ function widePool(indexed: readonly IndexedSession[], query: QuestionQuery, topN
   const byRecency = [...indexed].sort((a, b) => b.updatedAt - a.updatedAt)
   for (const row of byRecency.slice(0, WIDE_RECENT_LIMIT)) pool.set(row.sessionId, row)
   const scored: ScoredRow[] = [...pool.values()].map((row) => {
-    const base = Math.round(diceScore(query.tokens, row.tokens) * 100)
+    const base = Math.min(DICE_SCORE_CAP, Math.round(diceScore(query.tokens, row.tokens) * 100))
     const age = newest - row.updatedAt
     const decay = age > 0 ? Math.pow(0.5, age / DECAY_HALF_LIFE_MS) : 1
     return {
@@ -353,18 +371,21 @@ function widePool(indexed: readonly IndexedSession[], query: QuestionQuery, topN
  * @param options.topN - max candidates, default 3, clamped to 1..8.
  * @param options.aliases - normalised user phrasing → sessionId; the caller
  *   drops entries whose session is no longer in the roster.
+ * @param options.currentSessionId - the asking session, filtered out so the
+ *   model is never offered the session it is already in.
  * @returns candidates ordered best-first; never throws, never delivers.
  */
 export function routeSessions(
   sessions: readonly RosterSource[],
   question: string,
-  options?: { topN?: number; aliases?: Readonly<Record<string, string>> },
+  options?: { topN?: number; aliases?: Readonly<Record<string, string>>; currentSessionId?: string },
 ): RouteCandidate[] {
   const topN = clampTopN(options?.topN)
   const query = readQuestion(question)
   const hitsBySession = aliasHits(query.phrase, readAliasMap(options?.aliases))
   const indexed: IndexedSession[] = []
   for (const session of Array.isArray(sessions) ? (sessions as readonly unknown[]) : []) {
+    if (isNoiseSession(session, options?.currentSessionId)) continue
     const row = indexSession(session)
     if (row !== undefined) indexed.push(row)
   }
