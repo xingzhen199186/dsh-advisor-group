@@ -2045,6 +2045,34 @@ function AdvisorGroupSettingsTab(): ReactNode {
           style: { ...settingsInputStyle, width: 120 },
         }),
       ),
+      createElement(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
+        label('路由方式'),
+        createElement(
+          'select',
+          {
+            value: config.swarm.routingEngine === 'jev' ? 'jev' : 'local',
+            disabled: config.swarm.routingEnabled === false,
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({
+                ...config,
+                swarm: {
+                  ...config.swarm,
+                  routingEngine: e.target.value === 'jev' ? 'jev' : 'local',
+                },
+              }),
+            style: settingsInputStyle,
+          },
+          createElement('option', { value: 'local' }, '本地计算'),
+          createElement('option', { value: 'jev' }, 'Jev 判断'),
+        ),
+      ),
+      createElement(
+        'div',
+        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
+        'Jev 判断需要单独配置在「触发判定」里的 Jev 凭据；任何失败都会静默回退到本地排序',
+      ),
     ),
     createElement(
       'div',

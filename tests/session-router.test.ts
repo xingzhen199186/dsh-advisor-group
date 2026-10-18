@@ -50,16 +50,18 @@ vi.mock('../src/cross-session', async (importOriginal) => {
 
 import {
   activityLabel,
+  applyJevDecision,
   clearRouteCache,
   loadAliases,
   normalizeAliasKey,
   ROUTE_MIN_CONTEXT_BYTES,
   routeSessions,
+  routeSessionsWithEngine,
   saveAlias,
   type RouteCandidate,
 } from '../src/session-router'
 import type { RosterSource } from '../src/session-roster'
-import type { Config as ConfigShape } from '../src/config'
+import type { Config as ConfigShape, JevConfig } from '../src/config'
 import { registerAdvisorTools } from '../src/tools'
 import type { AdvisorGroupService } from '../src/service'
 import { writeAskRecord } from '../src/ask-store'
@@ -641,6 +643,147 @@ describe('routeSessions — substantive-context floor', () => {
   })
 })
 
+describe('routeSessions — Jev routing engine', () => {
+  /** Three equal-score rows with a fixed local order: freshest first. */
+  const sessions = [
+    row('fresh', 'alpha beta', { updatedAt: BASE + 2_000 }),
+    row('mid', 'alpha beta', { updatedAt: BASE + 1_000 }),
+    row('old', 'alpha beta', { updatedAt: BASE }),
+  ]
+
+  it('moves a Jev pick above 0.75 to the front and marks it', async () => {
+    const candidates = await routeSessionsWithEngine(sessions, 'alpha beta', {
+      engine: 'jev',
+      cache: false,
+      jev: async () => ({ choice: 'old', confidence: 0.9 }),
+    })
+    expect(ids(candidates)).toEqual(['old', 'fresh', 'mid'])
+    expect(candidates[0].reason).toContain('Jev 推荐')
+    for (const candidate of candidates.slice(1)) expect(candidate.reason).not.toContain('Jev 推荐')
+  })
+
+  it('obeys the 0.75 boundary exactly', async () => {
+    const candidates = await routeSessionsWithEngine(sessions, 'alpha beta', {
+      engine: 'jev',
+      cache: false,
+      jev: async () => ({ choice: 'mid', confidence: 0.75 }),
+    })
+    expect(ids(candidates)).toEqual(['mid', 'fresh', 'old'])
+    expect(candidates[0].reason).toContain('Jev 推荐')
+  })
+
+  it('keeps the local order inside the 0.45–0.75 band, unmarked', async () => {
+    for (const confidence of [0.45, 0.6, 0.74]) {
+      const candidates = await routeSessionsWithEngine(sessions, 'alpha beta', {
+        engine: 'jev',
+        cache: false,
+        jev: async () => ({ choice: 'old', confidence }),
+      })
+      expect(ids(candidates)).toEqual(['fresh', 'mid', 'old'])
+      for (const candidate of candidates) expect(candidate.reason).not.toContain('Jev 推荐')
+    }
+  })
+
+  it('ignores the "none" escape and a below-0.45 confidence', async () => {
+    for (const decision of [{ choice: 'none', confidence: 0.99 }, { choice: 'old', confidence: 0.44 }]) {
+      const candidates = await routeSessionsWithEngine(sessions, 'alpha beta', {
+        engine: 'jev',
+        cache: false,
+        jev: async () => decision,
+      })
+      expect(ids(candidates)).toEqual(['fresh', 'mid', 'old'])
+      for (const candidate of candidates) expect(candidate.reason).not.toContain('Jev 推荐')
+    }
+  })
+
+  it('ignores an id outside the option list and a missing confidence', async () => {
+    for (const decision of [{ choice: 'not-a-candidate', confidence: 0.99 }, { choice: 'old' }]) {
+      const candidates = await routeSessionsWithEngine(sessions, 'alpha beta', {
+        engine: 'jev',
+        cache: false,
+        jev: async () => decision,
+      })
+      expect(ids(candidates)).toEqual(['fresh', 'mid', 'old'])
+    }
+  })
+
+  it('falls back to the local order on any Jev failure, without throwing', async () => {
+    const failures = [
+      async () => {
+        throw new Error('Jev 超时（1000ms）')
+      },
+      async () => {
+        throw new Error('Jev HTTP 500')
+      },
+      async () => {
+        throw new SyntaxError('Unexpected token < in JSON')
+      },
+      async () => undefined,
+    ]
+    for (const jev of failures) {
+      const candidates = await routeSessionsWithEngine(sessions, 'alpha beta', {
+        engine: 'jev',
+        cache: false,
+        jev,
+      })
+      expect(ids(candidates)).toEqual(['fresh', 'mid', 'old'])
+      for (const candidate of candidates) expect(candidate.reason).not.toContain('Jev 推荐')
+    }
+  })
+
+  it('never calls Jev when the engine is local', async () => {
+    let called = false
+    const candidates = await routeSessionsWithEngine(sessions, 'alpha beta', {
+      engine: 'local',
+      cache: false,
+      jev: async () => {
+        called = true
+        return { choice: 'old', confidence: 0.99 }
+      },
+    })
+    expect(called).toBe(false)
+    expect(ids(candidates)).toEqual(['fresh', 'mid', 'old'])
+  })
+
+  it('behaves like local and says so when Jev is not configured', async () => {
+    const candidates = await routeSessionsWithEngine(sessions, 'alpha beta', {
+      engine: 'jev',
+      cache: false,
+    })
+    expect(ids(candidates)).toEqual(['fresh', 'mid', 'old'])
+    for (const candidate of candidates) expect(candidate.reason).toContain('Jev 未配置')
+  })
+
+  it('hands the local list to Jev with the caller-provided English gloss', async () => {
+    let seen: { question?: string; questionEn?: string; candidates?: readonly RouteCandidate[] } = {}
+    await routeSessionsWithEngine(sessions, 'alpha beta', {
+      engine: 'jev',
+      cache: false,
+      questionEn: 'Which session tracks alpha beta?',
+      jev: async (input) => {
+        seen = input
+        return { choice: 'mid', confidence: 0.9 }
+      },
+    })
+    expect(seen.question).toBe('alpha beta')
+    expect(seen.questionEn).toBe('Which session tracks alpha beta?')
+    expect(ids(seen.candidates ?? [])).toEqual(['fresh', 'mid', 'old'])
+  })
+
+  it('re-orders a known candidate list without inventing options', () => {
+    const local: RouteCandidate[] = sessions.map((session) => ({
+      sessionId: session.sessionId,
+      name: session.sessionId,
+      score: 100,
+      reason: '本地 · 冷',
+    }))
+    const picked = applyJevDecision(local, { choice: 'mid', confidence: 0.9 })
+    expect(ids(picked)).toEqual(['mid', 'fresh', 'old'])
+    expect(picked).toHaveLength(local.length)
+    expect(picked[0].reason).toBe('本地 · 冷 · Jev 推荐')
+  })
+})
+
 describe('activityLabel', () => {
   const NOW = 1_700_000_000_000
   const HOUR = 3_600_000
@@ -713,6 +856,14 @@ describe('routeSessions — route cache', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('keys the route cache by engine', () => {
+    expect(ids(routeSessions([row('a', 'alpha beta')], QUESTION, { engine: 'local' }))).toEqual(['a'])
+    // Same question, other engine: its own entry, so the new roster answers.
+    expect(ids(routeSessions([row('b', 'alpha beta')], QUESTION, { engine: 'jev' }))).toEqual(['b'])
+    // Back to local: the first entry is still live.
+    expect(ids(routeSessions([row('c', 'alpha beta')], QUESTION, { engine: 'local' }))).toEqual(['a'])
   })
 })
 
@@ -856,7 +1007,9 @@ interface ToolLike {
   execute: (args: Record<string, unknown>, exec: unknown) => Promise<Record<string, unknown>>
 }
 
-function toolConfig(routing: { enabled?: boolean; topN?: number } = {}): ConfigShape {
+function toolConfig(
+  routing: { enabled?: boolean; topN?: number; engine?: 'local' | 'jev'; jev?: JevConfig } = {},
+): ConfigShape {
   return {
     enabled: true,
     discussion: {
@@ -866,7 +1019,12 @@ function toolConfig(routing: { enabled?: boolean; topN?: number } = {}): ConfigS
       autoDeepen: true,
       stopOnConsensus: false,
     },
-    trigger: { requireClassifier: true, allowWebFallback: true, confidenceThreshold: 0.6 },
+    trigger: {
+      requireClassifier: true,
+      allowWebFallback: true,
+      confidenceThreshold: 0.6,
+      ...(routing.jev === undefined ? {} : { jev: routing.jev }),
+    },
     ui: { theme: 'retro-green', showTimestamps: true, autoExpand: true },
     quota: { enabled: true, maxPerDay: 50 },
     swarm: {
@@ -877,8 +1035,21 @@ function toolConfig(routing: { enabled?: boolean; topN?: number } = {}): ConfigS
       rosterIncludeSubagents: false,
       routingEnabled: routing.enabled ?? true,
       routingTopN: routing.topN ?? 3,
+      routingEngine: routing.engine ?? 'local',
     },
     advisors: [],
+  }
+}
+
+/** Configured Jev credentials (routing reuses the trigger Jev block). */
+function jevConfig(): JevConfig {
+  return {
+    enabled: false,
+    provider: 'typesafe',
+    model: 'jev-latest',
+    apiKey: 'test-key',
+    timeoutMs: 1000,
+    confidenceThreshold: 0.6,
   }
 }
 
@@ -912,6 +1083,7 @@ describe('ask_session without a target', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome
     rmSync(home, { recursive: true, force: true })
@@ -939,6 +1111,91 @@ describe('ask_session without a target', () => {
     expect(typeof routeCandidates[0].reason).toBe('string')
     // Routing is a proposal only: nothing reached the delivery layer.
     expect(world.asks).toHaveLength(0)
+  })
+
+  it('lets Jev move its pick to the front when the routing engine is jev', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ answers: { route: { choice: 'remote-1', confidence: 0.9 } } }), { status: 200 }),
+    )
+    const value = await runTool(
+      toolConfig({ engine: 'jev', jev: jevConfig(), topN: 3 }),
+      'ask_session',
+      { question: '遥控器 顾问群 插件', questionEn: 'Which session owns the advisor-group plugin work?' },
+      selfExec(),
+    )
+    const candidates = value.routeCandidates as RouteCandidate[]
+    // The local scorer put remote-2 first; Jev's confident pick takes the top.
+    expect(candidates.map((candidate) => candidate.sessionId)).toEqual(['remote-1', 'remote-2'])
+    expect(candidates[0].reason).toContain('Jev 推荐')
+    expect(candidates[1].reason).not.toContain('Jev 推荐')
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      state: string
+      questions: { route: { type: string, criteria: Record<string, string> } }
+    }
+    expect(body.questions.route.type).toBe('choice')
+    expect(Object.keys(body.questions.route.criteria)).toEqual(
+      expect.arrayContaining(['remote-1', 'remote-2', 'none']),
+    )
+    // Candidate titles stay in their original Chinese.
+    expect(body.questions.route.criteria['remote-1']).toContain('极简遥控器改造')
+    expect(body.state).toContain('Which session owns the advisor-group plugin work?')
+    expect(body.state).toContain('遥控器 顾问群 插件')
+  })
+
+  it('never calls Jev when the routing engine is local', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ answers: { route: { choice: 'remote-1', confidence: 0.9 } } }), { status: 200 }),
+    )
+    const value = await runTool(
+      toolConfig({ engine: 'local', jev: jevConfig() }),
+      'ask_session',
+      { question: '遥控器 顾问群 插件' },
+      selfExec(),
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+    const candidates = value.routeCandidates as RouteCandidate[]
+    for (const candidate of candidates) expect(candidate.reason).not.toContain('Jev 推荐')
+  })
+
+  it('behaves like local and says so when Jev is not configured', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ answers: { route: { choice: 'remote-1', confidence: 0.9 } } }), { status: 200 }),
+    )
+    const value = await runTool(
+      toolConfig({ engine: 'jev' }),
+      'ask_session',
+      { question: '遥控器 顾问群 插件' },
+      selfExec(),
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+    const candidates = value.routeCandidates as RouteCandidate[]
+    expect(candidates.map((candidate) => candidate.sessionId)).toEqual(['remote-2', 'remote-1'])
+    for (const candidate of candidates) expect(candidate.reason).toContain('Jev 未配置')
+  })
+
+  it('falls back to the local order when the Jev call fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Jev 超时（1000ms）'))
+    const value = await runTool(
+      toolConfig({ engine: 'jev', jev: jevConfig() }),
+      'ask_session',
+      { question: '遥控器 顾问群 插件' },
+      selfExec(),
+    )
+    const candidates = value.routeCandidates as RouteCandidate[]
+    expect(candidates.map((candidate) => candidate.sessionId)).toEqual(['remote-2', 'remote-1'])
+    for (const candidate of candidates) expect(candidate.reason).not.toContain('Jev 推荐')
+  })
+
+  it('falls back to the local order on an unparseable Jev response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }))
+    const value = await runTool(
+      toolConfig({ engine: 'jev', jev: jevConfig() }),
+      'ask_session',
+      { question: '遥控器 顾问群 插件' },
+      selfExec(),
+    )
+    const candidates = value.routeCandidates as RouteCandidate[]
+    expect(candidates.map((candidate) => candidate.sessionId)).toEqual(['remote-2', 'remote-1'])
   })
 
   it('keeps the old missing-target behaviour when routing is off', async () => {

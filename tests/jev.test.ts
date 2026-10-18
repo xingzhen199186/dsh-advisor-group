@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { classifyWithJev } from '../src/providers/jev'
+import { classifyWithJev, JEV_NONE_OPTION, jevConfigured, routeWithJev } from '../src/providers/jev'
 import type { AdvisorConfig, JevConfig } from '../src/config'
 
 const advisors: AdvisorConfig[] = [
@@ -158,5 +158,84 @@ describe('Jev provider adapters', () => {
     const split = await run({ ...baseConfig, highRiskThreshold: 0.5 })
     expect(split.shouldEscalate).toBe(true)
     expect(split.reason).toContain('高风险')
+  })
+})
+
+describe('Jev closed-set routing', () => {
+  const options = [
+    { id: 'session-a', title: '极简遥控器新', scope: '标题命中 · 冷' },
+    { id: 'session-b', title: '顾问群插件', scope: '目录命中 · 温' },
+  ]
+  const routeConfig: JevConfig = { ...baseConfig, apiKey: 'secret' }
+
+  it('asks one closed-set choice question with English instructions and a none escape', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      answers: {
+        route: {
+          choice: 'session-a',
+          confidence: 0.91,
+          probabilities: { 'session-a': 0.91, 'session-b': 0.09, none: 0 },
+        },
+      },
+      model: 'typesafe/jev-1.13.0',
+    }), { status: 200 }))
+    const decision = await routeWithJev(
+      '那个做极简遥控器的会话进度如何？',
+      'What is the progress of the remote-control session?',
+      options,
+      routeConfig,
+    )
+    expect(decision.choice).toBe('session-a')
+    expect(decision.confidence).toBe(0.91)
+    expect(decision.model).toBe('typesafe/jev-1.13.0')
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      state: string
+      questions: { route: { type: string, instructions: string, criteria: Record<string, string> } }
+    }
+    expect(body.questions.route.type).toBe('choice')
+    // English instructions: no CJK may leak into them.
+    expect(body.questions.route.instructions).not.toMatch(/[\u4e00-\u9fff]/u)
+    expect(body.questions.route.instructions.toLowerCase()).toContain('pick exactly one')
+    // Candidate titles survive verbatim; the escape option sits beside them.
+    expect(body.questions.route.criteria['session-a']).toContain('极简遥控器新')
+    expect(body.questions.route.criteria['session-b']).toContain('顾问群插件')
+    expect(body.questions.route.criteria[JEV_NONE_OPTION]).toContain('None of the listed sessions')
+    // The state carries the English gloss and the verbatim question.
+    expect(body.state).toContain('What is the progress of the remote-control session?')
+    expect(body.state).toContain('那个做极简遥控器的会话进度如何？')
+  })
+
+  it('uses the chosen option probability when no explicit confidence is sent', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      answers: { route: { choice: 'session-b', probabilities: { 'session-a': 0.2, 'session-b': 0.6, none: 0.2 } } },
+    }), { status: 200 }))
+    const decision = await routeWithJev('问题', undefined, options, routeConfig)
+    expect(decision).toMatchObject({ choice: 'session-b', confidence: 0.6 })
+    expect(decision.probabilities).toEqual({ 'session-a': 0.2, 'session-b': 0.6, none: 0.2 })
+  })
+
+  it('rejects responses without a usable choice', async () => {
+    const run = (body: unknown) => {
+      vi.restoreAllMocks()
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(body), { status: 200 }))
+      return routeWithJev('问题', undefined, options, routeConfig)
+    }
+    await expect(run({})).rejects.toThrow('缺少 answers')
+    await expect(run({ answers: {} })).rejects.toThrow('缺少 route')
+    await expect(run({ answers: { route: { confidence: 0.9 } } })).rejects.toThrow('route.choice')
+    await expect(run({ answers: { route: { choice: '   ' } } })).rejects.toThrow('route.choice')
+  })
+
+  it('reports whether Jev has usable credentials', () => {
+    expect(jevConfigured(undefined)).toBe(false)
+    expect(jevConfigured({ ...baseConfig })).toBe(false)
+    expect(jevConfigured({ ...baseConfig, apiKey: 'secret' })).toBe(true)
+    process.env.JEV_ROUTE_TEST_KEY = 'env-secret'
+    try {
+      expect(jevConfigured({ ...baseConfig, apiKeyEnv: 'JEV_ROUTE_TEST_KEY' })).toBe(true)
+    } finally {
+      delete process.env.JEV_ROUTE_TEST_KEY
+    }
   })
 })

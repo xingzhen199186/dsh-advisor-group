@@ -2,7 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { advisorsMissingModel } from './model-validation'
 import { appendShadowSample, type ShadowSample } from './shadow'
 import { classifyRequest } from './classifier'
-import { classifyWithJev, type JevClassificationResult } from './providers/jev'
+import { classifyWithJev, jevConfigured, routeWithJev, type JevClassificationResult } from './providers/jev'
 import type { AdvisorGroupService } from './service'
 import { appendAdvisorStart, appendAskAnswer, appendAskStart } from './session-log'
 import {
@@ -19,7 +19,12 @@ import {
   type CrossSessionLogEvent,
   type CrossSessionSummary,
 } from './cross-session'
-import { loadAliases, routeSessions, type RouteCandidate } from './session-router'
+import {
+  loadAliases,
+  routeSessionsWithEngine,
+  type JevRouter,
+  type RouteCandidate,
+} from './session-router'
 import type { ConsultSession, ConsultSummary } from './types'
 import type { Config } from './config'
 import { buildSessionRoster, renderRoster, shortSessionName, withSessionLogSizes, type RosterRow, type RosterSource } from './session-roster'
@@ -375,6 +380,11 @@ export function registerAdvisorTools(
         description:
           'Optional background the target needs. Default: none. Anything sent here stays in the target session log forever, so send only what is necessary.',
       },
+      questionEn: {
+        type: 'string',
+        description:
+          'Optional one-line English gloss of the question. Sent to the Jev routing engine as extra context when 「路由方式」 is Jev; the question, the candidates and every session record keep the original language.',
+      },
       waitMs: {
         type: 'number',
         description: `How long to wait for the target to finish, in milliseconds (default ${ASK_WAIT_DEFAULT_MS}, max ${ASK_WAIT_MAX_MS}). On timeout the already-collected text is returned and the target is NOT interrupted.`,
@@ -547,10 +557,15 @@ export function registerAdvisorTools(
       const targetText = typeof args.target === 'string' ? args.target.trim() : ''
       if (targetText.length === 0 && swarm.routingEnabled !== false) {
         const roster = visibleRosterSessions(listedItems, swarm.rosterIncludeSubagents)
-        const routeCandidates = routeSessions(withSessionLogSizes(roster), question, {
+        // Local scoring always runs (recall + safety net); the selected engine
+        // may re-rank it. Every Jev failure falls back to this local order.
+        const routeCandidates = await routeSessionsWithEngine(withSessionLogSizes(roster), question, {
           topN: swarm.routingTopN,
           aliases: knownRoutingAliases(routingAliasFile(), roster),
           currentSessionId: sessionId,
+          engine: swarm.routingEngine === 'jev' ? 'jev' : 'local',
+          questionEn: typeof args.questionEn === 'string' ? args.questionEn : undefined,
+          jev: routingJevRouter(service.getConfig().trigger.jev, exec.signal),
         })
         if (routeCandidates.length > 0) {
           return {
@@ -961,6 +976,39 @@ export function knownRoutingAliases(
   return Object.fromEntries(
     Object.entries(loadAliases(file)).filter(([, sessionId]) => known.has(sessionId)),
   )
+}
+
+/**
+ * The Jev re-ranker for the routing engine, or undefined when Jev has no
+ * usable credentials. `undefined` is meaningful: the router then behaves
+ * exactly like the local engine and says so on the candidates, instead of
+ * logging a failure on every routing pass.
+ */
+export function routingJevRouter(
+  config: Config['trigger']['jev'],
+  signal: AbortSignal | undefined,
+): JevRouter | undefined {
+  if (config === undefined || !jevConfigured(config)) return undefined
+  const jev = config
+  return async (input) => {
+    const decision = await routeWithJev(
+      input.question,
+      input.questionEn,
+      input.candidates.map((candidate) => ({
+        id: candidate.sessionId,
+        title: candidate.name,
+        // The local reason carries the freshness/match scope in the session's
+        // own language; it is never translated for Jev.
+        scope: candidate.reason,
+      })),
+      jev,
+      signal,
+    )
+    return {
+      choice: decision.choice,
+      ...(decision.confidence === undefined ? {} : { confidence: decision.confidence }),
+    }
+  }
 }
 
 /** Error-path render of the routing candidates: the user picks one, then names it. */

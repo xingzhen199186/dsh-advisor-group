@@ -28,10 +28,40 @@ export interface RouteCandidate {
   reason: string
 }
 
+/** Which engine orders the routing candidates. */
+export type RoutingEngine = 'local' | 'jev'
+
+/** Jev's closed-set answer, reduced to the two facts the router reads. */
+export interface JevRerankDecision {
+  /** The chosen option id (a session id, or the "none" escape). */
+  choice?: string
+  /** Confidence in [0,1]; absent means "no reliable answer". */
+  confidence?: number
+}
+
+/**
+ * The injected Jev client: resolves to a decision, or throws / resolves
+ * undefined to fall back. Kept as a function so the router holds no network
+ * code and tests can pass a fake.
+ */
+export type JevRouter = (input: {
+  question: string
+  questionEn?: string
+  candidates: readonly RouteCandidate[]
+}) => Promise<JevRerankDecision | undefined>
+
 /** Default and hard caps for how many candidates one pass returns (schema: 1–8). */
 const DEFAULT_TOP_N = 3
 const MIN_TOP_N = 1
 const MAX_TOP_N = 8
+
+/** Jev routing: at/above this confidence the pick moves to the front. */
+const JEV_RECOMMEND_THRESHOLD = 0.75
+/** Below this the answer is not even a preference; 0.45–0.75 keeps the local order. */
+const JEV_DEFER_THRESHOLD = 0.45
+/** Candidate notes for the Jev engine. */
+const JEV_PICK_NOTE = ' · Jev 推荐'
+const JEV_UNCONFIGURED_NOTE = ' · Jev 未配置'
 
 /** Shortest run that may act as an exact keyword; also the CJK bigram width. */
 const MIN_KEYWORD_LENGTH = 2
@@ -631,21 +661,20 @@ function widePool(indexed: readonly IndexedSession[], query: QuestionQuery, topN
  * @param options.currentSessionId - the asking session, filtered out so the
  *   model is never offered the session it is already in.
  * @param options.cache - false bypasses (and does not fill) the route cache.
+ * @param options.engine - which engine owns the cache entry; the local pass
+ *   itself is engine-agnostic (Jev re-ranks afterwards, see
+ *   {@link routeSessionsWithEngine}).
  * @returns candidates ordered best-first; never throws, never delivers.
  */
 export function routeSessions(
   sessions: readonly RosterSource[],
   question: string,
-  options?: {
-    topN?: number
-    aliases?: Readonly<Record<string, string>>
-    currentSessionId?: string
-    cache?: boolean
-  },
+  options?: RouteSessionsOptions,
 ): RouteCandidate[] {
   const topN = clampTopN(options?.topN)
+  const engine: RoutingEngine = options?.engine === 'jev' ? 'jev' : 'local'
   const cache = options?.cache !== false
-  const key = routeCacheKey(question, topN, options?.currentSessionId)
+  const key = routeCacheKey(question, topN, options?.currentSessionId, engine)
   if (cache) {
     const cached = readCachedRoute(key)
     if (cached !== undefined) return [...cached]
@@ -655,16 +684,100 @@ export function routeSessions(
   return [...candidates]
 }
 
+/** Options for one local routing pass. */
+export interface RouteSessionsOptions {
+  topN?: number
+  aliases?: Readonly<Record<string, string>>
+  currentSessionId?: string
+  cache?: boolean
+  /** Which engine's cache entry this pass belongs to. */
+  engine?: RoutingEngine
+}
+
+/**
+ * Re-order the local candidate list with Jev's closed-set answer.
+ *
+ * Only a confident pick (≥ {@link JEV_RECOMMEND_THRESHOLD}) for a session that
+ * is actually in the list is obeyed: that option moves to the front and carries
+ * 「Jev 推荐」. The 0.45–0.75 band keeps the local order, and so do a lower
+ * confidence, the explicit "none" escape, an unknown id and a missing value.
+ */
+export function applyJevDecision(
+  candidates: readonly RouteCandidate[],
+  decision: JevRerankDecision | undefined,
+): RouteCandidate[] {
+  const list = Array.isArray(candidates) ? [...candidates] : []
+  if (list.length === 0 || decision === undefined || decision === null) return list
+  const choice = typeof decision.choice === 'string' ? decision.choice.trim() : ''
+  const confidence =
+    typeof decision.confidence === 'number' && Number.isFinite(decision.confidence)
+      ? decision.confidence
+      : undefined
+  if (choice.length === 0 || confidence === undefined) return list
+  // Below the defer line the answer is not even a weak preference.
+  if (confidence < JEV_DEFER_THRESHOLD) return list
+  // 0.45–0.75 is a weak preference: keep the local order on purpose.
+  if (confidence < JEV_RECOMMEND_THRESHOLD) return list
+  // "none" and any id outside the option list simply are not found here.
+  const index = list.findIndex((candidate) => candidate.sessionId === choice)
+  if (index <= 0) return list
+  const [picked] = list.splice(index, 1)
+  return [{ ...picked, reason: `${picked.reason}${JEV_PICK_NOTE}` }, ...list]
+}
+
+/** Options for the engine-aware entry point: a local pass plus the Jev seam. */
+export interface RouteEngineOptions extends RouteSessionsOptions {
+  /** The caller's English gloss of the question, sent to Jev when present. */
+  questionEn?: string
+  /** Injected Jev client; absent means "not configured" → local order + a note. */
+  jev?: JevRouter
+}
+
+/**
+ * Route with the selected engine.
+ *
+ * The local scorer always runs first: it is the recall step AND the safety net.
+ * In `jev` mode its top candidates are handed to Jev as a closed set and
+ * {@link applyJevDecision} applies the answer. Every failure — missing
+ * credentials, timeout, HTTP error, unparseable response, an id that is not in
+ * the list — silently returns the local order and never throws: routing is a
+ * proposal, never a delivery, so an engine fault must not fail the ask.
+ */
+export async function routeSessionsWithEngine(
+  sessions: readonly RosterSource[],
+  question: string,
+  options?: RouteEngineOptions,
+): Promise<RouteCandidate[]> {
+  const engine: RoutingEngine = options?.engine === 'jev' ? 'jev' : 'local'
+  const local = routeSessions(sessions, question, { ...options, engine })
+  if (engine !== 'jev' || local.length === 0) return local
+  if (options?.jev === undefined) {
+    // Selected but not configured: behave exactly like local, and say so.
+    return local.map((candidate) => ({ ...candidate, reason: `${candidate.reason}${JEV_UNCONFIGURED_NOTE}` }))
+  }
+  try {
+    const decision = await options.jev({ question, questionEn: options.questionEn, candidates: local })
+    return applyJevDecision(local, decision)
+  } catch {
+    return local
+  }
+}
+
 /** Forgets every cached route. Test seam; nothing else needs to call it. */
 export function clearRouteCache(): void {
   routeCache.clear()
 }
 
-/** Cache key: normalised question, cap, and asking session. */
-function routeCacheKey(question: unknown, topN: number, currentSessionId: unknown): string {
+/** Cache key: normalised question, cap, asking session, and engine. */
+function routeCacheKey(
+  question: unknown,
+  topN: number,
+  currentSessionId: unknown,
+  engine: RoutingEngine,
+): string {
   const text = normalizeAliasKey(typeof question === 'string' ? question : '')
   const self = typeof currentSessionId === 'string' ? currentSessionId : ''
-  return `${text}\u0000${topN}\u0000${self}`
+  return `${text}\u0000${topN}\u0000${self}\u0000${engine}`
 }
 
 /** A live cache entry, or undefined when it is absent or older than the TTL. */

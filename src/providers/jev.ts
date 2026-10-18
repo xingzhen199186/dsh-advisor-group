@@ -117,21 +117,39 @@ function parseResponse(body: unknown, config: JevConfig, advisors: AdvisorConfig
   }
 }
 
-export async function classifyWithJev(
-  question: string,
-  context: string | undefined,
-  advisors: AdvisorConfig[],
-  config: JevConfig,
-  signal?: AbortSignal,
-  questionEn?: string,
-): Promise<JevClassificationResult> {
-  const endpoint = config.baseURL?.trim() || DEFAULT_ENDPOINTS[config.provider]
+/** The effective endpoint for a Jev config. */
+function jevEndpointOf(config: JevConfig): string {
+  return config.baseURL?.trim() || DEFAULT_ENDPOINTS[config.provider]
+}
+
+/** The effective API key: the configured env var first, then the stored key. */
+function jevApiKeyOf(config: JevConfig): string | undefined {
   const storedKey = typeof config.apiKey === 'string'
     ? config.apiKey
     : config.apiKey && typeof config.apiKey === 'object' && 'value' in config.apiKey
       ? String((config.apiKey as unknown as { value: unknown }).value ?? '')
       : undefined
-  const apiKey = (config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined) || storedKey
+  return (config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined) || storedKey
+}
+
+/**
+ * True when Jev can actually be called: a config exists and resolves to a
+ * non-empty API key. The routing engine uses this to tell "not configured"
+ * (local order plus a note) from "configured but failed" (silent fallback).
+ */
+export function jevConfigured(config: JevConfig | undefined): boolean {
+  if (config === undefined || config === null || typeof config !== 'object') return false
+  const key = jevApiKeyOf(config)
+  return key !== undefined && key.length > 0
+}
+
+/**
+ * POST one serialised payload to the configured Jev endpoint. Timeout and the
+ * caller's abort signal are handled once, here, for every request shape.
+ */
+async function postJev(config: JevConfig, payload: string, signal?: AbortSignal): Promise<unknown> {
+  const endpoint = jevEndpointOf(config)
+  const apiKey = jevApiKeyOf(config)
   if (!apiKey) throw new Error('Jev 未配置 API key')
 
   const controller = new AbortController()
@@ -147,101 +165,233 @@ export async function classifyWithJev(
         authorization: `Bearer ${apiKey}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        // The optional English gist replaces the state ONLY when the settings
-        // toggle is on and the caller actually supplied one; the displayed
-        // question and session records keep using the Chinese original.
-        state: config.useEnglishState && questionEn?.trim()
-          ? questionEn.trim()
-          : `${question}\n\n背景：${context || '无'}`,
-        model: config.model || 'jev-latest',
-        questions: {
-          // One judgment per question (KB: don't hide several judgments in one
-          // question); boundary detail lives in criteria, and the escalation
-          // decision is the OR across needs_advisor/high_risk below.
-          needs_advisor: {
-            type: 'noul',
-            instructions: 'Does answering this question require expert-level knowledge?',
-            criteria: {
-              true: {
-                what: 'The subject matter is professional, specialist, or long-tail knowledge a competent generalist would not reliably get right, or the field itself has no single settled answer without specialist judgment.',
-                examples: [
-                  'professional-domain judgment such as accounting treatment, engineering trade-offs, or contract drafting',
-                  'rare or long-tail situations with little public consensus',
-                  'topics where reasonable experts disagree and picking correctly matters',
-                ],
-              },
-              false: {
-                what: 'A competent generalist can answer from common knowledge, widely documented facts, or ordinary reasoning without specialist judgment.',
-                examples: [
-                  'everyday facts, definitions, or casual opinions',
-                  'well-documented mainstream topics with an agreed answer',
-                ],
-              },
-            },
-          },
-          web_search: {
-            type: 'noul',
-            instructions: 'Does answering this question primarily require current, real-time, or externally verifiable information?',
-            criteria: {
-              true: {
-                what: 'The correct answer depends on facts that change over time or live outside the provided state, so it must be looked up rather than reasoned out.',
-                examples: [
-                  'today’s weather, prices, exchange rates, or quotes',
-                  'recent releases, news, or version-specific changelogs',
-                  'local or niche facts with no authoritative source in memory',
-                ],
-              },
-              false: {
-                what: 'The answer follows from stable knowledge or reasoning already available in the state.',
-                examples: [
-                  'concepts, definitions, and established best practices',
-                  'questions fully answerable from the provided background',
-                ],
-              },
-            },
-          },
-          high_risk: {
-            type: 'noul',
-            instructions: 'Does this question involve medical, legal, financial, safety, compliance, or other high-risk advice?',
-            criteria: {
-              true: {
-                what: 'A wrong or careless answer could materially harm the asker or a third party in health, money, safety, or legal standing.',
-                examples: [
-                  'medical symptoms, medication, diagnosis, or treatment decisions',
-                  'legal rights, contracts, litigation, or regulatory compliance',
-                  'investment, insurance, tax, or other money decisions with real downside',
-                  'physical safety, hazardous actions, or regulated activities',
-                ],
-              },
-              false: {
-                what: 'Being wrong carries no material harm to health, money, safety, or legal standing.',
-                examples: [
-                  'general knowledge, opinions, or entertainment questions',
-                  'technical details whose worst case is wasted time',
-                ],
-              },
-            },
-          },
-          domain: {
-            type: 'choice',
-            instructions: 'Which domain best describes this question?',
-            criteria: {
-              legal: 'law, contracts, litigation, compliance, or taxation',
-              medical: 'medicine, symptoms, medication, diagnosis, or treatment',
-              finance: 'investment, insurance, accounting, or financial risk',
-              code: 'software, programming, architecture, debugging, or APIs',
-              general: 'none of the listed domains',
-            },
-          },
-        },
-      }),
+      body: payload,
       signal: controller.signal,
     })
     if (!response.ok) throw new Error(`Jev HTTP ${response.status}`)
-    return parseResponse(await response.json(), config, advisors)
+    return await response.json()
   } finally {
     clearTimeout(timeout)
     signal?.removeEventListener('abort', abort)
   }
+}
+
+export async function classifyWithJev(
+  question: string,
+  context: string | undefined,
+  advisors: AdvisorConfig[],
+  config: JevConfig,
+  signal?: AbortSignal,
+  questionEn?: string,
+): Promise<JevClassificationResult> {
+  const body = await postJev(
+    config,
+    JSON.stringify({
+      // The optional English gist replaces the state ONLY when the settings
+      // toggle is on and the caller actually supplied one; the displayed
+      // question and session records keep using the Chinese original.
+      state: config.useEnglishState && questionEn?.trim()
+        ? questionEn.trim()
+        : `${question}\n\n背景：${context || '无'}`,
+      model: config.model || 'jev-latest',
+      questions: {
+        // One judgment per question (KB: don't hide several judgments in one
+        // question); boundary detail lives in criteria, and the escalation
+        // decision is the OR across needs_advisor/high_risk below.
+        needs_advisor: {
+          type: 'noul',
+          instructions: 'Does answering this question require expert-level knowledge?',
+          criteria: {
+            true: {
+              what: 'The subject matter is professional, specialist, or long-tail knowledge a competent generalist would not reliably get right, or the field itself has no single settled answer without specialist judgment.',
+              examples: [
+                'professional-domain judgment such as accounting treatment, engineering trade-offs, or contract drafting',
+                'rare or long-tail situations with little public consensus',
+                'topics where reasonable experts disagree and picking correctly matters',
+              ],
+            },
+            false: {
+              what: 'A competent generalist can answer from common knowledge, widely documented facts, or ordinary reasoning without specialist judgment.',
+              examples: [
+                'everyday facts, definitions, or casual opinions',
+                'well-documented mainstream topics with an agreed answer',
+              ],
+            },
+          },
+        },
+        web_search: {
+          type: 'noul',
+          instructions: 'Does answering this question primarily require current, real-time, or externally verifiable information?',
+          criteria: {
+            true: {
+              what: 'The correct answer depends on facts that change over time or live outside the provided state, so it must be looked up rather than reasoned out.',
+              examples: [
+                'today’s weather, prices, exchange rates, or quotes',
+                'recent releases, news, or version-specific changelogs',
+                'local or niche facts with no authoritative source in memory',
+              ],
+            },
+            false: {
+              what: 'The answer follows from stable knowledge or reasoning already available in the state.',
+              examples: [
+                'concepts, definitions, and established best practices',
+                'questions fully answerable from the provided background',
+              ],
+            },
+          },
+        },
+        high_risk: {
+          type: 'noul',
+          instructions: 'Does this question involve medical, legal, financial, safety, compliance, or other high-risk advice?',
+          criteria: {
+            true: {
+              what: 'A wrong or careless answer could materially harm the asker or a third party in health, money, safety, or legal standing.',
+              examples: [
+                'medical symptoms, medication, diagnosis, or treatment decisions',
+                'legal rights, contracts, litigation, or regulatory compliance',
+                'investment, insurance, tax, or other money decisions with real downside',
+                'physical safety, hazardous actions, or regulated activities',
+              ],
+            },
+            false: {
+              what: 'Being wrong carries no material harm to health, money, safety, or legal standing.',
+              examples: [
+                'general knowledge, opinions, or entertainment questions',
+                'technical details whose worst case is wasted time',
+              ],
+            },
+          },
+        },
+        domain: {
+          type: 'choice',
+          instructions: 'Which domain best describes this question?',
+          criteria: {
+            legal: 'law, contracts, litigation, compliance, or taxation',
+            medical: 'medicine, symptoms, medication, diagnosis, or treatment',
+            finance: 'investment, insurance, accounting, or financial risk',
+            code: 'software, programming, architecture, debugging, or APIs',
+            general: 'none of the listed domains',
+          },
+        },
+      },
+    }),
+    signal,
+  )
+  return parseResponse(body, config, advisors)
+}
+
+/** The escape option: Jev says none of the listed candidates is the target. */
+export const JEV_NONE_OPTION = 'none'
+
+/** One closed-set routing option handed to Jev; `id` is the answer key (a session id). */
+export interface JevRouteOption {
+  id: string
+  /** Display title, kept in its original language (never translated). */
+  title: string
+  /** Optional one-line scope note, kept in its original language. */
+  scope?: string
+}
+
+/** Jev's answer to the closed-set routing question. */
+export interface JevRouteDecision {
+  /** The chosen option id as returned (a session id, or {@link JEV_NONE_OPTION}). */
+  choice: string
+  /** Confidence in [0,1]: the explicit `confidence`, else the chosen option's probability. */
+  confidence?: number
+  /** Per-option probabilities, when the response provides them. */
+  probabilities?: Record<string, number>
+  /** Model id actually reported by the response. */
+  model?: string
+}
+
+/** Finite numbers only, keyed by option id; undefined when nothing usable is left. */
+function numberMap(value: unknown): Record<string, number> | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const out: Record<string, number> = {}
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const number = numberValue(raw)
+    if (number !== undefined) out[key] = number
+  }
+  return Object.keys(out).length === 0 ? undefined : out
+}
+
+/**
+ * Read one closed-set routing answer. Throws on anything unparseable (no
+ * answers, no route answer, no usable choice) so the router keeps the local
+ * order instead of acting on a guess.
+ */
+function parseRouteResponse(body: unknown): JevRouteDecision {
+  if (!body || typeof body !== 'object') throw new Error('Jev 响应不是对象')
+  const answers = (body as JevResponse).answers
+  if (!answers || typeof answers !== 'object') throw new Error('Jev 响应缺少 answers')
+  const answer = answers.route as JevAnswer | undefined
+  if (answer === null || typeof answer !== 'object') throw new Error('Jev 响应缺少 route 判定')
+  const choice = typeof answer.choice === 'string' ? answer.choice.trim() : ''
+  if (choice.length === 0) throw new Error('Jev 响应缺少 route.choice')
+  // Explicit confidence wins; otherwise the chosen option's probability, then
+  // the largest probability in the answer.
+  const probabilities = numberMap(answer.probabilities)
+  const confidence =
+    numberValue(answer.confidence) ??
+    probabilities?.[choice] ??
+    (probabilities === undefined ? undefined : Math.max(...Object.values(probabilities)))
+  const reportedModel = (body as JevResponse).model
+  return {
+    choice,
+    ...(confidence === undefined ? {} : { confidence }),
+    ...(probabilities === undefined ? {} : { probabilities }),
+    ...(typeof reportedModel === 'string' ? { model: reportedModel } : {}),
+  }
+}
+
+/**
+ * Ask Jev which routed candidate is the best target: one closed-set `choice`
+ * question, English instructions, an explicit `none` escape, and the
+ * candidates' own titles/scopes kept in their original language.
+ *
+ * Rejects (never resolves to a guess) on a missing key, an empty option list,
+ * any transport/HTTP failure, or a malformed response; the router treats every
+ * rejection as "keep the local order".
+ */
+export async function routeWithJev(
+  question: string,
+  questionEn: string | undefined,
+  options: readonly JevRouteOption[],
+  config: JevConfig,
+  signal?: AbortSignal,
+): Promise<JevRouteDecision> {
+  if (!jevConfigured(config)) throw new Error('Jev 未配置 API key')
+  if (!Array.isArray(options) || options.length === 0) throw new Error('Jev 路由没有候选可判断')
+  const criteria: Record<string, string> = {}
+  for (const option of options) {
+    const id = typeof option.id === 'string' ? option.id.trim() : ''
+    if (id.length === 0) continue
+    const title = typeof option.title === 'string' ? option.title.trim() : ''
+    const scope = typeof option.scope === 'string' ? option.scope.trim() : ''
+    criteria[id] = scope.length > 0 ? `${title} — ${scope}` : title
+  }
+  criteria[JEV_NONE_OPTION] = 'None of the listed sessions is the right target for this question.'
+  const gloss = typeof questionEn === 'string' ? questionEn.trim() : ''
+  const state = [
+    'A user asked a question and wants it sent to exactly one existing session. Choose the option whose session is the best target for that question.',
+    gloss.length > 0 ? `English gloss of the question: ${gloss}` : undefined,
+    `Question (verbatim, may be Chinese): ${question}`,
+  ].filter((line): line is string => line !== undefined).join('\n')
+  const body = await postJev(
+    config,
+    JSON.stringify({
+      state,
+      model: config.model || 'jev-latest',
+      questions: {
+        route: {
+          type: 'choice',
+          instructions:
+            'Pick exactly one option: the session this question should be sent to. Pick none when no listed session fits.',
+          criteria,
+        },
+      },
+    }),
+    signal,
+  )
+  return parseRouteResponse(body)
 }

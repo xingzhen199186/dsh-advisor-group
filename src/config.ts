@@ -161,6 +161,14 @@ export interface SwarmConfig {
   routingEnabled?: boolean
   /** How many routing candidates to return (1–8, default 3). */
   routingTopN?: number
+  /**
+   * Which engine orders the routing candidates (2026-10-19): 'local' (default)
+   * uses the keyword scorer alone; 'jev' still recalls with the local scorer —
+   * it is the recall step and the safety net — and lets Jev re-rank that closed
+   * list. Jev reuses the `trigger.jev` credentials/endpoint config; when it is
+   * not configured, or on any failure, the local order is returned unchanged.
+   */
+  routingEngine?: 'local' | 'jev'
 }
 
 export interface Config {
@@ -286,6 +294,10 @@ const SwarmConfig: Schema<SwarmConfig> = Schema.object({
   rosterIncludeSubagents: Schema.boolean().default(false).description('List subagent sessions in the session roster.'),
   routingEnabled: Schema.boolean().default(true).description('Route an unnamed question to candidate sessions by keyword (no model call) instead of guessing a target; off keeps the old missing-target refusal.'),
   routingTopN: Schema.number().min(1).max(8).default(3).description('How many routing candidates ask_session returns when the caller names no target (1–8).'),
+  routingEngine: Schema.union([
+    Schema.const('local'),
+    Schema.const('jev'),
+  ]).default('local').description('Which engine orders the routing candidates: local (keyword scorer alone, default) or jev (recall stays local, then Jev re-ranks the closed candidate list; any Jev failure falls back to the local order silently). Jev reuses the trigger Jev credentials/endpoint.'),
 })
 
 // Every field the custom settings page owns is declared volatile. DSH

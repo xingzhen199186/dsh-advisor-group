@@ -131,6 +131,8 @@ describe('swarm config defaults', () => {
       rosterIncludeSubagents: false,
       routingEnabled: true,
       routingTopN: 3,
+      // The routing engine defaults to the local keyword scorer.
+      routingEngine: 'local',
     })
   })
 
@@ -146,6 +148,7 @@ describe('swarm config defaults', () => {
           rosterIncludeSubagents: true,
           routingEnabled: false,
           routingTopN: 5,
+          routingEngine: 'jev',
         },
       } as never),
     ) as ConfigShape
@@ -157,6 +160,7 @@ describe('swarm config defaults', () => {
       rosterIncludeSubagents: true,
       routingEnabled: false,
       routingTopN: 5,
+      routingEngine: 'jev',
     })
   })
 })
