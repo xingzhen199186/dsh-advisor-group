@@ -155,6 +155,151 @@ describe('routeSessions — matches', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Live regression (2026-10-18): the real roster held titled 极简遥控器新 rows
+// plus title-less rows under I:\极简遥控器, all sharing the fallback name
+// 极简遥控器. A natural Chinese question named the project without spaces, and
+// the titled row fell out of the top three behind rows that only matched
+// through their working directory. Eleven rows, as on the live host.
+// ---------------------------------------------------------------------------
+const LIVE_QUESTION = '那个做极简遥控器的会话，当前的开发进度和最新版本号是多少？'
+const ONE_HOUR = 3_600_000
+const ONE_DAY = 86_400_000
+
+function liveRoster(): RosterSource[] {
+  const hoursAgo = (hours: number): number => BASE - hours * ONE_HOUR
+  const daysAgo = (days: number): number => BASE - days * ONE_DAY
+  return [
+    {
+      sessionId: 'titled-main',
+      updatedAt: hoursAgo(2),
+      running: false,
+      cwd: 'I:\\极简遥控器\\极简遥控器',
+      projections: { values: { title: '极简遥控器新' } },
+    },
+    {
+      sessionId: 'titled-dup-8d',
+      updatedAt: daysAgo(8),
+      running: false,
+      cwd: 'I:\\极简遥控器\\极简遥控器',
+      projections: { values: { title: '极简遥控器新 (1)' } },
+    },
+    {
+      sessionId: 'titled-dup-9d',
+      updatedAt: daysAgo(9),
+      running: false,
+      cwd: 'I:\\极简遥控器',
+      projections: { values: { title: '极简遥控器新 (1)' } },
+    },
+    { sessionId: 'untitled-14d', updatedAt: daysAgo(14), running: false, cwd: 'I:\\极简遥控器' },
+    { sessionId: 'untitled-23d-a', updatedAt: daysAgo(23), running: false, cwd: 'I:\\极简遥控器' },
+    {
+      sessionId: 'untitled-23d-b',
+      updatedAt: daysAgo(23),
+      running: false,
+      cwd: 'I:\\极简遥控器\\极简遥控器',
+    },
+    {
+      sessionId: 'plugin',
+      updatedAt: hoursAgo(30),
+      running: false,
+      cwd: 'I:\\DSH\\dsh-advisor-group',
+      projections: { values: { title: '顾问群插件' } },
+    },
+    {
+      sessionId: 'kb',
+      updatedAt: daysAgo(2),
+      running: false,
+      cwd: 'D:\\X\\X',
+      projections: { values: { title: '知识库整理' } },
+    },
+    {
+      sessionId: 'site',
+      updatedAt: daysAgo(3),
+      running: false,
+      cwd: 'I:\\site',
+      projections: { values: { title: '网站改版' } },
+    },
+    {
+      sessionId: 'notes',
+      updatedAt: daysAgo(5),
+      running: false,
+      cwd: 'D:\\notes',
+      projections: { values: { title: '笔记' } },
+    },
+    { sessionId: 'dsh', updatedAt: daysAgo(6), running: false, cwd: 'I:\\DSH' },
+  ]
+}
+
+describe('routeSessions — title named inside the question (live regression)', () => {
+  it('ranks the titled session above cwd-only rows and inside the top three', () => {
+    const all = routeSessions(liveRoster(), LIVE_QUESTION, { topN: 8 })
+    const firstCwdOnly = all.findIndex((candidate) => candidate.reason === '目录命中')
+    expect(firstCwdOnly).toBeGreaterThan(-1)
+    // The row the user meant, matched through its title even though the
+    // question writes 极简遥控器 without a space and the title adds 新.
+    expect(all[0]).toMatchObject({
+      sessionId: 'titled-main',
+      name: '极简遥控器新',
+      reason: '标题命中「极简遥控器」',
+    })
+    expect(all.findIndex((candidate) => candidate.sessionId === 'titled-main')).toBeLessThan(firstCwdOnly)
+    // Default topN: the titled row is one of the three offered choices.
+    expect(ids(routeSessions(liveRoster(), LIVE_QUESTION))).toContain('titled-main')
+  })
+
+  it('scores every title hit strictly above every cwd-only hit', () => {
+    const all = routeSessions(liveRoster(), LIVE_QUESTION, { topN: 8 })
+    const titleScores = all.filter((candidate) => candidate.reason.startsWith('标题命中')).map((c) => c.score)
+    const cwdScores = all.filter((candidate) => candidate.reason === '目录命中').map((c) => c.score)
+    expect(titleScores.length).toBeGreaterThan(0)
+    expect(cwdScores.length).toBeGreaterThan(0)
+    for (const title of titleScores) {
+      for (const cwd of cwdScores) expect(title).toBeGreaterThan(cwd)
+    }
+  })
+
+  it('never drops a titled row in favour of a fallback-named row when labels collide', () => {
+    const sessions: RosterSource[] = [
+      // Same display name as the title-less rows, but a real title.
+      { ...row('titled', '极简遥控器'), cwd: 'I:\\极简遥控器' },
+      { sessionId: 'fallback-a', updatedAt: BASE - 14 * ONE_DAY, running: false, cwd: 'I:\\极简遥控器' },
+      { sessionId: 'fallback-b', updatedAt: BASE - 23 * ONE_DAY, running: false, cwd: 'I:\\极简遥控器' },
+      {
+        sessionId: 'fallback-c',
+        updatedAt: BASE - 23 * ONE_DAY,
+        running: false,
+        cwd: 'I:\\极简遥控器\\极简遥控器',
+      },
+    ]
+    // Two slots: the titled row takes one, the repeated fallback label takes one.
+    const candidates = routeSessions(sessions, LIVE_QUESTION, { topN: 2 })
+    expect(ids(candidates)).toContain('titled')
+    expect(ids(candidates)[0]).toBe('titled')
+    expect(candidates.filter((candidate) => candidate.sessionId.startsWith('fallback'))).toHaveLength(1)
+  })
+
+  it('keeps two equal titles as two candidates (dedup covers fallback labels only)', () => {
+    const candidates = routeSessions(
+      [
+        { ...row('twin-a', '极简遥控器新'), cwd: 'I:\\极简遥控器\\极简遥控器' },
+        { ...row('twin-b', '极简遥控器新'), cwd: 'I:\\极简遥控器\\极简遥控器' },
+      ],
+      LIVE_QUESTION,
+      { topN: 3 },
+    )
+    expect(ids(candidates)).toEqual(['twin-a', 'twin-b'])
+  })
+
+  it('matches a project folder spoken inside the question without spaces', () => {
+    const candidates = routeSessions(
+      [{ sessionId: 'p', updatedAt: BASE, running: false, cwd: 'I:\\极简遥控器' }],
+      '那个做极简遥控器的会话现在怎么样了',
+    )
+    expect(candidates[0]).toMatchObject({ sessionId: 'p', name: '极简遥控器', reason: '目录命中' })
+  })
+})
+
 describe('routeSessions — hard channels and order', () => {
   it('always includes a running session, even with no textual overlap', () => {
     const candidates = routeSessions(
@@ -517,3 +662,4 @@ describe('list_sessions row diagnostics', () => {
     }
   })
 })
+
