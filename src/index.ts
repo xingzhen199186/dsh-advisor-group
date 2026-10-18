@@ -3,6 +3,7 @@ import { Config, unwrapVolatileConfig, type Config as ConfigShape } from './conf
 import { AdvisorGroupService } from './service'
 import { registerAdvisorTools } from './tools'
 import { registerAdvisorSettingsAndRoutes } from './settings-api'
+import { cancelDetachedAsks } from './cross-session'
 import { buildAdvisorPrompt } from './prompt'
 import { guardAdvisorPrompts, reportPromptGuardFindings } from './prompt-guard'
 import './events'
@@ -40,6 +41,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
       }): () => void
     }
   }).systemPrompt
+  // Detached asks (ask_session with detach: true) hold a background poll loop;
+  // stop every one of them when the plugin unloads so a reload cannot leak waits.
+  ctx.effect(() => () => cancelDetachedAsks())
   if (systemPrompt) {
     ctx.effect(
       () =>

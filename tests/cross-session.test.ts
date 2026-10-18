@@ -901,6 +901,7 @@ describe('ask_session tool contract', () => {
       'toggle_advisor_group',
       'ask_session',
       'list_sessions',
+      'ask_result',
     ])
   })
 
@@ -921,6 +922,7 @@ describe('ask_session tool contract', () => {
       'askId',
       'candidates',
       'delivered',
+      'detached',
       'error',
       'interval',
       'message',

@@ -20,6 +20,9 @@
  */
 import { createUserMessage, type ContentBlock, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { askStoreDir, writeAskRecord, type AskRecord } from './ask-store'
 
 /** Maximum combined UTF-8 bytes of question + context (design §六.5). */
 export const ASK_CONTENT_MAX_BYTES = 32000
@@ -471,6 +474,21 @@ export function isSubagentDeliveryRejection(error: unknown): boolean {
 
 /** One unsettled wait per session: at most one ask_session may be in flight. */
 const pendingWaits = new Set<TargetSessionId>()
+
+/** Directory holding detached (async) ask results. */
+export function askStoreRoot(): string {
+  const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return askStoreDir(join(dshHome, 'storages', 'advisor-group'))
+}
+
+/** Background loops started by `detach: true`; cancelled when the plugin unloads. */
+const detachedControllers = new Set<AbortController>()
+
+/** Cancel every detached wait (plugin dispose). Safe to call repeatedly. */
+export function cancelDetachedAsks(): void {
+  for (const controller of detachedControllers) controller.abort()
+  detachedControllers.clear()
+}
 
 /** Test seam: drop every tracked wait. */
 export function resetPendingWaits(): void {
@@ -949,6 +967,8 @@ export async function askSession(
     readonly question: string
     readonly context?: string
     readonly waitMs?: number
+    /** Deliver now, collect in the background, return an askId immediately. */
+    readonly detach?: boolean
     readonly log?: (message: string) => void
     /** UI hook: delivery accepted → open the ask card. Must not throw. */
     readonly onDelivered?: (info: AskCardDelivery) => void
@@ -1017,6 +1037,8 @@ async function runAsk(
     readonly question: string
     readonly context?: string
     readonly waitMs?: number
+    /** Deliver now, collect in the background, return an askId immediately. */
+    readonly detach?: boolean
     readonly onDelivered?: (info: AskCardDelivery) => void
     readonly onSettled?: (info: AskCardSettle) => void
   },
@@ -1069,6 +1091,72 @@ async function runAsk(
     senderName: input.senderName,
     targetName: target.name,
   })
+  // Async mode: hand the waiting to a background loop and return the receipt
+  // now, so a slow peer never blocks the caller's turn. The loop writes the
+  // settled record for `ask_result` to read in a later turn.
+  if (input.detach === true) {
+    const storeDir = askStoreRoot()
+    const record: AskRecord = {
+      askId,
+      sessionId: input.currentSessionId,
+      targetSessionId: target.sessionId,
+      targetName: target.name,
+      question: input.question,
+      state: 'waiting',
+      createdAt: Date.now(),
+      from,
+    }
+    try {
+      writeAskRecord(storeDir, record)
+    } catch (error) {
+      console.warn('[dsh-advisor-group] 异步结果落盘失败（投递仍已发出）：', error)
+    }
+    const background = new AbortController()
+    detachedControllers.add(background)
+    void (async () => {
+      let settled: Partial<AskRecord> = {}
+      try {
+        const outcome = await waitForTargetIdle(controller, background.signal, {
+          sessionId: target.sessionId,
+          targetWasRunning: delivery.receipt.targetWasRunning,
+          waitMs,
+          log: listed.log,
+          fromSeq: delivery.receipt.fromSeq,
+        })
+        const collected = await collectTargetAnswer(controller, target.sessionId, delivery.receipt.fromSeq)
+        const rawAnswer = joinAnswerPieces(collected.pieces)
+        const capped = capAnswer(rawAnswer)
+        const reply = parseAskReply(rawAnswer)
+        settled = {
+          state: outcome.endedBecause === 'idle' ? 'done' : outcome.endedBecause === 'timeout' ? 'timeout' : 'error',
+          answer: capped.text,
+          ...(reply === undefined ? {} : { reply }),
+          note: [outcome.note, capped.truncated ? `answer 已按 ${ASK_ANSWER_MAX_CHARS} 字截断。` : '']
+            .filter((line) => line.length > 0)
+            .join('\n'),
+        }
+      } catch (error) {
+        settled = { state: 'error', error: error instanceof Error ? error.message : String(error) }
+      } finally {
+        try {
+          writeAskRecord(storeDir, { ...record, ...settled, settledAt: Date.now() })
+        } catch (error) {
+          console.warn('[dsh-advisor-group] 异步结果落盘失败：', error)
+        }
+        detachedControllers.delete(background)
+      }
+    })()
+    return {
+      ok: true,
+      detached: true,
+      target: { sessionId: target.sessionId, name: target.name },
+      delivered: delivery.receipt.delivered,
+      askId,
+      interval: { from, to: null, endedBecause: 'detached' },
+      answer: '',
+      note: `已投递（异步）：问题已交给「${target.name}」，本次调用不等待答复。稍后用 ask_result（askId=${askId}）读取结果。`,
+    }
+  }
   // The whole wait/collect chain below is internally guarded (sleep resolves
   // on abort, list/watermark/collect convert failures into outcome notes), so
   // every path — idle, timeout, cancelled, host error — falls through to the

@@ -11,6 +11,7 @@ import {
   ASK_WAIT_DEFAULT_MS,
   ASK_WAIT_MAX_MS,
   getSessionController,
+  askStoreRoot,
   renderAskResult,
   type AskCardDelivery,
   type AskCardSettle,
@@ -19,6 +20,7 @@ import {
 } from './cross-session'
 import type { ConsultSession, ConsultSummary } from './types'
 import { buildSessionRoster, renderRoster, type RosterRow } from './session-roster'
+import { listAskRecords, readAskRecord, type AskRecord } from './ask-store'
 import type { Session } from '@deepseek-ai/dsh-session'
 
 export function registerAdvisorTools(
@@ -374,6 +376,11 @@ export function registerAdvisorTools(
         type: 'number',
         description: `How long to wait for the target to finish, in milliseconds (default ${ASK_WAIT_DEFAULT_MS}, max ${ASK_WAIT_MAX_MS}). On timeout the already-collected text is returned and the target is NOT interrupted.`,
       },
+      detach: {
+        type: 'boolean',
+        description:
+          'Deliver without waiting: return immediately with an askId, then read the answer later with ask_result. Use it when the other session may take minutes, so this turn is not blocked. Ignored when waitMs is also given: pass only one.',
+      },
     },
     output: {
       schema: {
@@ -390,6 +397,7 @@ export function registerAdvisorTools(
             },
           },
           delivered: { type: 'string', enum: ['native', 'fallback'] },
+          detached: { type: 'boolean' },
           askId: { type: 'string' },
           interval: {
             type: 'object',
@@ -399,7 +407,7 @@ export function registerAdvisorTools(
               // The enforced schema subset has one scalar `type` per node, so a
               // nullable ISO time is expressed as string-or-null.
               to: { oneOf: [{ type: 'string' }, { type: 'null' }] },
-              endedBecause: { type: 'string', enum: ['idle', 'timeout', 'error'], required: true },
+              endedBecause: { type: 'string', enum: ['idle', 'timeout', 'error', 'detached'], required: true },
             },
             required: true,
           },
@@ -527,6 +535,7 @@ export function registerAdvisorTools(
         question,
         context,
         waitMs: args.waitMs,
+        detach: args.detach === true,
         log: (message) => console.log(`[dsh-advisor-group] ask_session: ${message}`),
       })) as Record<string, unknown>
 
@@ -546,8 +555,13 @@ export function registerAdvisorTools(
         target: value.target as { sessionId: string; name: string },
         delivered: value.delivered as 'native' | 'fallback',
         askId: String(value.askId ?? ''),
-        interval: value.interval as { from: string; to: string | null; endedBecause: 'idle' | 'timeout' | 'error' },
+        interval: value.interval as {
+          from: string
+          to: string | null
+          endedBecause: 'idle' | 'timeout' | 'error' | 'detached'
+        },
         answer: String(value.answer ?? ''),
+        ...(value.detached === true ? { detached: true } : {}),
         ...(value.reply === null || typeof value.reply !== 'object'
           ? {}
           : { reply: value.reply as AskReply }),
@@ -651,7 +665,126 @@ export function registerAdvisorTools(
     },
   })
 
-  return [askAdvisors, toggleAdvisorGroup, askSessionTool, listSessionsTool]
+  /** Read back a detached ask (detach: true) — the async half of the pair. */
+  const askResultTool = defineTool({
+    name: 'ask_result',
+    description:
+      "Read the result of a detached ask_session (called with detach: true). Pass askId for one result, or omit it to list this session's recent asks. States: waiting (the peer is still working), done (answer ready), timeout (the wait window ended; a partial answer may exist), error. Read-only: it never wakes the target.",
+    parameters: {
+      askId: {
+        type: 'string',
+        description:
+          'The askId returned by ask_session with detach: true. Omit it to list the recent asks this session started.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          count: { type: 'number', required: true },
+          results: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                askId: { type: 'string', required: true },
+                targetName: { type: 'string', required: true },
+                question: { type: 'string', required: true },
+                state: { type: 'string', required: true },
+                createdAt: { type: 'number', required: true },
+                settledAt: { type: 'number' },
+                answer: { type: 'string' },
+                reply: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    conclusion: { type: 'string' },
+                    basis: { type: 'string' },
+                    uncertainty: { type: 'string' },
+                  },
+                },
+                note: { type: 'string' },
+                error: { type: 'string' },
+              },
+            },
+          },
+          error: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        if (value.ok !== true) {
+          return [
+            {
+              type: 'text',
+              text: `【ask_result 失败：${String(value.error ?? 'unknown')}】\n${String(value.message ?? '')}`,
+            },
+          ]
+        }
+        const rows = Array.isArray(value.results) ? (value.results as AskRecord[]) : []
+        if (rows.length === 0) return [{ type: 'text', text: '没有找到异步提问的结果。' }]
+        return [{ type: 'text', text: renderAskRecords(rows) }]
+      },
+    },
+    async execute(args, exec) {
+      const session = getCurrentSessionFrom(exec)
+      const sessionId = typeof session?.id === 'string' ? session.id : ''
+      try {
+        const dir = askStoreRoot()
+        const askId = typeof args.askId === 'string' ? args.askId.trim() : ''
+        const results =
+          askId.length > 0
+            ? [readAskRecord(dir, askId)].filter((row): row is AskRecord => row !== undefined)
+            : listAskRecords(dir, sessionId.length > 0 ? { sessionId } : undefined).slice(0, 20)
+        return { ok: true, count: results.length, results }
+      } catch (error) {
+        return {
+          ok: false,
+          count: 0,
+          results: [],
+          error: 'store-failed',
+          message: String(error instanceof Error ? error.message : error),
+        }
+      }
+    },
+  })
+
+  return [askAdvisors, toggleAdvisorGroup, askSessionTool, listSessionsTool, askResultTool]
+}
+
+/** One compact block per detached ask result, for the model to read. */
+function renderAskRecords(rows: readonly AskRecord[]): string {
+  const stateLabel: Record<AskRecord['state'], string> = {
+    waiting: '等待中',
+    done: '已完成',
+    timeout: '超时',
+    error: '出错',
+  }
+  return rows
+    .map((row) => {
+      const head = `- [${stateLabel[row.state]}] ${row.targetName} · askId=${row.askId}`
+      const question = `  问题：${row.question.replace(/\s+/gu, ' ').slice(0, 120)}`
+      const body =
+        row.reply !== undefined
+          ? [
+              row.reply.conclusion === undefined ? '' : `  结论：${row.reply.conclusion}`,
+              row.reply.basis === undefined ? '' : `  依据：${row.reply.basis}`,
+              row.reply.uncertainty === undefined ? '' : `  不确定：${row.reply.uncertainty}`,
+            ]
+              .filter((line) => line.length > 0)
+              .join('\n')
+          : row.answer !== undefined && row.answer.length > 0
+            ? `  ${row.answer.slice(0, 600)}`
+            : row.error !== undefined
+              ? `  错误：${row.error}`
+              : ''
+      return [head, question, body].filter((line) => line.length > 0).join('\n')
+    })
+    .join('\n\n')
 }
 
 /**
