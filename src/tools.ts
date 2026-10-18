@@ -17,7 +17,9 @@ import {
   type AskCardSettle,
   type AskReply,
   type CrossSessionLogEvent,
+  type CrossSessionSummary,
 } from './cross-session'
+import { loadAliases, routeSessions, type RouteCandidate } from './session-router'
 import type { ConsultSession, ConsultSummary } from './types'
 import type { Config } from './config'
 import { buildSessionRoster, renderRoster, type RosterRow, type RosterSource } from './session-roster'
@@ -438,6 +440,19 @@ export function registerAdvisorTools(
               },
             },
           },
+          routeCandidates: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                sessionId: { type: 'string', required: true },
+                name: { type: 'string', required: true },
+                score: { type: 'number', required: true },
+                reason: { type: 'string', required: true },
+              },
+            },
+          },
         },
       },
       render: (_args, value) =>
@@ -468,7 +483,7 @@ export function registerAdvisorTools(
                         )
                         .join('\n')}`
                     : ''
-                }`,
+                }${renderRouteCandidates(value.routeCandidates)}`,
               },
             ],
     },
@@ -515,12 +530,39 @@ export function registerAdvisorTools(
       const context = typeof args.context === 'string' ? args.context : undefined
 
       let senderName = '未命名会话'
+      let listedItems: readonly CrossSessionSummary[] = []
       try {
         const listed = await controller.list({}, exec.signal)
+        listedItems = listed.items
         const own = listed.items.find((item) => item.sessionId === sessionId)
         if (own) senderName = sessionDisplayName(own)
       } catch {
         // Naming is cosmetic: a failed list must not block the ask.
+      }
+
+      // Keyword routing: a question with no named session gets candidates for
+      // the user to pick instead of a blind delivery. Pure text scoring, no
+      // model call, and this branch NEVER delivers. A candidate list is never
+      // auto-picked: choosing the session stays the user's act.
+      const targetText = typeof args.target === 'string' ? args.target.trim() : ''
+      if (targetText.length === 0 && swarm.routingEnabled !== false) {
+        const roster = visibleRosterSessions(listedItems, swarm.rosterIncludeSubagents)
+        const routeCandidates = routeSessions(roster, question, {
+          topN: swarm.routingTopN,
+          aliases: knownRoutingAliases(routingAliasFile(), roster),
+        })
+        if (routeCandidates.length > 0) {
+          return {
+            ok: false,
+            error: 'target-unspecified',
+            message:
+              '没有指定会话。下面按问题匹配出的候选，请让用户挑一个（或直接点名会话）再投递。',
+            answer: '',
+            note: '',
+            interval: errorInterval(),
+            routeCandidates,
+          }
+        }
       }
 
       // Cross-session card: append start/end events to this session's log so
@@ -892,6 +934,39 @@ export function visibleRosterSessions<T extends RosterSource>(
   includeSubagents: boolean,
 ): readonly T[] {
   return includeSubagents ? sessions : sessions.filter((session) => session.origin !== 'subagent')
+}
+
+/** Alias file location: beside the detached ask records, under the plugin store. */
+export function routingAliasFile(): string {
+  return `${askStoreRoot()}/aliases.json`
+}
+
+/**
+ * Alias map restricted to sessions that still exist. A remembered phrasing that
+ * points at a deleted session is dropped here — the router never decides that.
+ */
+export function knownRoutingAliases(
+  file: string,
+  sessions: readonly RosterSource[],
+): Record<string, string> {
+  const known = new Set(sessions.map((session) => session.sessionId))
+  return Object.fromEntries(
+    Object.entries(loadAliases(file)).filter(([, sessionId]) => known.has(sessionId)),
+  )
+}
+
+/** Error-path render of the routing candidates: the user picks one, then names it. */
+function renderRouteCandidates(value: unknown): string {
+  if (!Array.isArray(value) || value.length === 0) return ''
+  const lines = value.map((item) => {
+    const row = item as Partial<RouteCandidate>
+    const name = typeof row.name === 'string' ? row.name : ''
+    const sessionId = typeof row.sessionId === 'string' ? row.sessionId : ''
+    const reason = typeof row.reason === 'string' ? row.reason : ''
+    const score = typeof row.score === 'number' ? `（${row.score} 分）` : ''
+    return `- ${name} · ${sessionId} · ${reason}${score}`
+  })
+  return `\n按问题匹配出的候选：\n${lines.join('\n')}`
 }
 
 // Delivery-tension ruling (2026-09-26): risk notes must actually reach the main

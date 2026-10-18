@@ -154,6 +154,13 @@ export interface SwarmConfig {
   resultTtlHours: number
   /** Whether the session roster lists subagent sessions. */
   rosterIncludeSubagents: boolean
+  /**
+   * Route an unnamed question to candidate sessions instead of guessing or
+   * sending it blind (pure keyword layer, no model call). Schema default is on.
+   */
+  routingEnabled?: boolean
+  /** How many routing candidates to return (1–8, default 3). */
+  routingTopN?: number
 }
 
 export interface Config {
@@ -277,6 +284,8 @@ const SwarmConfig: Schema<SwarmConfig> = Schema.object({
   defaultWaitMs: Schema.number().min(1000).max(600000).default(180000).description('Default wait ceiling in milliseconds when the caller omits waitMs (1–10 minutes).'),
   resultTtlHours: Schema.number().min(1).max(720).default(24).description('How long detached ask results are kept on disk, in hours (clamped to 1–720 before pruning).'),
   rosterIncludeSubagents: Schema.boolean().default(false).description('List subagent sessions in the session roster.'),
+  routingEnabled: Schema.boolean().default(true).description('Route an unnamed question to candidate sessions by keyword (no model call) instead of guessing a target; off keeps the old missing-target refusal.'),
+  routingTopN: Schema.number().min(1).max(8).default(3).description('How many routing candidates ask_session returns when the caller names no target (1–8).'),
 })
 
 // Every field the custom settings page owns is declared volatile. DSH

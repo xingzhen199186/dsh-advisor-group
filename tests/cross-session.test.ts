@@ -926,6 +926,7 @@ describe('ask_session tool contract', () => {
       'note',
       'ok',
       'reply',
+      'routeCandidates',
       'status',
       'target',
     ])

@@ -129,6 +129,8 @@ describe('swarm config defaults', () => {
       defaultWaitMs: 180000,
       resultTtlHours: 24,
       rosterIncludeSubagents: false,
+      routingEnabled: true,
+      routingTopN: 3,
     })
   })
 
@@ -142,6 +144,8 @@ describe('swarm config defaults', () => {
           defaultWaitMs: 60000,
           resultTtlHours: 6,
           rosterIncludeSubagents: true,
+          routingEnabled: false,
+          routingTopN: 5,
         },
       } as never),
     ) as ConfigShape
@@ -151,6 +155,8 @@ describe('swarm config defaults', () => {
       defaultWaitMs: 60000,
       resultTtlHours: 6,
       rosterIncludeSubagents: true,
+      routingEnabled: false,
+      routingTopN: 5,
     })
   })
 })

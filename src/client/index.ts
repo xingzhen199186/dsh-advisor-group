@@ -2005,6 +2005,46 @@ function AdvisorGroupSettingsTab(): ReactNode {
         }),
         label('名录列出子代理会话'),
       ),
+      createElement(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
+        createElement('input', {
+          type: 'checkbox',
+          checked: config.swarm.routingEnabled !== false,
+          onChange: (e: { target: { checked: boolean } }) =>
+            setConfig({
+              ...config,
+              swarm: { ...config.swarm, routingEnabled: e.target.checked },
+            }),
+        }),
+        label('按问题找会话'),
+      ),
+      createElement(
+        'div',
+        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
+        '没有点名会话时，先按问题关键词列出候选，交给用户挑一个，不自动投递',
+      ),
+      createElement(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        label('候选数'),
+        createElement('input', {
+          type: 'number',
+          min: 1,
+          max: 8,
+          value: String(config.swarm.routingTopN ?? 3),
+          disabled: config.swarm.routingEnabled === false,
+          onChange: (e: { target: { value: string } }) =>
+            setConfig({
+              ...config,
+              swarm: {
+                ...config.swarm,
+                routingTopN: Math.min(8, Math.max(1, Number(e.target.value) || 3)),
+              },
+            }),
+          style: { ...settingsInputStyle, width: 120 },
+        }),
+      ),
     ),
     createElement(
       'div',
