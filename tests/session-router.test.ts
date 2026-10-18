@@ -417,6 +417,97 @@ describe('routeSessions — accumulated-context tie-break', () => {
     expect(ids(candidates)).toEqual(['newer', 'older'])
     for (const candidate of candidates) expect(candidate.reason).not.toContain('积累多')
   })
+
+  // Live regression (2026-10-18): a 14-day-old 冷 session outranked a
+  // 2-hour-old 温 one only because it held far more context. Freshness bands
+  // come first; size only orders two rows inside the same band.
+  it('never lets a bigger context outrank a fresher recency band', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(BASE)
+      const candidates = routeSessions(
+        [
+          row('cold-big', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 14 * ONE_DAY,
+            sizeBytes: 9_000_000,
+          }),
+          row('warm-small', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 2 * ONE_HOUR,
+            sizeBytes: 100,
+          }),
+        ],
+        'alpha beta',
+        { topN: 8, cache: false },
+      )
+      expect(ids(candidates)).toEqual(['warm-small', 'cold-big'])
+      // Size did not decide anything here, so no row claims 积累多.
+      for (const candidate of candidates) expect(candidate.reason).not.toContain('积累多')
+      expect(candidates[0].reason).toContain(' · 温')
+      expect(candidates[1].reason).toContain(' · 冷')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('lets the larger known size decide inside one recency band', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(BASE)
+      const candidates = routeSessions(
+        [
+          // Both 热: the band ties, so the bigger context wins.
+          row('big-older', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 30 * 60_000,
+            sizeBytes: 900_000,
+          }),
+          row('small-newer', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 60_000,
+            sizeBytes: 100,
+          }),
+        ],
+        'alpha beta',
+        { topN: 8, cache: false },
+      )
+      expect(ids(candidates)).toEqual(['big-older', 'small-newer'])
+      expect(candidates[0].reason).toContain('积累多')
+      expect(candidates[1].reason).not.toContain('积累多')
+      expect(candidates[0].reason).toContain(' · 热')
+      expect(candidates[1].reason).toContain(' · 热')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a running session above a fresher idle one', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(BASE)
+      const candidates = routeSessions(
+        [
+          row('busy-cold', 'alpha beta', {
+            cwd: 'I:\\proj',
+            running: true,
+            updatedAt: BASE - 30 * ONE_DAY,
+          }),
+          row('idle-hot', 'alpha beta', {
+            cwd: 'I:\\proj',
+            updatedAt: BASE - 60_000,
+            sizeBytes: 9_000_000,
+          }),
+        ],
+        'alpha beta',
+        { topN: 8, cache: false },
+      )
+      // Running outranks both the fresher band and the bigger context.
+      expect(ids(candidates)).toEqual(['busy-cold', 'idle-hot'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('activityLabel', () => {

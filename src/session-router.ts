@@ -420,18 +420,35 @@ function sameProject(a: IndexedSession, b: IndexedSession): boolean {
 }
 
 /**
- * Deterministic order: score desc, a title hit above a directory-only hit,
- * running first, then the bigger known context inside one project, then
- * recency, then shorter title.
+ * Recency band as an order key: 热 = 0, 温 = 1, 冷 = 2. The three bands are the
+ * ones {@link activityLabel} already defines, so the order and the label a
+ * candidate shows can never disagree.
  */
-function compareScored(a: ScoredRow, b: ScoredRow): number {
+function bandRank(updatedAt: number, now: number): number {
+  const label = activityLabel(updatedAt, now)
+  return label === '热' ? 0 : label === '温' ? 1 : 2
+}
+
+/**
+ * Deterministic order: score desc, a title hit above a directory-only hit,
+ * running first, then the recency band (热 > 温 > 冷), then the bigger known
+ * context inside one project of the SAME band, then recency, then shorter
+ * title.
+ */
+function compareScored(a: ScoredRow, b: ScoredRow, now: number): number {
   if (a.score !== b.score) return b.score - a.score
   // Equal scores must never rank a directory-only match above a title match.
   if (a.titleHit !== b.titleHit) return a.titleHit ? -1 : 1
   if (a.row.running !== b.row.running) return a.row.running ? -1 : 1
-  // A bigger context is only a tie-break among EQUAL scores in the SAME
-  // project: it must never lift a row over a higher relevance score, and sizes
-  // from two different projects are not comparable.
+  // Freshness outranks accumulated context: a 14-day-old row holding far more
+  // context must never come before a two-hour-old one. The size key only
+  // applies inside one band.
+  const bandA = bandRank(a.row.updatedAt, now)
+  const bandB = bandRank(b.row.updatedAt, now)
+  if (bandA !== bandB) return bandA - bandB
+  // A bigger context is only a tie-break among EQUAL scores in the SAME band
+  // and the SAME project: it must never lift a row over a higher relevance
+  // score or over a fresher band, and sizes from two projects are not comparable.
   if (sameProject(a.row, b.row)) {
     const left = a.row.sizeHint
     const right = b.row.sizeHint
@@ -486,12 +503,14 @@ function candidateOf(scored: ScoredRow, now: number): RouteCandidate {
 
 /**
  * True when only the bigger known context puts `a` ahead of `b`: equal rank
- * keys, same project, and without the size key `b` would come first (newer,
- * then shorter title, then id). Used only to label the reason 「积累多」, so the
- * label never claims a placement the score already decided.
+ * keys, the same recency band, same project, and without the size key `b` would
+ * come first (newer, then shorter title, then id). Used only to label the reason
+ * 「积累多」, so the label never claims a placement the score or the freshness
+ * band already decided.
  */
-function sizeDecided(a: ScoredRow, b: ScoredRow): boolean {
+function sizeDecided(a: ScoredRow, b: ScoredRow, now: number): boolean {
   if (a.score !== b.score || a.titleHit !== b.titleHit || a.row.running !== b.row.running) return false
+  if (bandRank(a.row.updatedAt, now) !== bandRank(b.row.updatedAt, now)) return false
   if (!sameProject(a.row, b.row)) return false
   const left = a.row.sizeHint
   const right = b.row.sizeHint
@@ -523,7 +542,7 @@ function selectTop(scored: readonly ScoredRow[], topN: number, now: number): Rou
   return picked.map((row, index) => {
     const candidate = candidateOf(row, now)
     const next = picked[index + 1]
-    return next !== undefined && sizeDecided(row, next)
+    return next !== undefined && sizeDecided(row, next, now)
       ? { ...candidate, reason: `${candidate.reason} · 积累多` }
       : candidate
   })
@@ -554,7 +573,7 @@ function widePool(indexed: readonly IndexedSession[], query: QuestionQuery, topN
       titleHit: false,
     }
   })
-  scored.sort(compareScored)
+  scored.sort((a, b) => compareScored(a, b, now))
   return selectTop(scored, topN, now)
 }
 
@@ -662,7 +681,7 @@ function routeUncached(
     if (hit !== undefined) scored.push(hit)
   }
   if (scored.length > 0) {
-    scored.sort(compareScored)
+    scored.sort((a, b) => compareScored(a, b, now))
     return selectTop(scored, topN, now)
   }
   return widePool(indexed, query, topN, now)
