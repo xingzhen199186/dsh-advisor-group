@@ -19,8 +19,9 @@ import {
   type CrossSessionLogEvent,
 } from './cross-session'
 import type { ConsultSession, ConsultSummary } from './types'
-import { buildSessionRoster, renderRoster, type RosterRow } from './session-roster'
-import { listAskRecords, readAskRecord, type AskRecord } from './ask-store'
+import type { Config } from './config'
+import { buildSessionRoster, renderRoster, type RosterRow, type RosterSource } from './session-roster'
+import { listAskRecords, pruneAskRecords, readAskRecord, type AskRecord } from './ask-store'
 import type { Session } from '@deepseek-ai/dsh-session'
 
 export function registerAdvisorTools(
@@ -472,6 +473,18 @@ export function registerAdvisorTools(
             ],
     },
     async execute(args, exec) {
+      const swarm = service.getConfig().swarm
+      if (swarm.enabled === false) {
+        return {
+          ok: false,
+          error: 'swarm-disabled',
+          message: SWARM_DISABLED_MESSAGE,
+          answer: '',
+          note: '',
+          interval: errorInterval(),
+        }
+      }
+
       const controller = getSessionController(ctx)
       if (!controller) {
         return {
@@ -531,6 +544,7 @@ export function registerAdvisorTools(
         }
       }
 
+      const answerMode = resolveAskDefaults(args, swarm)
       const value = (await askSession(ctx, exec.signal, {
         onDelivered,
         onSettled,
@@ -540,8 +554,8 @@ export function registerAdvisorTools(
         target: typeof args.target === 'string' ? args.target : '',
         question,
         context,
-        waitMs: args.waitMs,
-        detach: args.detach === true,
+        waitMs: answerMode.waitMs,
+        detach: answerMode.detach,
         log: (message) => console.log(`[dsh-advisor-group] ask_session: ${message}`),
       })) as Record<string, unknown>
 
@@ -642,6 +656,16 @@ export function registerAdvisorTools(
             ],
     },
     async execute(args, exec) {
+      const swarm = service.getConfig().swarm
+      if (swarm.enabled === false) {
+        return {
+          ok: false,
+          count: 0,
+          sessions: [],
+          error: 'swarm-disabled',
+          message: SWARM_DISABLED_MESSAGE,
+        }
+      }
       const controller = getSessionController(ctx)
       if (controller === undefined) {
         return {
@@ -654,10 +678,13 @@ export function registerAdvisorTools(
       }
       try {
         const listed = await controller.list({}, exec.signal)
-        const rows = buildSessionRoster(listed.items, {
-          query: typeof args.query === 'string' ? args.query : '',
-          limit: typeof args.limit === 'number' ? args.limit : undefined,
-        })
+        const rows = buildSessionRoster(
+          visibleRosterSessions(listed.items, swarm.rosterIncludeSubagents),
+          {
+            query: typeof args.query === 'string' ? args.query : '',
+            limit: typeof args.limit === 'number' ? args.limit : undefined,
+          },
+        )
         return { ok: true, count: rows.length, sessions: rows }
       } catch (error) {
         return {
@@ -741,10 +768,28 @@ export function registerAdvisorTools(
       },
     },
     async execute(args, exec) {
+      const swarm = service.getConfig().swarm
+      if (swarm.enabled === false) {
+        return {
+          ok: false,
+          count: 0,
+          results: [],
+          error: 'swarm-disabled',
+          message: SWARM_DISABLED_MESSAGE,
+        }
+      }
       const session = getCurrentSessionFrom(exec)
       const sessionId = typeof session?.id === 'string' ? session.id : ''
       try {
         const dir = askStoreRoot()
+        // Expired detached results are housekeeping: clamp the configured TTL
+        // to a sane 1–720 hours, and a prune failure must never break the read.
+        const ttlHours = Math.min(720, Math.max(1, Math.floor(swarm.resultTtlHours)))
+        try {
+          pruneAskRecords(dir, ttlHours * 3_600_000)
+        } catch {
+          // Ignore: pruning is best-effort by design.
+        }
         const askId = typeof args.askId === 'string' ? args.askId.trim() : ''
         const results =
           askId.length > 0
@@ -819,6 +864,34 @@ function readCurrentEvents(session: Session | undefined): readonly CrossSessionL
 /** Empty interval carried on every not-ok result (no reply window ever opened). */
 function errorInterval(): { from: string; endedBecause: 'error' } {
   return { from: new Date().toISOString(), endedBecause: 'error' }
+}
+
+/** Refusal text shared by the three cross-session tools when the swarm switch is off. */
+const SWARM_DISABLED_MESSAGE = '蜂群模式已在设置里关闭（设置 → 插件 → 顾问群 → 全局蜂群）。'
+
+/**
+ * Effective ask mode: an argument the caller passes always wins; an omitted
+ * one falls back to the configured default (`defaultMode` / `defaultWaitMs`).
+ */
+export function resolveAskDefaults(
+  args: { readonly waitMs?: number; readonly detach?: boolean },
+  swarm: Pick<Config['swarm'], 'defaultMode' | 'defaultWaitMs'>,
+): { waitMs: number; detach: boolean } {
+  return {
+    waitMs: typeof args.waitMs === 'number' ? args.waitMs : swarm.defaultWaitMs,
+    detach: typeof args.detach === 'boolean' ? args.detach : swarm.defaultMode === 'detach',
+  }
+}
+
+/**
+ * Roster visibility: subagent sessions are dropped unless the setting lists
+ * them. Pure, so the filter is testable without a host session controller.
+ */
+export function visibleRosterSessions<T extends RosterSource>(
+  sessions: readonly T[],
+  includeSubagents: boolean,
+): readonly T[] {
+  return includeSubagents ? sessions : sessions.filter((session) => session.origin !== 'subagent')
 }
 
 // Delivery-tension ruling (2026-09-26): risk notes must actually reach the main

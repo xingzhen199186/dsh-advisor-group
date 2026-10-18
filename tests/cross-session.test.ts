@@ -932,7 +932,12 @@ describe('ask_session tool contract', () => {
   })
 
   it('returns a structured error instead of throwing when the host lacks the service', async () => {
-    const bare = registerAdvisorTools({} as AdvisorGroupService).find(
+    // The swarm guard reads the plugin config first; this host is only missing
+    // the sessionController, so the stub still answers getConfig().
+    const noController = {
+      getConfig: () => ({ swarm: { enabled: true } }),
+    } as unknown as AdvisorGroupService
+    const bare = registerAdvisorTools(noController).find(
       (candidate) => candidate.name === 'ask_session',
     )
     const execute = bare?.execute as (args: unknown, exec: unknown) => Promise<Record<string, unknown>>

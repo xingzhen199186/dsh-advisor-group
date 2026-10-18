@@ -10,6 +10,7 @@ function sample(): ConfigShape {
     trigger: { requireClassifier: true, allowWebFallback: true, confidenceThreshold: 0.6 },
     ui: { theme: 'retro-green', showTimestamps: true, autoExpand: true },
     quota: { enabled: true, maxPerDay: 50 },
+    swarm: { enabled: true, defaultMode: 'wait', defaultWaitMs: 180000, resultTtlHours: 24, rosterIncludeSubagents: false },
     advisors: [
       {
         id: 'advisor-a',

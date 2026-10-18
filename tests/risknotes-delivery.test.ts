@@ -57,6 +57,13 @@ function config(maxRounds: number): Config {
       enabled: false,
       maxPerDay: 50,
     },
+    swarm: {
+      enabled: true,
+      defaultMode: 'wait',
+      defaultWaitMs: 180000,
+      resultTtlHours: 24,
+      rosterIncludeSubagents: false,
+    },
     advisors: [ADVISOR],
   }
 }

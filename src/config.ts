@@ -143,12 +143,26 @@ export interface QuotaConfig {
   maxPerDay: number
 }
 
+export interface SwarmConfig {
+  /** Master switch for the cross-session tools (ask_session / list_sessions / ask_result). */
+  enabled: boolean
+  /** Default response mode when the caller omits both `waitMs` and `detach`. */
+  defaultMode: 'wait' | 'detach'
+  /** Default wait ceiling in milliseconds when the caller omits `waitMs` (1–10 min). */
+  defaultWaitMs: number
+  /** How long detached ask results are kept on disk, in hours (clamped to 1–720). */
+  resultTtlHours: number
+  /** Whether the session roster lists subagent sessions. */
+  rosterIncludeSubagents: boolean
+}
+
 export interface Config {
   enabled: boolean
   discussion: DiscussionConfig
   trigger: TriggerConfig
   ui: UiConfig
   quota: QuotaConfig
+  swarm: SwarmConfig
   advisors: AdvisorConfig[]
 }
 
@@ -254,6 +268,17 @@ const QuotaConfig: Schema<QuotaConfig> = Schema.object({
   maxPerDay: Schema.natural().min(1).max(100000).default(50).description('Max new consultations per UTC day (1–100000); ignored when enabled is false.'),
 })
 
+const SwarmConfig: Schema<SwarmConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('Master switch for cross-session asks; off makes ask_session / list_sessions / ask_result refuse with swarm-disabled.'),
+  defaultMode: Schema.union([
+    Schema.const('wait'),
+    Schema.const('detach'),
+  ]).default('wait').description('Default response mode when the caller omits both waitMs and detach: wait (block for the answer) or detach (return an askId, read later with ask_result).'),
+  defaultWaitMs: Schema.number().min(1000).max(600000).default(180000).description('Default wait ceiling in milliseconds when the caller omits waitMs (1–10 minutes).'),
+  resultTtlHours: Schema.number().min(1).max(720).default(24).description('How long detached ask results are kept on disk, in hours (clamped to 1–720 before pruning).'),
+  rosterIncludeSubagents: Schema.boolean().default(false).description('List subagent sessions in the session roster.'),
+})
+
 // Every field the custom settings page owns is declared volatile. DSH
 // 0.1.7-rc.2 only exposes and persists fields marked this way, and a marker
 // makes the whole subtree volatile too, so the advisor array (with its nested
@@ -265,6 +290,7 @@ export const Config = Schema.object({
   trigger: TriggerConfig.volatile(),
   ui: UiConfig.volatile(),
   quota: QuotaConfig.volatile(),
+  swarm: SwarmConfig.volatile(),
   advisors: Schema.array(AdvisorConfig).default([]).volatile(),
 }) as unknown as Schema<Config>
 

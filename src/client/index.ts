@@ -1898,6 +1898,117 @@ function AdvisorGroupSettingsTab(): ReactNode {
     createElement(
       'div',
       { style: settingsSectionStyle },
+      createElement('strong', null, '全局蜂群'),
+      createElement(
+        'div',
+        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '4px 0 8px' } },
+        '跨会话提问的开关与默认应答方式。',
+      ),
+      createElement(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        createElement('input', {
+          type: 'checkbox',
+          checked: config.swarm.enabled,
+          onChange: (e: { target: { checked: boolean } }) =>
+            setConfig({ ...config, swarm: { ...config.swarm, enabled: e.target.checked } }),
+        }),
+        label('总开关'),
+      ),
+      createElement(
+        'div',
+        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
+        '关闭后本插件不再跨会话提问，三个工具会明确拒绝',
+      ),
+      createElement(
+        'div',
+        { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 } },
+        createElement(
+          'div',
+          null,
+          label('默认应答方式'),
+          createElement(
+            'select',
+            {
+              value: config.swarm.defaultMode,
+              onChange: (e: { target: { value: string } }) =>
+                setConfig({
+                  ...config,
+                  swarm: {
+                    ...config.swarm,
+                    defaultMode: e.target.value === 'detach' ? 'detach' : 'wait',
+                  },
+                }),
+              style: settingsInputStyle,
+            },
+            createElement('option', { value: 'wait' }, '同步等待'),
+            createElement('option', { value: 'detach' }, '异步投递'),
+          ),
+        ),
+        createElement(
+          'div',
+          null,
+          label('默认等待上限（分钟）'),
+          createElement('input', {
+            type: 'number',
+            min: 1,
+            max: 10,
+            value: String(Math.round(config.swarm.defaultWaitMs / 60000)),
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({
+                ...config,
+                swarm: {
+                  ...config.swarm,
+                  defaultWaitMs: Math.min(10, Math.max(1, Number(e.target.value) || 1)) * 60000,
+                },
+              }),
+            style: settingsInputStyle,
+          }),
+          createElement(
+            'div',
+            { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', marginTop: 4 } },
+            '可填 1–10 分钟',
+          ),
+        ),
+        createElement(
+          'div',
+          null,
+          label('异步结果保留（小时）'),
+          createElement('input', {
+            type: 'number',
+            min: 1,
+            max: 720,
+            value: String(config.swarm.resultTtlHours),
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({
+                ...config,
+                swarm: {
+                  ...config.swarm,
+                  resultTtlHours: Math.min(720, Math.max(1, Number(e.target.value) || 1)),
+                },
+              }),
+            style: settingsInputStyle,
+          }),
+        ),
+      ),
+      createElement(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
+        createElement('input', {
+          type: 'checkbox',
+          checked: config.swarm.rosterIncludeSubagents,
+          onChange: (e: { target: { checked: boolean } }) =>
+            setConfig({
+              ...config,
+              swarm: { ...config.swarm, rosterIncludeSubagents: e.target.checked },
+            }),
+        }),
+        label('名录列出子代理会话'),
+      ),
+    ),
+    createElement(
+      'div',
+      { style: settingsSectionStyle },
       createElement(
         'div',
         { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 } },
