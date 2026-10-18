@@ -1,12 +1,16 @@
 /**
  * Session roster (pure): turn `sessionController.list()` rows into a compact,
- * model-readable list. No host services and no I/O here.
+ * model-readable list. No host services; the only I/O is one bounded probe of
+ * `$DSH_HOME/sessions/` for the log-size hint (see {@link sessionLogSizes}).
  *
  * The title projection is published by the host (`dsh-session-title`) as a
  * **plain string**; a `{ title }` wrapper is accepted for older cached rows.
  * Every miss degrades to the same cwd+time fallback `cross-session.ts` uses,
  * and no malformed row may throw.
  */
+import { readdirSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 /** The minimal session shape this module reads (structurally compatible with the host row). */
 export interface RosterSource {
@@ -17,6 +21,8 @@ export interface RosterSource {
   origin?: 'subagent'
   /** The host marks a freshly created, never-used session as blank. */
   blank?: boolean
+  /** Byte size of the session's own log, when the caller already looked it up. */
+  sizeBytes?: number
   projections?: { values?: { title?: unknown } }
 }
 
@@ -31,6 +37,8 @@ export interface RosterRow {
   hint: string
   /** True when the host published a real title; false means the row uses the fallback name. */
   hasTitle: boolean
+  /** Accumulated-context proxy: bytes of this session's own log, when known. */
+  sizeHint?: number
 }
 
 const UNKNOWN_CWD = '（未知工作目录）'
@@ -184,6 +192,142 @@ function matchesQuery(row: RosterRow, query: string): boolean {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Accumulated-context hint: the size of a session's own log
+//
+// The host writes one log per session under `$DSH_HOME/sessions/`, in shallow
+// layouts (`sessions/<id>*.jsonl[.zstd]`) or the nested one this host uses
+// (`sessions/<cwd-group>/<session-id>/session*.jsonl[.zstd]`). Reading a file's
+// size wakes nothing, costs no model call, and needs no host service. The probe
+// is bounded: the root, one cwd-group level, one session directory — no
+// recursion — and everything missing or unreadable simply stays unknown.
+// ---------------------------------------------------------------------------
+
+/** Uncompressed or zstd log file inside a session directory. */
+const SESSION_LOG = /^session(?:\.v\d+)?\.jsonl(?:\.zstd)?$/u
+/** Flat layout: `<id>*.jsonl[.zstd]` / `session-<id>*.jsonl[.zstd]` under the root. */
+const FLAT_LOG = /^(?:session-)?(.+?)\.jsonl(?:\.zstd)?$/u
+
+/** A byte count from an untrusted value: finite and non-negative, or undefined. */
+function bytesOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined
+}
+
+/** Root of the host's session logs; `DSH_HOME` mirrors the host default (`~/.dsh`). */
+function sessionLogRoot(): string {
+  const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return join(dshHome, 'sessions')
+}
+
+/** Bytes of one log file, or undefined when it is missing or not a file. */
+function fileBytes(file: string): number | undefined {
+  try {
+    const stat = statSync(file)
+    return stat.isFile() ? stat.size : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Bytes of the log inside one session directory: the plain file first, then the zstd one. */
+function logBytesIn(dir: string): number | undefined {
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return undefined
+  }
+  const logs = names.filter((name) => SESSION_LOG.test(name)).sort()
+  const picked = logs.find((name) => !name.endsWith('.zstd')) ?? logs[0]
+  return picked === undefined ? undefined : fileBytes(join(dir, picked))
+}
+
+/** The wanted session id a flat log name belongs to, if any (longest id wins). */
+function flatLogId(name: string, wanted: ReadonlySet<string>): string | undefined {
+  const match = FLAT_LOG.exec(name)
+  if (match === null) return undefined
+  const stem = match[1] ?? ''
+  if (wanted.has(stem)) return stem
+  let best: string | undefined
+  for (const id of wanted) {
+    if (stem.startsWith(id) && (best === undefined || id.length > best.length)) best = id
+  }
+  return best
+}
+
+/**
+ * Byte sizes of the given sessions' own logs, keyed by session id.
+ *
+ * One bounded pass: `readdir` of `$DSH_HOME/sessions/`, then one level of cwd
+ * groups, then the log file inside each matching session directory (the nested
+ * layout) or matching flat file names at the root. Unknown layouts, missing
+ * directories and unreadable entries are simply absent — never an exception,
+ * and no session is touched beyond reading its file size.
+ * @param sessionIds - ids to look up; non-string and empty ids are ignored.
+ * @returns id → bytes; ids without a readable log are missing from the map.
+ */
+export function sessionLogSizes(sessionIds: readonly string[]): Map<string, number> {
+  const sizes = new Map<string, number>()
+  const wanted = new Set(
+    (Array.isArray(sessionIds) ? sessionIds : []).filter(
+      (id): id is string => typeof id === 'string' && id.length > 0,
+    ),
+  )
+  if (wanted.size === 0) return sizes
+  const root = sessionLogRoot()
+  let entries
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+  } catch {
+    return sizes
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      const group = join(root, entry.name)
+      let children
+      try {
+        children = readdirSync(group, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const child of children) {
+        if (!wanted.has(child.name) || sizes.has(child.name)) continue
+        const size = child.isDirectory() ? logBytesIn(join(group, child.name)) : fileBytes(join(group, child.name))
+        if (size !== undefined) sizes.set(child.name, size)
+      }
+      continue
+    }
+    if (!entry.isFile()) continue
+    const id = flatLogId(entry.name, wanted)
+    if (id === undefined || sizes.has(id)) continue
+    const size = fileBytes(join(root, entry.name))
+    if (size !== undefined) sizes.set(id, size)
+  }
+  return sizes
+}
+
+/**
+ * Attach the log-size hint (`sizeBytes`) to every row that does not carry one,
+ * probing once for the whole batch. Rows that already know their size and
+ * malformed entries pass through untouched.
+ * @param sessions - roster rows; the input is never mutated.
+ * @returns rows, with `sizeBytes` filled where a log was found.
+ */
+export function withSessionLogSizes<T extends RosterSource>(sessions: readonly T[]): T[] {
+  const rows = Array.isArray(sessions) ? sessions : []
+  const missing: string[] = []
+  for (const row of rows) {
+    if (!isRecord(row) || bytesOf(row.sizeBytes) !== undefined) continue
+    if (typeof row.sessionId === 'string' && row.sessionId.length > 0) missing.push(row.sessionId)
+  }
+  const sizes = sessionLogSizes(missing)
+  return rows.map((row) => {
+    if (!isRecord(row) || bytesOf(row.sizeBytes) !== undefined) return row
+    const size = typeof row.sessionId === 'string' ? sizes.get(row.sessionId) : undefined
+    return size === undefined ? row : { ...row, sizeBytes: size }
+  })
+}
+
 /**
  * Build the roster: drop unusable rows, filter (optional), order, then cap.
  * @param sessions - rows from `sessionController.list()`; malformed rows are degraded, never fatal.
@@ -206,6 +350,7 @@ export function buildSessionRoster(
     const cwd = typeof raw.cwd === 'string' && raw.cwd.length > 0 ? raw.cwd : undefined
     const hasTime = typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
     const title = titleOf(raw.projections)
+    const sizeHint = bytesOf(raw.sizeBytes)
     const row: RosterRow = {
       sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : '',
       name: title || fallbackName(cwd, raw.updatedAt),
@@ -215,12 +360,23 @@ export function buildSessionRoster(
       subagent: raw.origin === 'subagent',
       hint: buildHint(cwd, hasTime ? (raw.updatedAt as number) : undefined),
       hasTitle: title.length > 0,
+      ...(sizeHint === undefined ? {} : { sizeHint }),
     }
     if (query.length > 0 && !matchesQuery(row, query)) continue
     rows.push(row)
   }
   rows.sort(compareRows)
-  return rows.slice(0, clampLimit(options?.limit))
+  const kept = rows.slice(0, clampLimit(options?.limit))
+  // One probe per build, after the cap, so the work matches the rows actually
+  // shown (and a caller-provided sizeBytes always wins).
+  const unknown = kept.filter((row) => row.sizeHint === undefined).map((row) => row.sessionId)
+  if (unknown.length === 0) return kept
+  const sizes = sessionLogSizes(unknown)
+  return kept.map((row) => {
+    if (row.sizeHint !== undefined) return row
+    const size = sizes.get(row.sessionId)
+    return size === undefined ? row : { ...row, sizeHint: size }
+  })
 }
 
 /**

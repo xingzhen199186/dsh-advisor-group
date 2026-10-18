@@ -10,7 +10,8 @@
  *   bottom, which the tool layer uses to remember a user's own phrasing.
  * - The one time input is `updatedAt` from the roster, so a test can freeze
  *   time by choosing the rows; the wide-pool decay is measured from the newest
- *   row, never from the wall clock.
+ *   row, never from the wall clock. (The activity label and the route cache are
+ *   the two exceptions: both are coarse, wall-clock facts.)
  * - Odd input (a null row, a missing title, a NaN timestamp, a corrupt alias
  *   file) degrades to "no match", never to an exception.
  */
@@ -55,6 +56,27 @@ const CWD_KEYWORD_BONUS = 30
 const FULL_PHRASE_BONUS = 60
 const ALIAS_BONUS = 60
 const RUNNING_BONUS = 10
+
+/** Activity-label boundaries: 热 ≤ 1h, 温 ≤ 24h, anything older is 冷. */
+const HOT_WINDOW_MS = 3_600_000
+const WARM_WINDOW_MS = 86_400_000
+
+/** Route cache: the same question inside this window reuses one routing pass. */
+const ROUTE_CACHE_TTL_MS = 180_000
+const ROUTE_CACHE_MAX = 64
+
+/** One cached routing pass: when it was computed and the candidates it produced. */
+interface CachedRoute {
+  at: number
+  candidates: RouteCandidate[]
+}
+
+/**
+ * In-memory route cache: routing reads only the roster and the question, so the
+ * same question inside the TTL can reuse the previous answer. Bounded (oldest
+ * evicted) and never persisted; {@link clearRouteCache} is the test seam.
+ */
+const routeCache = new Map<string, CachedRoute>()
 
 /**
  * A title hit must outrank a plain directory-only hit whatever their Dice
@@ -119,6 +141,8 @@ interface IndexedSession {
   tokens: TokenSet
   running: boolean
   updatedAt: number
+  /** Accumulated-context proxy (log bytes), when the roster knows it. */
+  sizeHint?: number
 }
 
 /** The question side: its token set plus the exact-substring channels. */
@@ -168,6 +192,22 @@ function titleOf(projections: unknown): string {
 export function normalizeAliasKey(text: string): string {
   if (typeof text !== 'string') return ''
   return text.toLowerCase().replace(NOISE, '')
+}
+
+/**
+ * How recently a session was active, as one readable character: 热 ≤ 1h,
+ * 温 ≤ 24h, 冷 beyond that (a week old and yesterday alike). A label only —
+ * nothing is excluded from the candidates on account of it.
+ * @param updatedAt - the row's last-activity timestamp (ms).
+ * @param now - the clock to measure against, passed in so tests can pin it.
+ * @returns the label; a non-finite age reads as 冷.
+ */
+export function activityLabel(updatedAt: number, now: number): '热' | '温' | '冷' {
+  const age = now - updatedAt
+  if (!Number.isFinite(age)) return '冷'
+  if (age <= HOT_WINDOW_MS) return '热'
+  if (age <= WARM_WINDOW_MS) return '温'
+  return '冷'
 }
 
 /**
@@ -221,6 +261,9 @@ function indexSession(session: unknown): IndexedSession | undefined {
   // Without a title the candidate is named after the project folder, never the
   // whole path (the roster renderer shows that path once, in the hint).
   const folderName = cwdSegments.length > 0 ? cwdSegments[cwdSegments.length - 1] : ''
+  // The roster knows the log size (`sizeHint`); a raw host row is pre-sized as
+  // `sizeBytes` by the caller. Either name is accepted, malformed values are not.
+  const sizeHint = bytesOf(raw.sizeHint ?? raw.sizeBytes)
   return {
     sessionId,
     name: title.length > 0 ? title : folderName.length > 0 ? folderName : cwd.length > 0 ? cwd : sessionId,
@@ -231,7 +274,13 @@ function indexSession(session: unknown): IndexedSession | undefined {
     tokens,
     running: raw.running === true,
     updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0,
+    ...(sizeHint === undefined ? {} : { sizeHint }),
   }
+}
+
+/** A byte count from an untrusted value: finite and non-negative, or undefined. */
+function bytesOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined
 }
 
 /** Read the question once: tokens, longest-first keywords, and the whole phrase. */
@@ -358,12 +407,36 @@ function scoreRow(row: IndexedSession, query: QuestionQuery, aliasHit: string | 
   return { row, score, reason, titleHit: titleHit !== undefined }
 }
 
-/** Deterministic order: score desc, a title hit above a directory-only hit, running first, then recency, then shorter title. */
+/** Project identity for the size tie-break: separators and case are not identity. */
+function projectKey(cwd: string | undefined): string {
+  if (typeof cwd !== 'string') return ''
+  return cwd.trim().replace(/[\\/]+/gu, '/').replace(/\/+$/u, '').toLowerCase()
+}
+
+/** Same project = both rows name the same normalised cwd; an unknown cwd never matches. */
+function sameProject(a: IndexedSession, b: IndexedSession): boolean {
+  const left = projectKey(a.cwd)
+  return left.length > 0 && left === projectKey(b.cwd)
+}
+
+/**
+ * Deterministic order: score desc, a title hit above a directory-only hit,
+ * running first, then the bigger known context inside one project, then
+ * recency, then shorter title.
+ */
 function compareScored(a: ScoredRow, b: ScoredRow): number {
   if (a.score !== b.score) return b.score - a.score
   // Equal scores must never rank a directory-only match above a title match.
   if (a.titleHit !== b.titleHit) return a.titleHit ? -1 : 1
   if (a.row.running !== b.row.running) return a.row.running ? -1 : 1
+  // A bigger context is only a tie-break among EQUAL scores in the SAME
+  // project: it must never lift a row over a higher relevance score, and sizes
+  // from two different projects are not comparable.
+  if (sameProject(a.row, b.row)) {
+    const left = a.row.sizeHint
+    const right = b.row.sizeHint
+    if (left !== undefined && right !== undefined && left !== right) return right - left
+  }
   if (a.row.updatedAt !== b.row.updatedAt) return b.row.updatedAt - a.row.updatedAt
   if (a.row.name.length !== b.row.name.length) return a.row.name.length - b.row.name.length
   return a.row.sessionId < b.row.sessionId ? -1 : a.row.sessionId > b.row.sessionId ? 1 : 0
@@ -400,13 +473,32 @@ function aliasHits(questionPhrase: string, aliases: Map<string, string>): Map<st
   return hits
 }
 
-function candidateOf(scored: ScoredRow): RouteCandidate {
+function candidateOf(scored: ScoredRow, now: number): RouteCandidate {
   return {
     sessionId: scored.row.sessionId,
     name: shortSessionName(scored.row.name, scored.row.cwd),
     score: scored.score,
-    reason: scored.reason,
+    // The activity label is informational: it tells the caller how fresh the
+    // peer is without excluding anything.
+    reason: `${scored.reason} · ${activityLabel(scored.row.updatedAt, now)}`,
   }
+}
+
+/**
+ * True when only the bigger known context puts `a` ahead of `b`: equal rank
+ * keys, same project, and without the size key `b` would come first (newer,
+ * then shorter title, then id). Used only to label the reason 「积累多」, so the
+ * label never claims a placement the score already decided.
+ */
+function sizeDecided(a: ScoredRow, b: ScoredRow): boolean {
+  if (a.score !== b.score || a.titleHit !== b.titleHit || a.row.running !== b.row.running) return false
+  if (!sameProject(a.row, b.row)) return false
+  const left = a.row.sizeHint
+  const right = b.row.sizeHint
+  if (left === undefined || right === undefined || left <= right) return false
+  if (a.row.updatedAt !== b.row.updatedAt) return b.row.updatedAt > a.row.updatedAt
+  if (a.row.name.length !== b.row.name.length) return b.row.name.length < a.row.name.length
+  return b.row.sessionId < a.row.sessionId
 }
 
 /**
@@ -416,7 +508,7 @@ function candidateOf(scored: ScoredRow): RouteCandidate {
  * identical labels. A titled row is never skipped or displaced by that rule —
  * only a title-less row whose label an earlier title-less row already used.
  */
-function selectTop(scored: readonly ScoredRow[], topN: number): RouteCandidate[] {
+function selectTop(scored: readonly ScoredRow[], topN: number, now: number): RouteCandidate[] {
   const usedFallbackNames = new Set<string>()
   const picked: ScoredRow[] = []
   for (const row of scored) {
@@ -428,7 +520,13 @@ function selectTop(scored: readonly ScoredRow[], topN: number): RouteCandidate[]
     picked.push(row)
     if (picked.length >= topN) break
   }
-  return picked.map(candidateOf)
+  return picked.map((row, index) => {
+    const candidate = candidateOf(row, now)
+    const next = picked[index + 1]
+    return next !== undefined && sizeDecided(row, next)
+      ? { ...candidate, reason: `${candidate.reason} · 积累多` }
+      : candidate
+  })
 }
 
 /**
@@ -436,7 +534,7 @@ function selectTop(scored: readonly ScoredRow[], topN: number): RouteCandidate[]
  * same Dice formula under a time decay. The decay is measured from the newest
  * row in the pool, so the result depends only on the roster, not on the clock.
  */
-function widePool(indexed: readonly IndexedSession[], query: QuestionQuery, topN: number): RouteCandidate[] {
+function widePool(indexed: readonly IndexedSession[], query: QuestionQuery, topN: number, now: number): RouteCandidate[] {
   const newest = indexed.reduce((max, row) => (row.updatedAt > max ? row.updatedAt : max), 0)
   const pool = new Map<string, IndexedSession>()
   const byDice = [...indexed].sort(
@@ -457,7 +555,7 @@ function widePool(indexed: readonly IndexedSession[], query: QuestionQuery, topN
     }
   })
   scored.sort(compareScored)
-  return selectTop(scored, topN)
+  return selectTop(scored, topN, now)
 }
 
 /**
@@ -470,6 +568,10 @@ function widePool(indexed: readonly IndexedSession[], query: QuestionQuery, topN
  * threshold. When nothing matches, the wide pool answers with the most
  * relevant/recent sessions instead of an empty list.
  *
+ * The result is cached in memory for 180 s (64 entries, oldest evicted), keyed
+ * by the normalised question, the cap, and the asking session: the same
+ * question asked twice does no duplicate work and returns the same candidates.
+ *
  * @param sessions - rows from `sessionController.list()`; malformed rows are skipped.
  * @param question - the question as the caller wrote it; no target name needed.
  * @param options.topN - max candidates, default 3, clamped to 1..8.
@@ -477,14 +579,74 @@ function widePool(indexed: readonly IndexedSession[], query: QuestionQuery, topN
  *   drops entries whose session is no longer in the roster.
  * @param options.currentSessionId - the asking session, filtered out so the
  *   model is never offered the session it is already in.
+ * @param options.cache - false bypasses (and does not fill) the route cache.
  * @returns candidates ordered best-first; never throws, never delivers.
  */
 export function routeSessions(
   sessions: readonly RosterSource[],
   question: string,
-  options?: { topN?: number; aliases?: Readonly<Record<string, string>>; currentSessionId?: string },
+  options?: {
+    topN?: number
+    aliases?: Readonly<Record<string, string>>
+    currentSessionId?: string
+    cache?: boolean
+  },
 ): RouteCandidate[] {
   const topN = clampTopN(options?.topN)
+  const cache = options?.cache !== false
+  const key = routeCacheKey(question, topN, options?.currentSessionId)
+  if (cache) {
+    const cached = readCachedRoute(key)
+    if (cached !== undefined) return [...cached]
+  }
+  const candidates = routeUncached(sessions, question, topN, options)
+  if (cache) writeCachedRoute(key, candidates)
+  return [...candidates]
+}
+
+/** Forgets every cached route. Test seam; nothing else needs to call it. */
+export function clearRouteCache(): void {
+  routeCache.clear()
+}
+
+/** Cache key: normalised question, cap, and asking session. */
+function routeCacheKey(question: unknown, topN: number, currentSessionId: unknown): string {
+  const text = normalizeAliasKey(typeof question === 'string' ? question : '')
+  const self = typeof currentSessionId === 'string' ? currentSessionId : ''
+  return `${text}\u0000${topN}\u0000${self}`
+}
+
+/** A live cache entry, or undefined when it is absent or older than the TTL. */
+function readCachedRoute(key: string): RouteCandidate[] | undefined {
+  const entry = routeCache.get(key)
+  if (entry === undefined) return undefined
+  if (Date.now() - entry.at > ROUTE_CACHE_TTL_MS) {
+    routeCache.delete(key)
+    return undefined
+  }
+  return entry.candidates
+}
+
+/** Store one route, evicting the oldest entries beyond {@link ROUTE_CACHE_MAX}. */
+function writeCachedRoute(key: string, candidates: readonly RouteCandidate[]): void {
+  // Re-inserting moves the key to the end, keeping insertion order = age order.
+  routeCache.delete(key)
+  routeCache.set(key, { at: Date.now(), candidates: [...candidates] })
+  while (routeCache.size > ROUTE_CACHE_MAX) {
+    const oldest = routeCache.keys().next().value
+    if (oldest === undefined) break
+    routeCache.delete(oldest)
+  }
+}
+
+/** The uncached routing pass: score, order, and label the candidates. */
+function routeUncached(
+  sessions: readonly RosterSource[],
+  question: string,
+  topN: number,
+  options?: { aliases?: Readonly<Record<string, string>>; currentSessionId?: string },
+): RouteCandidate[] {
+  const now = Date.now()
   const query = readQuestion(question)
   const hitsBySession = aliasHits(query.phrase, readAliasMap(options?.aliases))
   const indexed: IndexedSession[] = []
@@ -501,9 +663,9 @@ export function routeSessions(
   }
   if (scored.length > 0) {
     scored.sort(compareScored)
-    return selectTop(scored, topN)
+    return selectTop(scored, topN, now)
   }
-  return widePool(indexed, query, topN)
+  return widePool(indexed, query, topN, now)
 }
 
 /**

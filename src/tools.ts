@@ -22,7 +22,7 @@ import {
 import { loadAliases, routeSessions, type RouteCandidate } from './session-router'
 import type { ConsultSession, ConsultSummary } from './types'
 import type { Config } from './config'
-import { buildSessionRoster, renderRoster, shortSessionName, type RosterRow, type RosterSource } from './session-roster'
+import { buildSessionRoster, renderRoster, shortSessionName, withSessionLogSizes, type RosterRow, type RosterSource } from './session-roster'
 import { listAskRecords, pruneAskRecords, readAskRecord, type AskRecord } from './ask-store'
 import type { Session } from '@deepseek-ai/dsh-session'
 
@@ -547,7 +547,7 @@ export function registerAdvisorTools(
       const targetText = typeof args.target === 'string' ? args.target.trim() : ''
       if (targetText.length === 0 && swarm.routingEnabled !== false) {
         const roster = visibleRosterSessions(listedItems, swarm.rosterIncludeSubagents)
-        const routeCandidates = routeSessions(roster, question, {
+        const routeCandidates = routeSessions(withSessionLogSizes(roster), question, {
           topN: swarm.routingTopN,
           aliases: knownRoutingAliases(routingAliasFile(), roster),
           currentSessionId: sessionId,
@@ -561,7 +561,7 @@ export function registerAdvisorTools(
             answer: '',
             note: '',
             interval: errorInterval(),
-            routeCandidates,
+            routeCandidates: markRecentAsks(routeCandidates, sessionId),
           }
         }
       }
@@ -677,6 +677,9 @@ export function registerAdvisorTools(
                 // Diagnostic only: whether the row carried a real title. It is
                 // deliberately absent from the rendered text.
                 hasTitle: { type: 'boolean', required: true },
+                // Accumulated-context proxy (log bytes), when the host layout
+                // let it be read; absent otherwise.
+                sizeHint: { type: 'number' },
               },
             },
           },
@@ -972,6 +975,36 @@ function renderRouteCandidates(value: unknown): string {
     return `- ${name} · ${sessionId} · ${reason}${score}`
   })
   return `\n按问题匹配出的候选：\n${lines.join('\n')}`
+}
+
+/** A repeat ask inside this window earns the 「刚问过」 hint. */
+const RECENT_ASK_WINDOW_MS = 10 * 60_000
+
+/**
+ * Append 「刚问过」 to a candidate this asking session already asked in the last
+ * ten minutes, so a repeat is visible before delivering. Best effort and
+ * side-effect free: a missing or damaged ask store only means no hint.
+ */
+function markRecentAsks(
+  candidates: readonly RouteCandidate[],
+  sessionId: string,
+  now = Date.now(),
+): RouteCandidate[] {
+  let recent: Set<string>
+  try {
+    recent = new Set(
+      listAskRecords(askStoreRoot(), { sessionId })
+        .filter((record) => now - record.createdAt <= RECENT_ASK_WINDOW_MS)
+        .map((record) => record.targetSessionId)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    )
+  } catch {
+    return [...candidates]
+  }
+  if (recent.size === 0) return [...candidates]
+  return candidates.map((candidate) =>
+    recent.has(candidate.sessionId) ? { ...candidate, reason: `${candidate.reason} · 刚问过` } : candidate,
+  )
 }
 
 // Delivery-tension ruling (2026-09-26): risk notes must actually reach the main

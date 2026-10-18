@@ -49,6 +49,8 @@ vi.mock('../src/cross-session', async (importOriginal) => {
 })
 
 import {
+  activityLabel,
+  clearRouteCache,
   loadAliases,
   normalizeAliasKey,
   routeSessions,
@@ -59,9 +61,16 @@ import type { RosterSource } from '../src/session-roster'
 import type { Config as ConfigShape } from '../src/config'
 import { registerAdvisorTools } from '../src/tools'
 import type { AdvisorGroupService } from '../src/service'
+import { writeAskRecord } from '../src/ask-store'
+import { askStoreRoot } from '../src/cross-session'
 
 /** Fixed roster clock: time is an input of the router, never read from the wall clock. */
 const BASE = 1_700_000_000_000
+
+// The route cache is module state: every case starts from an empty one.
+beforeEach(() => {
+  clearRouteCache()
+})
 
 function row(id: string, title: string, extra: Partial<RosterSource> = {}): RosterSource {
   return {
@@ -86,7 +95,7 @@ describe('routeSessions — matches', () => {
     expect(candidates[0]).toMatchObject({
       sessionId: 'a',
       name: '极简遥控器改造',
-      reason: '标题命中「遥控器」',
+      reason: '标题命中「遥控器」 · 冷',
     })
     expect(candidates[0].score).toBeGreaterThan(0)
     expect(candidates[0].score).toBeLessThanOrEqual(100)
@@ -101,7 +110,7 @@ describe('routeSessions — matches', () => {
       ],
       '极简遥控器 的构建脚本',
     )
-    expect(candidates[0]).toMatchObject({ sessionId: 'path', reason: '目录命中' })
+    expect(candidates[0]).toMatchObject({ sessionId: 'path', reason: '目录命中 · 冷' })
     expect(ids(candidates)).toEqual(['path'])
   })
 
@@ -121,7 +130,7 @@ describe('routeSessions — matches', () => {
 
   it('matches a mixed CJK/ASCII question', () => {
     const candidates = routeSessions([row('mix', 'DSH 插件配置说明')], 'dsh 插件怎么配')
-    expect(candidates[0]).toMatchObject({ sessionId: 'mix', reason: '标题命中「dsh」' })
+    expect(candidates[0]).toMatchObject({ sessionId: 'mix', reason: '标题命中「dsh」 · 冷' })
     // Dice (36, capped by 40) + title keyword 40.
     expect(candidates[0].score).toBe(76)
   })
@@ -234,14 +243,14 @@ function liveRoster(): RosterSource[] {
 describe('routeSessions — title named inside the question (live regression)', () => {
   it('ranks the titled session above cwd-only rows and inside the top three', () => {
     const all = routeSessions(liveRoster(), LIVE_QUESTION, { topN: 8 })
-    const firstCwdOnly = all.findIndex((candidate) => candidate.reason === '目录命中')
+    const firstCwdOnly = all.findIndex((candidate) => candidate.reason.startsWith('目录命中'))
     expect(firstCwdOnly).toBeGreaterThan(-1)
     // The row the user meant, matched through its title even though the
     // question writes 极简遥控器 without a space and the title adds 新.
     expect(all[0]).toMatchObject({
       sessionId: 'titled-main',
       name: '极简遥控器新',
-      reason: '标题命中「极简遥控器」',
+      reason: '标题命中「极简遥控器」 · 冷',
     })
     expect(all.findIndex((candidate) => candidate.sessionId === 'titled-main')).toBeLessThan(firstCwdOnly)
     // Default topN: the titled row is one of the three offered choices.
@@ -251,7 +260,7 @@ describe('routeSessions — title named inside the question (live regression)', 
   it('scores every title hit strictly above every cwd-only hit', () => {
     const all = routeSessions(liveRoster(), LIVE_QUESTION, { topN: 8 })
     const titleScores = all.filter((candidate) => candidate.reason.startsWith('标题命中')).map((c) => c.score)
-    const cwdScores = all.filter((candidate) => candidate.reason === '目录命中').map((c) => c.score)
+    const cwdScores = all.filter((candidate) => candidate.reason.startsWith('目录命中')).map((c) => c.score)
     expect(titleScores.length).toBeGreaterThan(0)
     expect(cwdScores.length).toBeGreaterThan(0)
     for (const title of titleScores) {
@@ -296,7 +305,7 @@ describe('routeSessions — title named inside the question (live regression)', 
       [{ sessionId: 'p', updatedAt: BASE, running: false, cwd: 'I:\\极简遥控器' }],
       '那个做极简遥控器的会话现在怎么样了',
     )
-    expect(candidates[0]).toMatchObject({ sessionId: 'p', name: '极简遥控器', reason: '目录命中' })
+    expect(candidates[0]).toMatchObject({ sessionId: 'p', name: '极简遥控器', reason: '目录命中 · 冷' })
   })
 })
 
@@ -307,7 +316,7 @@ describe('routeSessions — hard channels and order', () => {
       '遥控器怎么改',
     )
     expect(candidates).toEqual([
-      expect.objectContaining({ sessionId: 'busy', score: 10, reason: '运行中' }),
+      expect.objectContaining({ sessionId: 'busy', score: 10, reason: '运行中 · 冷' }),
     ])
   })
 
@@ -328,6 +337,160 @@ describe('routeSessions — hard channels and order', () => {
   it('adds the running bonus on top of the match score', () => {
     const candidates = routeSessions([row('busy', '简遥控', { running: true })], '极简遥控器 的构建脚本')
     expect(candidates[0]).toMatchObject({ sessionId: 'busy', score: 50 })
+  })
+})
+
+describe('routeSessions — accumulated-context tie-break', () => {
+  it('prefers the larger known log size among equal scores in the same project', () => {
+    const candidates = routeSessions(
+      [
+        row('small', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE + 10_000, sizeBytes: 100 }),
+        row('big', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE, sizeBytes: 900_000 }),
+      ],
+      'alpha beta',
+      { topN: 8, cache: false },
+    )
+    expect(ids(candidates)).toEqual(['big', 'small'])
+    // The bigger context decided the order here: without it the newer row won.
+    expect(candidates[0].reason).toContain('积累多')
+    expect(candidates[1].reason).not.toContain('积累多')
+  })
+
+  it('never lets a bigger context outrank a higher relevance score', () => {
+    const candidates = routeSessions(
+      [
+        row('relevant', '遥控器改造', { cwd: 'I:\\proj', sizeBytes: 1 }),
+        row('huge', '遥控器维护手册', { cwd: 'I:\\proj', sizeBytes: 5_000_000 }),
+      ],
+      '遥控器改造',
+      { topN: 8, cache: false },
+    )
+    expect(ids(candidates)[0]).toBe('relevant')
+    expect(candidates[0].score).toBeGreaterThan(candidates[1].score)
+    expect(candidates[0].reason).not.toContain('积累多')
+  })
+
+  it('does not use size across different projects', () => {
+    const candidates = routeSessions(
+      [
+        row('huge-other', 'alpha beta', { cwd: 'I:\\other', updatedAt: BASE, sizeBytes: 9_000_000 }),
+        row('small-here', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE + 10_000, sizeBytes: 1 }),
+      ],
+      'alpha beta',
+      { topN: 8, cache: false },
+    )
+    expect(ids(candidates)).toEqual(['small-here', 'huge-other'])
+    expect(candidates[0].reason).not.toContain('积累多')
+  })
+
+  it('does not use size when only one side knows it, or when running already decides', () => {
+    const unknown = routeSessions(
+      [
+        row('known-small', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE + 1, sizeBytes: 10 }),
+        row('unknown-big', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE + 2 }),
+      ],
+      'alpha beta',
+      { topN: 8, cache: false },
+    )
+    expect(ids(unknown)).toEqual(['unknown-big', 'known-small'])
+    expect(unknown[0].reason).not.toContain('积累多')
+    const running = routeSessions(
+      [
+        row('busy', 'alpha beta', { cwd: 'I:\\proj', running: true, updatedAt: BASE, sizeBytes: 1 }),
+        row('idle', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE + 10_000, sizeBytes: 9_000_000 }),
+      ],
+      'alpha beta',
+      { topN: 8, cache: false },
+    )
+    expect(ids(running)).toEqual(['busy', 'idle'])
+  })
+
+  it('falls back to recency when no size is known at all', () => {
+    const candidates = routeSessions(
+      [
+        row('older', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE }),
+        row('newer', 'alpha beta', { cwd: 'I:\\proj', updatedAt: BASE + 10_000 }),
+      ],
+      'alpha beta',
+      { topN: 8, cache: false },
+    )
+    expect(ids(candidates)).toEqual(['newer', 'older'])
+    for (const candidate of candidates) expect(candidate.reason).not.toContain('积累多')
+  })
+})
+
+describe('activityLabel', () => {
+  const NOW = 1_700_000_000_000
+  const HOUR = 3_600_000
+  const DAY = 86_400_000
+
+  it('labels the last hour 热, the last day 温, anything older 冷', () => {
+    expect(activityLabel(NOW, NOW)).toBe('热')
+    expect(activityLabel(NOW - HOUR, NOW)).toBe('热')
+    expect(activityLabel(NOW - HOUR - 1, NOW)).toBe('温')
+    expect(activityLabel(NOW - DAY, NOW)).toBe('温')
+    expect(activityLabel(NOW - DAY - 1, NOW)).toBe('冷')
+    expect(activityLabel(NOW - 7 * DAY, NOW)).toBe('冷')
+    expect(activityLabel(NOW - 30 * DAY, NOW)).toBe('冷')
+    expect(activityLabel(Number.NaN, NOW)).toBe('冷')
+  })
+
+  it('carries the label on every candidate reason', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(NOW)
+      const candidates = routeSessions(
+        [
+          row('hot', 'alpha beta', { cwd: 'I:\\proj', updatedAt: NOW - HOUR }),
+          row('warm', 'alpha beta', { cwd: 'I:\\proj2', updatedAt: NOW - DAY }),
+          row('cold', 'alpha beta', { cwd: 'I:\\proj3', updatedAt: NOW - 3 * DAY }),
+        ],
+        'alpha beta',
+        { topN: 8, cache: false },
+      )
+      const reasonOf = (sessionId: string): string =>
+        candidates.find((candidate) => candidate.sessionId === sessionId)?.reason ?? ''
+      expect(reasonOf('hot')).toContain(' · 热')
+      expect(reasonOf('warm')).toContain(' · 温')
+      expect(reasonOf('cold')).toContain(' · 冷')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('routeSessions — route cache', () => {
+  const QUESTION = 'alpha beta'
+
+  it('answers from the cache within the TTL, and re-routes after clearRouteCache', () => {
+    expect(ids(routeSessions([row('a', 'alpha beta')], QUESTION))).toEqual(['a'])
+    // A different roster, same question: the cached pass answers.
+    expect(ids(routeSessions([row('b', 'alpha beta')], QUESTION))).toEqual(['a'])
+    clearRouteCache()
+    expect(ids(routeSessions([row('b', 'alpha beta')], QUESTION))).toEqual(['b'])
+  })
+
+  it('bypasses the cache with cache:false and never fills it from a bypass', () => {
+    expect(ids(routeSessions([row('a', 'alpha beta')], QUESTION, { cache: false }))).toEqual(['a'])
+    // Nothing was cached by the bypassing pass, so this one sees the new roster.
+    expect(ids(routeSessions([row('b', 'alpha beta')], QUESTION))).toEqual(['b'])
+    // A bypassing pass does not overwrite the cached entry either.
+    expect(ids(routeSessions([row('c', 'alpha beta')], QUESTION, { cache: false }))).toEqual(['c'])
+    expect(ids(routeSessions([row('d', 'alpha beta')], QUESTION))).toEqual(['b'])
+  })
+
+  it('re-routes once the 180 s TTL has passed', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(BASE)
+      expect(ids(routeSessions([row('a', 'alpha beta')], QUESTION))).toEqual(['a'])
+      vi.setSystemTime(BASE + 179_000)
+      expect(ids(routeSessions([row('b', 'alpha beta')], QUESTION))).toEqual(['a'])
+      vi.setSystemTime(BASE + 181_000)
+      expect(ids(routeSessions([row('b', 'alpha beta')], QUESTION))).toEqual(['b'])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -364,7 +527,7 @@ describe('routeSessions — zero-hit fallback and caps', () => {
     ]
     const candidates = routeSessions(sessions, '遥控器怎么改', { topN: 2 })
     expect(ids(candidates)).toEqual(['new', 'mid'])
-    expect(candidates.every((candidate) => candidate.reason === '最近活跃')).toBe(true)
+    expect(candidates.every((candidate) => candidate.reason.startsWith('最近活跃'))).toBe(true)
     // Fewer pool members than topN: return what exists instead of padding.
     expect(routeSessions(sessions, '遥控器怎么改', { topN: 5 })).toHaveLength(3)
   })
@@ -386,7 +549,7 @@ describe('routeSessions — aliases and malformed input', () => {
       { aliases: { '极简遥控器': 'y' } },
     )
     expect(candidates).toEqual([
-      expect.objectContaining({ sessionId: 'y', score: 60, reason: '别名命中' }),
+      expect.objectContaining({ sessionId: 'y', score: 60, reason: '别名命中 · 冷' }),
     ])
   })
 
@@ -396,7 +559,7 @@ describe('routeSessions — aliases and malformed input', () => {
     })
     // Nothing matched by text, so the wide pool answers instead of the ghost id.
     expect(ids(candidates)).toEqual(['x'])
-    expect(candidates[0].reason).not.toBe('别名命中')
+    expect(candidates[0].reason).not.toContain('别名命中')
   })
 
   it('never throws on odd input', () => {
@@ -601,6 +764,41 @@ describe('ask_session without a target', () => {
     } finally {
       world.roster = savedRoster
     }
+  })
+
+  it('marks a candidate this session asked in the last ten minutes', async () => {
+    writeAskRecord(askStoreRoot(), {
+      askId: 'ask-recent-1',
+      sessionId: 'self',
+      targetSessionId: 'remote-1',
+      targetName: '极简遥控器改造',
+      question: '遥控器界面怎么改',
+      state: 'done',
+      createdAt: Date.now() - 60_000,
+      from: new Date().toISOString(),
+    })
+    const value = await runTool(toolConfig({ topN: 3 }), 'ask_session', { question: '遥控器界面怎么改' }, selfExec())
+    const routeCandidates = value.routeCandidates as RouteCandidate[]
+    expect(routeCandidates.find((candidate) => candidate.sessionId === 'remote-1')?.reason).toContain('刚问过')
+    for (const candidate of routeCandidates.filter((item) => item.sessionId !== 'remote-1')) {
+      expect(candidate.reason).not.toContain('刚问过')
+    }
+  })
+
+  it('leaves the reason alone when the last ask is older than ten minutes', async () => {
+    writeAskRecord(askStoreRoot(), {
+      askId: 'ask-recent-2',
+      sessionId: 'self',
+      targetSessionId: 'remote-1',
+      targetName: '极简遥控器改造',
+      question: '遥控器界面怎么改',
+      state: 'done',
+      createdAt: Date.now() - 11 * 60_000,
+      from: new Date().toISOString(),
+    })
+    const value = await runTool(toolConfig({ topN: 3 }), 'ask_session', { question: '遥控器界面怎么改' }, selfExec())
+    const routeCandidates = value.routeCandidates as RouteCandidate[]
+    for (const candidate of routeCandidates) expect(candidate.reason).not.toContain('刚问过')
   })
 })
 

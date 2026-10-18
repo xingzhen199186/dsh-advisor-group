@@ -1,11 +1,16 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 
 import {
   buildSessionRoster,
   isNoiseSession,
   NOISE_TITLE_PATTERN,
   renderRoster,
+  sessionLogSizes,
   shortSessionName,
+  withSessionLogSizes,
   type RosterRow,
   type RosterSource,
 } from '../src/session-roster'
@@ -248,5 +253,82 @@ describe('renderRoster', () => {
     expect(renderRoster(titleless)).toBe(
       ['共 1 个会话', '- 极简遥控器 — I:\\极简遥控器\\极简遥控器 · 刚刚'].join('\n'),
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Accumulated-context hint: the size of a session's own log
+// ---------------------------------------------------------------------------
+describe('sizeHint — session log probe', () => {
+  let home: string
+  let savedHome: string | undefined
+
+  beforeEach(() => {
+    savedHome = process.env.DSH_HOME
+    home = mkdtempSync(join(tmpdir(), 'advisor-group-roster-size-'))
+    process.env.DSH_HOME = home
+  })
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  function writeLog(relative: string, bytes: number): void {
+    const file = join(home, relative)
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, 'x'.repeat(bytes))
+  }
+
+  it('reads the nested layout (cwd group / session id / log)', () => {
+    writeLog('sessions/--I-proj--/sess-1/session.v4.jsonl.zstd', 42)
+    const rows = buildSessionRoster([source({ sessionId: 'sess-1' })])
+    expect(rows[0].sizeHint).toBe(42)
+  })
+
+  it('reads flat log names, with or without the host prefix and compression', () => {
+    writeLog('sessions/sess-2.jsonl', 7)
+    expect(buildSessionRoster([source({ sessionId: 'sess-2' })])[0].sizeHint).toBe(7)
+    writeLog('sessions/session-sess-3.jsonl.zstd', 9)
+    expect(buildSessionRoster([source({ sessionId: 'sess-3' })])[0].sizeHint).toBe(9)
+    writeLog('sessions/sess-4-run-2.jsonl', 5)
+    expect(sessionLogSizes(['sess-4']).get('sess-4')).toBe(5)
+  })
+
+  it('leaves sizeHint undefined and never throws when the layout is unknown', () => {
+    expect(buildSessionRoster([source({ sessionId: 'nope' })])[0].sizeHint).toBeUndefined()
+    // Corrupt root: `sessions` is a file rather than a directory.
+    writeFileSync(join(home, 'sessions'), 'not a directory')
+    expect(() => buildSessionRoster([source({ sessionId: 'nope' })])).not.toThrow()
+    expect(buildSessionRoster([source({ sessionId: 'nope' })])[0].sizeHint).toBeUndefined()
+    expect(sessionLogSizes(['nope']).size).toBe(0)
+    expect(() => sessionLogSizes(undefined as never)).not.toThrow()
+    expect(() => withSessionLogSizes([null as never, 42 as never])).not.toThrow()
+  })
+
+  it('prefers a caller-provided sizeBytes over the probe', () => {
+    writeLog('sessions/--I-proj--/sess-5/session.v4.jsonl.zstd', 3)
+    const rows = buildSessionRoster([source({ sessionId: 'sess-5', sizeBytes: 9999 })])
+    expect(rows[0].sizeHint).toBe(9999)
+  })
+
+  it('attaches sizeBytes once per batch and leaves pre-sized rows untouched', () => {
+    writeLog('sessions/--I-proj--/sess-6/session.v4.jsonl.zstd', 3)
+    const sized = withSessionLogSizes([source({ sessionId: 'sess-6' })])
+    expect(sized[0].sizeBytes).toBe(3)
+    const known = { ...source({ sessionId: 'sess-7' }), sizeBytes: 5 }
+    expect(withSessionLogSizes([known])[0]).toBe(known)
+    expect(withSessionLogSizes([source({ sessionId: 'sess-8' })])[0].sizeBytes).toBeUndefined()
+  })
+
+  it('prefers the plain log over its compressed sibling and ignores junk names', () => {
+    writeLog('sessions/--I-proj--/sess-9/session.v4.jsonl.zstd', 5)
+    writeLog('sessions/--I-proj--/sess-9/session.v4.jsonl', 11)
+    writeLog('sessions/--I-proj--/sess-9/notes.txt', 100)
+    expect(sessionLogSizes(['sess-9']).get('sess-9')).toBe(11)
+    // A matching session directory whose log cannot be recognised stays unknown.
+    writeLog('sessions/--I-proj--/sess-10/transcript.bin', 50)
+    expect(sessionLogSizes(['sess-10']).get('sess-10')).toBeUndefined()
   })
 })
