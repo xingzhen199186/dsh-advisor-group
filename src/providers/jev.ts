@@ -344,6 +344,20 @@ function parseRouteResponse(body: unknown): JevRouteDecision {
   }
 }
 
+/** Closed-set criteria for the candidates: id → `title — scope`, plus the escape. */
+function optionCriteria(options: readonly JevRouteOption[], noneText: string): Record<string, string> {
+  const criteria: Record<string, string> = {}
+  for (const option of options) {
+    const id = typeof option.id === 'string' ? option.id.trim() : ''
+    if (id.length === 0) continue
+    const title = typeof option.title === 'string' ? option.title.trim() : ''
+    const scope = typeof option.scope === 'string' ? option.scope.trim() : ''
+    criteria[id] = scope.length > 0 ? `${title} — ${scope}` : title
+  }
+  criteria[JEV_NONE_OPTION] = noneText
+  return criteria
+}
+
 /**
  * Ask Jev which routed candidate is the best target: one closed-set `choice`
  * question, English instructions, an explicit `none` escape, and the
@@ -362,15 +376,7 @@ export async function routeWithJev(
 ): Promise<JevRouteDecision> {
   if (!jevConfigured(config)) throw new Error('Jev 未配置 API key')
   if (!Array.isArray(options) || options.length === 0) throw new Error('Jev 路由没有候选可判断')
-  const criteria: Record<string, string> = {}
-  for (const option of options) {
-    const id = typeof option.id === 'string' ? option.id.trim() : ''
-    if (id.length === 0) continue
-    const title = typeof option.title === 'string' ? option.title.trim() : ''
-    const scope = typeof option.scope === 'string' ? option.scope.trim() : ''
-    criteria[id] = scope.length > 0 ? `${title} — ${scope}` : title
-  }
-  criteria[JEV_NONE_OPTION] = 'None of the listed sessions is the right target for this question.'
+  const criteria = optionCriteria(options, 'None of the listed sessions is the right target for this question.')
   const gloss = typeof questionEn === 'string' ? questionEn.trim() : ''
   const state = [
     'A user asked a question and wants it sent to exactly one existing session. Choose the option whose session is the best target for that question.',
@@ -394,4 +400,148 @@ export async function routeWithJev(
     signal,
   )
   return parseRouteResponse(body)
+}
+
+// ---------------------------------------------------------------------------
+// Cross-session suggestion (2026-10-19): one batched request, three answers.
+// ---------------------------------------------------------------------------
+
+/** Jev's batched cross-session judgment, reduced to the facts the caller reads. */
+export interface JevCrossSessionJudgment {
+  /** `ask` confidence in [0,1] (explicit `confidence`, else `noul`). */
+  askConfidence?: number
+  /** Chosen candidate id (a session id or {@link JEV_NONE_OPTION}), when a pick question ran. */
+  pick?: string
+  /** `pick` confidence in [0,1] (explicit → chosen option probability → max probability). */
+  pickConfidence?: number
+  /** `sensitive` confidence in [0,1] (explicit `confidence`, else `noul`). */
+  sensitiveConfidence?: number
+  /** Model id actually reported by the response. */
+  model?: string
+}
+
+/** A noul answer's confidence: the explicit `confidence`, else the `noul` value. */
+function noulConfidence(answer: JevAnswer | undefined): number | undefined {
+  return numberValue(answer?.confidence) ?? numberValue(answer?.noul)
+}
+
+/** Read one batched judgment; throws unless `ask` and `sensitive` are usable. */
+function parseCrossSessionResponse(body: unknown): JevCrossSessionJudgment {
+  if (!body || typeof body !== 'object') throw new Error('Jev 响应不是对象')
+  const answers = (body as JevResponse).answers
+  if (!answers || typeof answers !== 'object') throw new Error('Jev 响应缺少 answers')
+  const askConfidence = noulConfidence(answers.ask)
+  if (askConfidence === undefined) throw new Error('Jev 响应缺少 ask 的有效判定')
+  const sensitiveConfidence = noulConfidence(answers.sensitive)
+  if (sensitiveConfidence === undefined) throw new Error('Jev 响应缺少 sensitive 的有效判定')
+  const pickAnswer = answers.pick as JevAnswer | undefined
+  const pick =
+    pickAnswer !== null && typeof pickAnswer === 'object' && typeof pickAnswer.choice === 'string'
+      ? pickAnswer.choice.trim()
+      : ''
+  const probabilities =
+    pickAnswer !== null && typeof pickAnswer === 'object' ? numberMap(pickAnswer.probabilities) : undefined
+  const pickConfidence =
+    pick.length === 0
+      ? undefined
+      : numberValue(pickAnswer?.confidence) ??
+        probabilities?.[pick] ??
+        (probabilities === undefined ? undefined : Math.max(...Object.values(probabilities)))
+  const reportedModel = (body as JevResponse).model
+  return {
+    askConfidence,
+    sensitiveConfidence,
+    ...(pick.length === 0 ? {} : { pick }),
+    ...(pickConfidence === undefined ? {} : { pickConfidence }),
+    ...(typeof reportedModel === 'string' ? { model: reportedModel } : {}),
+  }
+}
+
+/**
+ * One batched judgment for the cross-session suggestion: `ask` (noul), `pick`
+ * (choice, present only when there are candidates) and `sensitive` (noul) all
+ * travel in a single request, so one hint costs one call. English
+ * instructions; candidate titles/scopes stay in their original language.
+ *
+ * Throws when the response is missing or its ask/sensitive answers are
+ * unusable; the caller treats that as "no hint".
+ */
+export async function judgeCrossSessionWithJev(
+  text: string,
+  textEn: string | undefined,
+  candidates: readonly JevRouteOption[],
+  config: JevConfig,
+  signal?: AbortSignal,
+): Promise<JevCrossSessionJudgment> {
+  if (!jevConfigured(config)) throw new Error('Jev 未配置 API key')
+  const options = Array.isArray(candidates) ? candidates : []
+  const questions: Record<string, unknown> = {
+    ask: {
+      type: 'noul',
+      instructions: 'Should answering this turn consult another existing session of the same user?',
+      criteria: {
+        true: {
+          what: 'The turn depends on facts that live in another session: the state, progress, recent changes, or version of a project or task that session has been working on.',
+          examples: [
+            'asking for the current progress or status of work started elsewhere',
+            'asking what a different session decided, changed, or last talked about',
+            'continuing a task whose details were only ever discussed in another session',
+          ],
+        },
+        false: {
+          what: 'The turn can be answered from this session alone, from general knowledge, or does not depend on any other session.',
+          examples: [
+            'self-contained coding or writing requests',
+            'general questions and opinions',
+            'questions about this very session only',
+          ],
+        },
+      },
+    },
+    sensitive: {
+      type: 'noul',
+      instructions: 'Is this turn private or sensitive enough that it must not be routed to another session automatically?',
+      criteria: {
+        true: {
+          what: 'The content carries secrets or personal or confidential material that should not leave this session on its own.',
+          examples: [
+            'credentials, API keys, tokens, passwords, or private keys',
+            'personal, medical, legal, or financial details about a person',
+            'content the user marked private, confidential, or off the record',
+          ],
+        },
+        false: {
+          what: 'Ordinary project, technical, or general questions with nothing private in them.',
+          examples: [
+            'code, build, and repository questions',
+            'general knowledge or everyday planning',
+          ],
+        },
+      },
+    },
+  }
+  if (options.length > 0) {
+    questions.pick = {
+      type: 'choice',
+      instructions:
+        'Which of these sessions is the best one to ask about this turn? Pick none when none of them fits.',
+      criteria: optionCriteria(options, 'None of the listed sessions is the right target for this turn.'),
+    }
+  }
+  const gloss = typeof textEn === 'string' ? textEn.trim() : ''
+  const state = [
+    'A user turn arrived in one session of a coding agent. Judge that turn for the three questions in this request.',
+    gloss.length > 0 ? `English gloss of the turn: ${gloss}` : undefined,
+    `Turn (verbatim, may be Chinese): ${text}`,
+  ].filter((line): line is string => line !== undefined).join('\n')
+  const body = await postJev(
+    config,
+    JSON.stringify({
+      state,
+      model: config.model || 'jev-latest',
+      questions,
+    }),
+    signal,
+  )
+  return parseCrossSessionResponse(body)
 }

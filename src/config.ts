@@ -169,6 +169,14 @@ export interface SwarmConfig {
    * not configured, or on any failure, the local order is returned unchanged.
    */
   routingEngine?: 'local' | 'jev'
+  /**
+   * Whether a user turn should ask the cross-session engine for a suggestion
+   * (2026-10-19). 'off' never calls Jev; 'gated' (default) asks only when the
+   * pure prefilter thinks the turn points at another session/task; 'always'
+   * asks on every turn (one batched Jev call per turn). Any answer is a hint
+   * only: nothing is delivered and the model decides.
+   */
+  routingAsk?: 'off' | 'gated' | 'always'
 }
 
 export interface Config {
@@ -298,6 +306,11 @@ const SwarmConfig: Schema<SwarmConfig> = Schema.object({
     Schema.const('local'),
     Schema.const('jev'),
   ]).default('local').description('Which engine orders the routing candidates: local (keyword scorer alone, default) or jev (recall stays local, then Jev re-ranks the closed candidate list; any Jev failure falls back to the local order silently). Jev reuses the trigger Jev credentials/endpoint.'),
+  routingAsk: Schema.union([
+    Schema.const('off'),
+    Schema.const('gated'),
+    Schema.const('always'),
+  ]).default('gated').description('Whether a user turn asks Jev for a cross-session suggestion: off (never), gated (default; only when the local, network-free prefilter thinks the turn points at another session/task) or always (one batched Jev call on every turn). The answer is only a one-turn hint; nothing is delivered.'),
 })
 
 // Every field the custom settings page owns is declared volatile. DSH

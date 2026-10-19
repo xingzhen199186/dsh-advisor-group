@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { classifyWithJev, JEV_NONE_OPTION, jevConfigured, routeWithJev } from '../src/providers/jev'
+import {
+  classifyWithJev,
+  JEV_NONE_OPTION,
+  jevConfigured,
+  judgeCrossSessionWithJev,
+  routeWithJev,
+} from '../src/providers/jev'
 import type { AdvisorConfig, JevConfig } from '../src/config'
 
 const advisors: AdvisorConfig[] = [
@@ -237,5 +243,100 @@ describe('Jev closed-set routing', () => {
     } finally {
       delete process.env.JEV_ROUTE_TEST_KEY
     }
+  })
+})
+
+describe('Jev cross-session judgment', () => {
+  const candidates = [
+    { id: 'session-a', title: '极简遥控器新', scope: '标题命中 · 温' },
+    { id: 'session-b', title: '顾问群插件', scope: '目录命中 · 冷' },
+  ]
+  const judgmentConfig: JevConfig = { ...baseConfig, apiKey: 'secret' }
+
+  it('sends ask/pick/sensitive in ONE request, English instructions, Chinese titles', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      answers: {
+        ask: { noul: 0.82 },
+        sensitive: { noul: 0.1 },
+        pick: { choice: 'session-a', probabilities: { 'session-a': 0.7, 'session-b': 0.2, none: 0.1 } },
+      },
+      model: 'typesafe/jev-1.13.0',
+    }), { status: 200 }))
+    const judgment = await judgeCrossSessionWithJev(
+      '帮我去问一下那个会话的进度',
+      'Check the progress of the other session',
+      candidates,
+      judgmentConfig,
+    )
+    expect(judgment).toMatchObject({
+      askConfidence: 0.82,
+      sensitiveConfidence: 0.1,
+      pick: 'session-a',
+      pickConfidence: 0.7,
+      model: 'typesafe/jev-1.13.0',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      state: string
+      questions: Record<string, {
+        type: string
+        instructions: string
+        criteria: Record<string, string | { what?: unknown }>
+      }>
+    }
+    expect(Object.keys(body.questions).sort()).toEqual(['ask', 'pick', 'sensitive'])
+    expect(body.questions.ask.type).toBe('noul')
+    expect(body.questions.sensitive.type).toBe('noul')
+    expect(body.questions.pick.type).toBe('choice')
+    for (const name of ['ask', 'sensitive', 'pick']) {
+      expect(body.questions[name].instructions).not.toMatch(/[\u4e00-\u9fff]/u)
+    }
+    expect(Object.keys(body.questions.pick.criteria)).toEqual(
+      expect.arrayContaining(['session-a', 'session-b', JEV_NONE_OPTION]),
+    )
+    // Candidate titles stay in their original Chinese.
+    expect(body.questions.pick.criteria['session-a']).toContain('极简遥控器新')
+    expect(body.state).toContain('Check the progress of the other session')
+    expect(body.state).toContain('帮我去问一下那个会话的进度')
+  })
+
+  it('omits the pick question when there are no candidates', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      answers: { ask: { noul: 0.9 }, sensitive: { noul: 0.1 } },
+    }), { status: 200 }))
+    const judgment = await judgeCrossSessionWithJev('进度如何', undefined, [], judgmentConfig)
+    expect(judgment.pick).toBeUndefined()
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      questions: Record<string, unknown>
+    }
+    expect(Object.keys(body.questions).sort()).toEqual(['ask', 'sensitive'])
+  })
+
+  it('prefers explicit confidence, then the chosen option probability', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      answers: {
+        ask: { noul: 0.2, confidence: 0.9 },
+        sensitive: { noul: 0.1, confidence: 0.05 },
+        pick: { choice: 'session-b', confidence: 0.8 },
+      },
+    }), { status: 200 }))
+    const judgment = await judgeCrossSessionWithJev('问题', undefined, candidates, judgmentConfig)
+    expect(judgment).toMatchObject({
+      askConfidence: 0.9,
+      sensitiveConfidence: 0.05,
+      pick: 'session-b',
+      pickConfidence: 0.8,
+    })
+  })
+
+  it('rejects an unparseable judgment', async () => {
+    const run = (body: unknown) => {
+      vi.restoreAllMocks()
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(body), { status: 200 }))
+      return judgeCrossSessionWithJev('x', undefined, candidates, judgmentConfig)
+    }
+    await expect(run({})).rejects.toThrow('缺少 answers')
+    await expect(run({ answers: { sensitive: { noul: 0.1 } } })).rejects.toThrow('ask')
+    await expect(run({ answers: { ask: { noul: 0.9 } } })).rejects.toThrow('sensitive')
   })
 })

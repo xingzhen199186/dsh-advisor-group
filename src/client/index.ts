@@ -2073,6 +2073,44 @@ function AdvisorGroupSettingsTab(): ReactNode {
         { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
         'Jev 判断需要单独配置在「触发判定」里的 Jev 凭据；任何失败都会静默回退到本地排序',
       ),
+      createElement(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
+        label('是否该问别的会话'),
+        createElement(
+          'select',
+          {
+            value:
+              config.swarm.routingAsk === 'off'
+                ? 'off'
+                : config.swarm.routingAsk === 'always'
+                  ? 'always'
+                  : 'gated',
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({
+                ...config,
+                swarm: {
+                  ...config.swarm,
+                  routingAsk:
+                    e.target.value === 'off'
+                      ? 'off'
+                      : e.target.value === 'always'
+                        ? 'always'
+                        : 'gated',
+                },
+              }),
+            style: settingsInputStyle,
+          },
+          createElement('option', { value: 'off' }, '关'),
+          createElement('option', { value: 'gated' }, '本地预过滤 + Jev（默认）'),
+          createElement('option', { value: 'always' }, '每轮都问'),
+        ),
+      ),
+      createElement(
+        'div',
+        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
+        '中间档只在消息看起来涉及别的会话时才问 Jev，几乎不花钱；最后一档每轮都会多一次 Jev 调用',
+      ),
     ),
     createElement(
       'div',

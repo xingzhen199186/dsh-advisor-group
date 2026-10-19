@@ -50,14 +50,21 @@ vi.mock('../src/cross-session', async (importOriginal) => {
 
 import {
   activityLabel,
+  appendCrossSessionHint,
   applyJevDecision,
+  clearCrossSessionHints,
   clearRouteCache,
+  crossSessionHintForTurn,
+  crossSessionSuggestionLine,
   loadAliases,
   normalizeAliasKey,
+  rememberCrossSessionHint,
   ROUTE_MIN_CONTEXT_BYTES,
   routeSessions,
   routeSessionsWithEngine,
   saveAlias,
+  shouldConsiderCrossSession,
+  takeCrossSessionHint,
   type RouteCandidate,
 } from '../src/session-router'
 import type { RosterSource } from '../src/session-roster'
@@ -70,9 +77,11 @@ import { askStoreRoot } from '../src/cross-session'
 /** Fixed roster clock: time is an input of the router, never read from the wall clock. */
 const BASE = 1_700_000_000_000
 
-// The route cache is module state: every case starts from an empty one.
+// The route cache and the pending-hint store are module state: every case
+// starts from an empty one.
 beforeEach(() => {
   clearRouteCache()
+  clearCrossSessionHints()
 })
 
 function row(id: string, title: string, extra: Partial<RosterSource> = {}): RosterSource {
@@ -781,6 +790,165 @@ describe('routeSessions — Jev routing engine', () => {
     expect(ids(picked)).toEqual(['mid', 'fresh', 'old'])
     expect(picked).toHaveLength(local.length)
     expect(picked[0].reason).toBe('本地 · 冷 · Jev 推荐')
+  })
+})
+
+describe('shouldConsiderCrossSession', () => {
+  it('accepts a turn that points at another session or task', () => {
+    expect(shouldConsiderCrossSession('帮我去问一下那个会话的进度')).toBe(true)
+    expect(shouldConsiderCrossSession('上个会话说过的话题，现在什么状态')).toBe(true)
+    expect(shouldConsiderCrossSession('I:\\DSH\\dsh-advisor-group 的构建脚本改了吗')).toBe(true)
+    expect(shouldConsiderCrossSession('dsh-advisor-group 最近有什么改动')).toBe(true)
+  })
+
+  it('rejects a self-contained turn', () => {
+    expect(shouldConsiderCrossSession('帮我把这句话改得通顺一点')).toBe(false)
+    expect(shouldConsiderCrossSession('今天天气怎么样')).toBe(false)
+    expect(shouldConsiderCrossSession('   ')).toBe(false)
+    expect(shouldConsiderCrossSession(undefined as never)).toBe(false)
+  })
+
+  it('rejects a turn that already names an explicit target', () => {
+    expect(shouldConsiderCrossSession('问一下「极简遥控器新」会话的进度')).toBe(false)
+    expect(shouldConsiderCrossSession('发到 session-76243a21-a1cc-495f-84a3-80f3c47889aa 的进度')).toBe(false)
+    expect(shouldConsiderCrossSession('用 ask_session 把这个问题发给那个会话')).toBe(false)
+  })
+})
+
+describe('cross-session suggestion (Jev)', () => {
+  const TEXT = '帮我去问一下那个会话的进度'
+  const candidates: RouteCandidate[] = [
+    { sessionId: 'session-a', name: '极简遥控器新', score: 90, reason: '标题命中 · 温' },
+    { sessionId: 'session-b', name: '顾问群插件', score: 80, reason: '目录命中 · 冷' },
+  ]
+  const confidencePick = {
+    askConfidence: 0.8,
+    pick: 'session-a',
+    pickConfidence: 0.8,
+    sensitiveConfidence: 0.1,
+  }
+
+  it('returns the one-turn hint for a confident, non-sensitive pick', async () => {
+    const hint = await crossSessionHintForTurn({
+      text: TEXT,
+      mode: 'gated',
+      candidates,
+      judge: async () => confidencePick,
+    })
+    expect(hint).toBe('「这件事可能更适合问：极简遥控器新（ask_session）」')
+  })
+
+  it('never calls Jev in off mode', async () => {
+    let called = false
+    const hint = await crossSessionHintForTurn({
+      text: TEXT,
+      mode: 'off',
+      candidates,
+      judge: async () => {
+        called = true
+        return confidencePick
+      },
+    })
+    expect(called).toBe(false)
+    expect(hint).toBeUndefined()
+  })
+
+  it('gated mode skips Jev when the prefilter says no; always mode does not', async () => {
+    let called = false
+    const gated = await crossSessionHintForTurn({
+      text: '帮我把这句话改得通顺一点',
+      mode: 'gated',
+      candidates,
+      judge: async () => {
+        called = true
+        return confidencePick
+      },
+    })
+    expect(called).toBe(false)
+    expect(gated).toBeUndefined()
+    const always = await crossSessionHintForTurn({
+      text: '帮我把这句话改得通顺一点',
+      mode: 'always',
+      candidates,
+      judge: async () => confidencePick,
+    })
+    expect(always).toBe('「这件事可能更适合问：极简遥控器新（ask_session）」')
+  })
+
+  it('stays silent below 0.6, on "none", an unknown id, or a sensitive question', async () => {
+    const silent = [
+      { askConfidence: 0.59, pick: 'session-a', sensitiveConfidence: 0.1 },
+      { askConfidence: 0.9, pick: 'none', sensitiveConfidence: 0.1 },
+      { askConfidence: 0.9, pick: 'not-a-candidate', sensitiveConfidence: 0.1 },
+      { askConfidence: 0.9, pick: 'session-a', sensitiveConfidence: 0.6 },
+    ]
+    for (const judgment of silent) {
+      const hint = await crossSessionHintForTurn({
+        text: TEXT,
+        mode: 'always',
+        candidates,
+        judge: async () => judgment,
+      })
+      expect(hint).toBeUndefined()
+    }
+  })
+
+  it('never throws and stays silent on any judge failure', async () => {
+    const failures = [
+      async () => {
+        throw new Error('Jev 超时（1000ms）')
+      },
+      async () => {
+        throw new Error('Jev HTTP 500')
+      },
+      async () => {
+        throw new SyntaxError('bad json')
+      },
+      async () => undefined,
+    ]
+    for (const judge of failures) {
+      await expect(crossSessionHintForTurn({ text: TEXT, mode: 'always', candidates, judge })).resolves.toBeUndefined()
+    }
+  })
+
+  it('stays silent without candidates or a configured client', async () => {
+    expect(
+      await crossSessionHintForTurn({ text: TEXT, mode: 'always', candidates: [], judge: async () => confidencePick }),
+    ).toBeUndefined()
+    expect(await crossSessionHintForTurn({ text: TEXT, mode: 'always', candidates })).toBeUndefined()
+  })
+
+  it('builds the suggestion line from the picked candidate only', () => {
+    expect(crossSessionSuggestionLine(confidencePick, candidates)).toBe(
+      '「这件事可能更适合问：极简遥控器新（ask_session）」',
+    )
+    expect(crossSessionSuggestionLine(undefined, candidates)).toBeUndefined()
+  })
+})
+
+describe('cross-session hint store', () => {
+  it('is consumed by exactly one prompt assembly', () => {
+    rememberCrossSessionHint('session-1', '「这件事可能更适合问：极简遥控器新（ask_session）」')
+    const first = appendCrossSessionHint('BASE', 'session-1')
+    expect(first).toContain('这件事可能更适合问')
+    const second = appendCrossSessionHint('BASE', 'session-1')
+    expect(second).toBe('BASE')
+  })
+
+  it('stands alone when the base prompt is empty', () => {
+    rememberCrossSessionHint('session-2', '「hint」')
+    expect(appendCrossSessionHint('', 'session-2')).toBe('「hint」')
+    expect(appendCrossSessionHint('', 'session-2')).toBe('')
+  })
+
+  it('keeps hints per session and ignores empty input', () => {
+    rememberCrossSessionHint('a', 'hint-a')
+    rememberCrossSessionHint('', 'ignored')
+    rememberCrossSessionHint('b', '   ')
+    expect(takeCrossSessionHint('a')).toBe('hint-a')
+    expect(takeCrossSessionHint('a')).toBeUndefined()
+    expect(takeCrossSessionHint('b')).toBeUndefined()
+    expect(takeCrossSessionHint(undefined)).toBeUndefined()
   })
 })
 

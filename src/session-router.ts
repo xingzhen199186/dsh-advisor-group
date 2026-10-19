@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { RosterSource } from './session-roster'
 import { isNoiseSession, shortSessionName } from './session-roster'
+import type { JevCrossSessionJudgment } from './providers/jev'
 
 /** One routed session: a choice handed to the user, never an auto-pick. */
 export interface RouteCandidate {
@@ -761,6 +762,179 @@ export async function routeSessionsWithEngine(
   } catch {
     return local
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-session suggestion (2026-10-19): "this turn may belong elsewhere"
+//
+// The user turn is judged in the background (one batched Jev call), and when
+// the judgment says yes and the question is not sensitive, a per-session hint
+// is remembered for the NEXT system-prompt assembly only. Nothing is delivered
+// and nothing blocks the turn: the model reads the hint and decides.
+// ---------------------------------------------------------------------------
+
+/** How eagerly a user turn asks the cross-session engine. */
+export type CrossSessionAskMode = 'off' | 'gated' | 'always'
+
+/** At/above this confidence an answer counts as "yes" (ask / sensitive alike). */
+const CROSS_SESSION_THRESHOLD = 0.6
+
+/**
+ * Phrases that point at work which may already live in another session. Kept
+ * deliberately narrow: this prefilter is the whole cost control for `gated`
+ * mode, so a normal self-contained request should not pass it.
+ */
+const CROSS_SESSION_POINTERS = [
+  '问一下',
+  '问下',
+  '问一问',
+  '帮我问',
+  '帮忙问',
+  '请问一下',
+  '那个会话',
+  '这个会话',
+  '另一个会话',
+  '别的会话',
+  '其他会话',
+  '那个窗口',
+  '另一个窗口',
+  '别处',
+  '别的地方',
+  '另一个地方',
+  '进度',
+  '版本',
+  '状态',
+  '最近',
+  '之前',
+  '上次',
+  '说过',
+  '聊过',
+  '话题',
+]
+
+/** A concrete path or hyphenated project id, e.g. `I:\DSH\dsh-advisor-group`. */
+const PROJECT_LIKE = /[a-z]:[\\/]|(?:[a-z0-9][a-z0-9._-]*[\\/][a-z0-9._-]+)|(?:[a-z]{2,}(?:-[a-z0-9]{2,}){1,})/iu
+
+/** The turn already names where to go: a tool call, a session id, a quoted title. */
+const EXPLICIT_TARGET = [
+  /ask_session/iu,
+  /(?:session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
+  /(?:问(?:一下|下)?|发给|发到|投递到|对)\s*[「『"][^」』"]{1,60}[」』"]\s*(?:那个)?会话/u,
+]
+
+/**
+ * Pure, network-free prefilter: does this text look like it points at another
+ * session or at work another session has already done? True only when a
+ * pointer phrase / project-like token is present AND the turn does not already
+ * name an explicit target (a session id, the ask_session tool, or a quoted
+ * session title being addressed).
+ */
+export function shouldConsiderCrossSession(text: string): boolean {
+  if (typeof text !== 'string') return false
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return false
+  if (EXPLICIT_TARGET.some((pattern) => pattern.test(trimmed))) return false
+  return CROSS_SESSION_POINTERS.some((phrase) => trimmed.includes(phrase)) || PROJECT_LIKE.test(trimmed)
+}
+
+/** One injected batched judgment client; absent means "Jev not configured". */
+export type JevCrossSessionClient = (input: {
+  text: string
+  textEn?: string
+  candidates: readonly RouteCandidate[]
+}) => Promise<JevCrossSessionJudgment | undefined>
+
+/**
+ * The one-line suggestion for a judgment, or undefined when it must stay
+ * silent: no yes (ask < 0.6), a sensitive question (sensitive ≥ 0.6), no pick,
+ * "none", or an id that is not one of the offered candidates.
+ */
+export function crossSessionSuggestionLine(
+  judgment: JevCrossSessionJudgment | undefined,
+  candidates: readonly RouteCandidate[],
+): string | undefined {
+  if (judgment === undefined || judgment === null) return undefined
+  const ask = judgment.askConfidence
+  if (typeof ask !== 'number' || !Number.isFinite(ask) || ask < CROSS_SESSION_THRESHOLD) return undefined
+  const sensitive = judgment.sensitiveConfidence
+  if (typeof sensitive === 'number' && Number.isFinite(sensitive) && sensitive >= CROSS_SESSION_THRESHOLD) {
+    return undefined
+  }
+  const pick = typeof judgment.pick === 'string' ? judgment.pick.trim() : ''
+  if (pick.length === 0) return undefined
+  const chosen = candidates.find((candidate) => candidate.sessionId === pick)
+  if (chosen === undefined) return undefined
+  return `「这件事可能更适合问：${chosen.name}（ask_session）」`
+}
+
+/** One background judgment pass: mode gate, prefilter, one Jev call. */
+export interface CrossSessionTurnInput {
+  text: string
+  textEn?: string
+  mode: CrossSessionAskMode
+  candidates: readonly RouteCandidate[]
+  /** The injected Jev client; absent = not configured = silent. */
+  judge?: JevCrossSessionClient
+}
+
+/**
+ * Decide whether this turn earns a hint: `off` never asks, `gated` asks only
+ * after the prefilter passes, `always` asks on every turn. Never throws and
+ * never returns a hint for a sensitive / low-confidence / unparseable answer.
+ */
+export async function crossSessionHintForTurn(input: CrossSessionTurnInput): Promise<string | undefined> {
+  if (input.mode === 'off') return undefined
+  if (input.mode === 'gated' && !shouldConsiderCrossSession(input.text)) return undefined
+  const candidates = Array.isArray(input.candidates) ? input.candidates : []
+  if (candidates.length === 0) return undefined
+  if (input.judge === undefined) return undefined
+  try {
+    const judgment = await input.judge({
+      text: input.text,
+      ...(input.textEn === undefined ? {} : { textEn: input.textEn }),
+      candidates,
+    })
+    return crossSessionSuggestionLine(judgment, candidates)
+  } catch {
+    // Silent by design: a suggestion is optional and must never surface.
+    return undefined
+  }
+}
+
+/** Pending one-turn hints, per agent session. */
+const pendingCrossSessionHints = new Map<string, string>()
+
+/** Remember the hint for this session's next prompt assembly (overwrites). */
+export function rememberCrossSessionHint(sessionId: string, hint: string): void {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return
+  if (typeof hint !== 'string' || hint.trim().length === 0) return
+  pendingCrossSessionHints.set(sessionId, hint.trim())
+}
+
+/** Consume the pending hint: it is returned once, then forgotten. */
+export function takeCrossSessionHint(sessionId: string | undefined): string | undefined {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+  const hint = pendingCrossSessionHints.get(sessionId)
+  if (hint === undefined) return undefined
+  pendingCrossSessionHints.delete(sessionId)
+  return hint
+}
+
+/**
+ * Append (and consume) the pending cross-session hint to one assembled system
+ * prompt. One-turn timing: the background judgment of turn N stores the hint,
+ * the NEXT assembly reads and clears it — so the hint is visible for exactly
+ * one assembly and never repeats.
+ */
+export function appendCrossSessionHint(prompt: string, sessionId: string | undefined): string {
+  const hint = takeCrossSessionHint(sessionId)
+  if (hint === undefined) return prompt
+  return prompt.length === 0 ? hint : `${prompt}\n\n${hint}`
+}
+
+/** Forgets every pending hint. Test seam; nothing else needs to call it. */
+export function clearCrossSessionHints(): void {
+  pendingCrossSessionHints.clear()
 }
 
 /** Forgets every cached route. Test seam; nothing else needs to call it. */

@@ -131,8 +131,10 @@ describe('swarm config defaults', () => {
       rosterIncludeSubagents: false,
       routingEnabled: true,
       routingTopN: 3,
-      // The routing engine defaults to the local keyword scorer.
+      // The routing engine defaults to the local keyword scorer; the
+      // cross-session suggestion defaults to the gated prefilter.
       routingEngine: 'local',
+      routingAsk: 'gated',
     })
   })
 
@@ -149,6 +151,7 @@ describe('swarm config defaults', () => {
           routingEnabled: false,
           routingTopN: 5,
           routingEngine: 'jev',
+          routingAsk: 'always',
         },
       } as never),
     ) as ConfigShape
@@ -161,6 +164,7 @@ describe('swarm config defaults', () => {
       routingEnabled: false,
       routingTopN: 5,
       routingEngine: 'jev',
+      routingAsk: 'always',
     })
   })
 })
