@@ -135,6 +135,7 @@ describe('swarm config defaults', () => {
       // cross-session suggestion defaults to the gated prefilter.
       routingEngine: 'local',
       routingAsk: 'gated',
+      routingExclude: [],
     })
   })
 
@@ -152,6 +153,7 @@ describe('swarm config defaults', () => {
           routingTopN: 5,
           routingEngine: 'jev',
           routingAsk: 'always',
+          routingExclude: ['旧实验会话', 'session-dead'],
         },
       } as never),
     ) as ConfigShape
@@ -165,6 +167,7 @@ describe('swarm config defaults', () => {
       routingTopN: 5,
       routingEngine: 'jev',
       routingAsk: 'always',
+      routingExclude: ['旧实验会话', 'session-dead'],
     })
   })
 })

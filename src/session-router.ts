@@ -32,6 +32,58 @@ export interface RouteCandidate {
 /** Which engine orders the routing candidates. */
 export type RoutingEngine = 'local' | 'jev'
 
+/** One session as the exclusion matcher sees it. */
+export interface ExcludableSession {
+  readonly sessionId?: unknown
+  /** Human-readable names: the title and/or the fallback display name. */
+  readonly names?: readonly (string | undefined)[]
+}
+
+/**
+ * Pure exclusion matcher (swarm.routingExclude): an entry matches when it
+ * equals the session id (case-insensitive) or is a case-insensitive substring
+ * of any provided name — the session's title and/or its fallback display name.
+ * Blank entries never match, so an empty list excludes nothing.
+ */
+export function isSessionExcluded(
+  entries: readonly string[] | undefined,
+  session: ExcludableSession | undefined,
+): boolean {
+  const list = Array.isArray(entries) ? entries : []
+  if (list.length === 0 || session === undefined || session === null) return false
+  const id = typeof session.sessionId === 'string' ? session.sessionId.trim().toLowerCase() : ''
+  const names = Array.isArray(session.names)
+    ? session.names
+        .filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
+        .map((name) => name.trim().toLowerCase())
+    : []
+  for (const raw of list) {
+    if (typeof raw !== 'string') continue
+    const entry = raw.trim().toLowerCase()
+    if (entry.length === 0) continue
+    if (id.length > 0 && entry === id) return true
+    if (names.some((name) => name.includes(entry))) return true
+  }
+  return false
+}
+
+/** Cache-key fragment: the exclusion list, normalised so order/case do not matter. */
+function excludeKey(entries: readonly string[] | undefined): string {
+  const list = Array.isArray(entries) ? entries : []
+  return list
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0)
+    .sort()
+    .join('\u0000')
+}
+
+/** True when this indexed row is on the exclusion list. */
+function rowExcluded(entries: readonly string[] | undefined, row: IndexedSession): boolean {
+  const names = row.hasTitle ? [row.name] : [row.name, row.cwd]
+  return isSessionExcluded(entries, { sessionId: row.sessionId, names })
+}
+
 /** Jev's closed-set answer, reduced to the two facts the router reads. */
 export interface JevRerankDecision {
   /** The chosen option id (a session id, or the "none" escape). */
@@ -675,7 +727,7 @@ export function routeSessions(
   const topN = clampTopN(options?.topN)
   const engine: RoutingEngine = options?.engine === 'jev' ? 'jev' : 'local'
   const cache = options?.cache !== false
-  const key = routeCacheKey(question, topN, options?.currentSessionId, engine)
+  const key = routeCacheKey(question, topN, options?.currentSessionId, engine, options?.exclude)
   if (cache) {
     const cached = readCachedRoute(key)
     if (cached !== undefined) return [...cached]
@@ -693,6 +745,8 @@ export interface RouteSessionsOptions {
   cache?: boolean
   /** Which engine's cache entry this pass belongs to. */
   engine?: RoutingEngine
+  /** `swarm.routingExclude`: these sessions never become candidates. */
+  exclude?: readonly string[]
 }
 
 /**
@@ -942,16 +996,18 @@ export function clearRouteCache(): void {
   routeCache.clear()
 }
 
-/** Cache key: normalised question, cap, asking session, and engine. */
+/** Cache key: normalised question, cap, asking session, engine, and exclusions. */
 function routeCacheKey(
   question: unknown,
   topN: number,
   currentSessionId: unknown,
   engine: RoutingEngine,
+  exclude: readonly string[] | undefined,
 ): string {
   const text = normalizeAliasKey(typeof question === 'string' ? question : '')
   const self = typeof currentSessionId === 'string' ? currentSessionId : ''
-  return `${text}\u0000${topN}\u0000${self}\u0000${engine}`
+  // The exclusion list changes the result, so it must change the cache entry.
+  return `${text}\u0000${topN}\u0000${self}\u0000${engine}\u0000${excludeKey(exclude)}`
 }
 
 /** A live cache entry, or undefined when it is absent or older than the TTL. */
@@ -982,7 +1038,11 @@ function routeUncached(
   sessions: readonly RosterSource[],
   question: string,
   topN: number,
-  options?: { aliases?: Readonly<Record<string, string>>; currentSessionId?: string },
+  options?: {
+    aliases?: Readonly<Record<string, string>>
+    currentSessionId?: string
+    exclude?: readonly string[]
+  },
 ): RouteCandidate[] {
   const now = Date.now()
   const query = readQuestion(question)
@@ -991,7 +1051,9 @@ function routeUncached(
   for (const session of Array.isArray(sessions) ? (sessions as readonly unknown[]) : []) {
     if (isNoiseSession(session, options?.currentSessionId)) continue
     const row = indexSession(session)
-    if (row !== undefined) indexed.push(row)
+    // Excluded sessions never enter the candidate pool, which also drops any
+    // routing alias pointing at one (aliases only weigh their own row).
+    if (row !== undefined && !rowExcluded(options?.exclude, row)) indexed.push(row)
   }
   if (indexed.length === 0) return []
   const scored: ScoredRow[] = []

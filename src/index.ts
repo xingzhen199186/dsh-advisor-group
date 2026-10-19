@@ -62,6 +62,7 @@ async function suggestCrossSession(input: {
       topN: config.swarm.routingTopN,
       currentSessionId: input.sessionId,
       cache: false,
+      exclude: Array.isArray(config.swarm.routingExclude) ? config.swarm.routingExclude : [],
     })
     const judge: JevCrossSessionClient = async (turn) =>
       judgeCrossSessionWithJev(

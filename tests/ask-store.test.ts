@@ -73,6 +73,16 @@ describe('writeAskRecord / readAskRecord', () => {
     expect(readdirSync(dir)).toEqual(['ask-3.json'])
   })
 
+  it('round-trips the parentAskId call-chain trace', () => {
+    const dir = askStoreDir(freshDir())
+    writeAskRecord(dir, makeRecord('ask-parent', { parentAskId: 'ask-inbound-1' }))
+
+    expect(readAskRecord(dir, 'ask-parent')?.parentAskId).toBe('ask-inbound-1')
+    // A record without the field stays without it (no empty-string sentinel).
+    writeAskRecord(dir, makeRecord('ask-top'))
+    expect(readAskRecord(dir, 'ask-top')?.parentAskId).toBeUndefined()
+  })
+
   it('rejects an invalid askId on write and on read', () => {
     const dir = askStoreDir(freshDir())
 

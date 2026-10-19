@@ -177,6 +177,15 @@ export interface SwarmConfig {
    * only: nothing is delivered and the model decides.
    */
   routingAsk?: 'off' | 'gated' | 'always'
+  /**
+   * Sessions excluded from the whole swarm (2026-10-19): an entry matches a
+   * session when it equals its session id (case-insensitive) or is a
+   * case-insensitive substring of its title / fallback display name. Excluded
+   * sessions never appear in the roster or routing candidates, routing aliases
+   * pointing at them are dropped, and an explicit ask_session target that
+   * resolves to one is refused with `swarm-excluded`.
+   */
+  routingExclude?: string[]
 }
 
 export interface Config {
@@ -311,6 +320,7 @@ const SwarmConfig: Schema<SwarmConfig> = Schema.object({
     Schema.const('gated'),
     Schema.const('always'),
   ]).default('gated').description('Whether a user turn asks Jev for a cross-session suggestion: off (never), gated (default; only when the local, network-free prefilter thinks the turn points at another session/task) or always (one batched Jev call on every turn). The answer is only a one-turn hint; nothing is delivered.'),
+  routingExclude: Schema.array(Schema.string()).default([]).description('Sessions excluded from the whole swarm: each entry matches a session id (exact, case-insensitive) or is a case-insensitive substring of its title / fallback display name. Excluded sessions are hidden from the roster and routing candidates, their routing aliases are dropped, and an explicit ask_session target that resolves to one is refused.'),
 })
 
 // Every field the custom settings page owns is declared volatile. DSH

@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // The real @deepseek-ai/dsh-tools pulls @deepseek-ai/dsh-sandbox, a host peer
 // that is not installed here (same reason tests/tools-schema.test.ts mocks it).
@@ -16,10 +19,12 @@ import {
   askStatus,
   buildAskEnvelope,
   buildAskMessage,
+  cancelDetachedAsks,
   checkAskGuards,
   collectAnswer,
   fallbackSessionName,
   getSessionController,
+  inboundAskId,
   isSubagentDeliveryRejection,
   joinAnswerPieces,
   logWatermark,
@@ -39,6 +44,7 @@ import {
   type CrossSessionSummary,
   type SessionAskMessageSource,
 } from '../src/cross-session'
+import { askStoreDir, readAskRecord } from '../src/ask-store'
 import { registerAdvisorTools } from '../src/tools'
 import type { AdvisorGroupService } from '../src/service'
 
@@ -367,6 +373,97 @@ describe('hop guard', () => {
     expect(guardsFor(1)).toBeUndefined()
     expect(guardsFor(2)).toBeUndefined()
     expect(guardsFor(3)?.code).toBe('hop-limit')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Parent ask trace + swarm exclusion
+// ---------------------------------------------------------------------------
+
+describe('parent ask trace', () => {
+  it('reads the inbound askId from the newest user message source', () => {
+    expect(inboundAskId([])).toBeUndefined()
+    expect(inboundAskId([userEvent(1, 1, askSource(1)), textEvent(2, 2, '处理中')])).toBe('a1')
+  })
+
+  it('does not guess a parent once a plain human prompt is answered', () => {
+    expect(inboundAskId([userEvent(1, 1, askSource(1)), userEvent(2, 2, { kind: 'user' })])).toBeUndefined()
+  })
+
+  it('ignores a session-ask source without an askId', () => {
+    expect(inboundAskId([userEvent(1, 1, { kind: 'session-ask', form: 'relay' })])).toBeUndefined()
+  })
+})
+
+describe('swarm exclusion (swarm.routingExclude)', () => {
+  const sessions = [titled(TARGET, '目标会话'), titled('session-open', '正常会话')]
+
+  it('refuses an explicit target that resolves to an excluded session', async () => {
+    const world = fakeWorld({ items: sessions })
+    const { ctx, signal, input } = askInput(world, { target: '目标会话', exclude: ['目标会话'] })
+    const value = (await askSession(ctx, signal, input)) as Record<string, unknown>
+    expect(value).toMatchObject({
+      ok: false,
+      error: 'swarm-excluded',
+      message: '这个会话被设置为不参与蜂群（设置 → 插件 → 顾问群 → 全局蜂群 → 不参与路由的会话）。',
+    })
+    expect(world.followup).not.toHaveBeenCalled()
+    expect(world.prompt).not.toHaveBeenCalled()
+  })
+
+  it('never offers an excluded session as a target-not-found candidate', async () => {
+    const world = fakeWorld({ items: sessions })
+    const { ctx, signal, input } = askInput(world, { target: '不存在的会话名', exclude: ['目标会话'] })
+    const value = (await askSession(ctx, signal, input)) as Record<string, unknown>
+    expect(value.error).toBe('target-not-found')
+    const candidates = value.candidates as Array<{ sessionId: string }>
+    expect(candidates.map((candidate) => candidate.sessionId)).not.toContain(TARGET)
+    expect(candidates.map((candidate) => candidate.sessionId)).toContain('session-open')
+  })
+})
+
+describe('detached ask records the parent ask', () => {
+  let home: string
+  let savedHome: string | undefined
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'advisor-group-ask-parent-'))
+    savedHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+  })
+
+  afterEach(() => {
+    cancelDetachedAsks()
+    resetPendingWaits()
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  async function detachAndRead(currentEvents: readonly CrossSessionLogEvent[]) {
+    const world = fakeWorld({ items: [titled(TARGET, '目标会话')], targetEvents: [] })
+    const value = (await askSession({ sessionController: world.controller }, new AbortController().signal, {
+      currentSessionId: SELF,
+      senderName: '提问方',
+      currentEvents,
+      target: TARGET,
+      question: '接着问一下',
+      detach: true,
+    })) as Record<string, unknown>
+    expect(value.ok).toBe(true)
+    const dir = askStoreDir(join(home, 'storages', 'advisor-group'))
+    return readAskRecord(dir, String(value.askId))
+  }
+
+  it('stores the inbound askId as parentAskId', async () => {
+    const record = await detachAndRead([userEvent(1, 1, askSource(1))])
+    expect(record?.parentAskId).toBe('a1')
+  })
+
+  it('stores no parentAskId for a normal user-initiated ask', async () => {
+    const record = await detachAndRead([userEvent(1, 1, { kind: 'user' })])
+    expect(record).toBeDefined()
+    expect(record?.parentAskId).toBeUndefined()
   })
 })
 

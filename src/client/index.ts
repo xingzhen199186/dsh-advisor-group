@@ -2111,6 +2111,34 @@ function AdvisorGroupSettingsTab(): ReactNode {
         { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
         '中间档只在消息看起来涉及别的会话时才问 Jev，几乎不花钱；最后一档每轮都会多一次 Jev 调用',
       ),
+      createElement(
+        'div',
+        { style: { marginTop: 8 } },
+        label('不参与路由的会话'),
+        createElement('textarea', {
+          'aria-label': 'routingExclude',
+          placeholder: '每行一个：会话标题关键词或完整 sessionId',
+          rows: 3,
+          value: (config.swarm.routingExclude ?? []).join('\n'),
+          onChange: (e: { target: { value: string } }) =>
+            setConfig({
+              ...config,
+              swarm: {
+                ...config.swarm,
+                routingExclude: e.target.value
+                  .split('\n')
+                  .map((line) => line.trim())
+                  .filter((line) => line.length > 0),
+              },
+            }),
+          style: { ...settingsInputStyle, marginTop: 4, resize: 'vertical', width: '100%' },
+        }),
+        createElement(
+          'div',
+          { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', marginTop: 4 } },
+          '填会话标题里的关键词或完整 sessionId；这些会话不会出现在路由候选和会话名录里，被点名时也会拒绝投递',
+        ),
+      ),
     ),
     createElement(
       'div',

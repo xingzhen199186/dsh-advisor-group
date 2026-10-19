@@ -56,6 +56,7 @@ import {
   clearRouteCache,
   crossSessionHintForTurn,
   crossSessionSuggestionLine,
+  isSessionExcluded,
   loadAliases,
   normalizeAliasKey,
   rememberCrossSessionHint,
@@ -793,6 +794,62 @@ describe('routeSessions — Jev routing engine', () => {
   })
 })
 
+describe('isSessionExcluded (swarm.routingExclude)', () => {
+  const session = { sessionId: 'session-abc-123', names: ['极简遥控器新', 'I:\\极简遥控器 · 2026-10-18'] }
+
+  it('matches an exact session id, case-insensitively', () => {
+    expect(isSessionExcluded(['session-abc-123'], session)).toBe(true)
+    expect(isSessionExcluded(['SESSION-ABC-123'], session)).toBe(true)
+    expect(isSessionExcluded(['session-abc'], session)).toBe(false)
+  })
+
+  it('matches a case-insensitive substring of the title or fallback name', () => {
+    expect(isSessionExcluded(['遥控器'], session)).toBe(true)
+    expect(isSessionExcluded(['极简遥控器新'], session)).toBe(true)
+    expect(isSessionExcluded(['i:\\极简遥控器'], session)).toBe(true)
+    expect(isSessionExcluded(['顾问群'], session)).toBe(false)
+  })
+
+  it('never matches on an empty list or blank entries', () => {
+    expect(isSessionExcluded([], session)).toBe(false)
+    expect(isSessionExcluded(undefined, session)).toBe(false)
+    expect(isSessionExcluded(['', '   '], session)).toBe(false)
+    expect(isSessionExcluded(['遥控器'], undefined)).toBe(false)
+  })
+})
+
+describe('routeSessions — exclusion list', () => {
+  const sessions = [
+    row('titled', '极简遥控器新', { cwd: 'I:\\极简遥控器' }),
+    row('other', '顾问群插件', { cwd: 'I:\\DSH\\dsh-advisor-group' }),
+  ]
+
+  it('keeps an excluded session out of the candidates (title and id)', () => {
+    const byTitle = routeSessions(sessions, '遥控器 顾问群 插件', {
+      topN: 8,
+      cache: false,
+      exclude: ['遥控器'],
+    })
+    expect(ids(byTitle)).toEqual(['other'])
+    const byId = routeSessions(sessions, '遥控器 顾问群 插件', { topN: 8, cache: false, exclude: ['titled'] })
+    expect(ids(byId)).toEqual(['other'])
+    // An empty list excludes nothing.
+    expect(ids(routeSessions(sessions, '遥控器 顾问群 插件', { topN: 8, cache: false }))).toEqual(['other', 'titled'])
+  })
+
+  it('drops a routing alias whose target is excluded', () => {
+    // The alias would lift the excluded row; the pool filter wins.
+    const candidates = routeSessions(sessions, '那个极简遥控器的事', {
+      topN: 8,
+      cache: false,
+      aliases: { 极简遥控器: 'titled' },
+      exclude: ['极简遥控器新'],
+    })
+    expect(ids(candidates)).not.toContain('titled')
+    expect(candidates.length).toBeGreaterThan(0)
+  })
+})
+
 describe('shouldConsiderCrossSession', () => {
   it('accepts a turn that points at another session or task', () => {
     expect(shouldConsiderCrossSession('帮我去问一下那个会话的进度')).toBe(true)
@@ -1176,7 +1233,13 @@ interface ToolLike {
 }
 
 function toolConfig(
-  routing: { enabled?: boolean; topN?: number; engine?: 'local' | 'jev'; jev?: JevConfig } = {},
+  routing: {
+    enabled?: boolean
+    topN?: number
+    engine?: 'local' | 'jev'
+    jev?: JevConfig
+    exclude?: string[]
+  } = {},
 ): ConfigShape {
   return {
     enabled: true,
@@ -1204,6 +1267,7 @@ function toolConfig(
       routingEnabled: routing.enabled ?? true,
       routingTopN: routing.topN ?? 3,
       routingEngine: routing.engine ?? 'local',
+      routingExclude: routing.exclude ?? [],
     },
     advisors: [],
   }
@@ -1378,6 +1442,42 @@ describe('ask_session without a target', () => {
     expect(world.asks).toHaveLength(1)
   })
 
+  it('hides an excluded session from the routing candidates', async () => {
+    const value = await runTool(
+      toolConfig({ exclude: ['顾问群插件'] }),
+      'ask_session',
+      { question: '遥控器 顾问群 插件' },
+      selfExec(),
+    )
+    const candidates = value.routeCandidates as RouteCandidate[]
+    expect(candidates.map((candidate) => candidate.sessionId)).not.toContain('remote-2')
+    expect(candidates.map((candidate) => candidate.sessionId)).toContain('remote-1')
+    expect(world.asks).toHaveLength(0)
+  })
+
+  it('drops an alias whose target is excluded', async () => {
+    const file = join(home, 'storages', 'advisor-group', 'aliases.json')
+    saveAlias(file, '极简遥控器', 'remote-1')
+    const value = await runTool(
+      toolConfig({ exclude: ['remote-1'] }),
+      'ask_session',
+      { question: '那个极简遥控器的事' },
+      selfExec(),
+    )
+    const candidates = value.routeCandidates as RouteCandidate[]
+    expect(candidates.map((candidate) => candidate.sessionId)).not.toContain('remote-1')
+  })
+
+  it('passes the exclusion list to the delivery layer', async () => {
+    await runTool(
+      toolConfig({ exclude: ['remote-1', '顾问群'] }),
+      'ask_session',
+      { target: 'remote-1', question: '在吗？' },
+      selfExec(),
+    )
+    expect(world.asks[0]?.exclude).toEqual(['remote-1', '顾问群'])
+  })
+
   it('keeps the old behaviour when the roster yields no candidates', async () => {
     const savedRoster = world.roster
     world.roster = []
@@ -1465,6 +1565,20 @@ describe('list_sessions row diagnostics', () => {
       type: 'boolean',
       required: true,
     })
+  })
+
+  it('hides excluded sessions from the roster', async () => {
+    const value = await runTool(
+      toolConfig({ exclude: ['顾问群插件'] }),
+      'list_sessions',
+      {},
+      { signal: new AbortController().signal },
+    )
+    expect(value.ok).toBe(true)
+    const sessions = value.sessions as Array<Record<string, unknown>>
+    const ids = sessions.map((session) => session.sessionId)
+    expect(ids).not.toContain('remote-2')
+    expect(ids).toContain('remote-1')
   })
 
   it('reports hasTitle, drops noise rows, and shortens fallback names', async () => {

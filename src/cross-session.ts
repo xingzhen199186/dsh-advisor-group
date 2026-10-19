@@ -23,6 +23,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { askStoreDir, writeAskRecord, type AskRecord } from './ask-store'
+import { isSessionExcluded } from './session-router'
 
 /** Maximum combined UTF-8 bytes of question + context (design §六.5). */
 export const ASK_CONTENT_MAX_BYTES = 32000
@@ -136,6 +137,7 @@ export type CrossSessionErrorCode =
   | 'service-missing'
   | 'delivery-failed'
   | 'delivery-rejected'
+  | 'swarm-excluded'
 
 export interface CrossSessionTarget {
   readonly sessionId: string
@@ -264,6 +266,18 @@ const PARTIAL_CANDIDATE_LIMIT = 10
 /** When nothing matches, this many recent sessions come back as candidates. */
 const NOT_FOUND_CANDIDATE_LIMIT = 8
 
+/** The exclusion entries carried by `swarm.routingExclude`; malformed values are ignored. */
+function exclusionEntries(value: unknown): readonly string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : []
+}
+
+/** True when this listed session is on the user's exclusion list. */
+function summaryExcluded(entries: readonly string[], summary: CrossSessionSummary): boolean {
+  return isSessionExcluded(entries, { sessionId: summary.sessionId, names: [sessionDisplayName(summary)] })
+}
+
 /**
  * Resolve a user/model-supplied target reference against the session list.
  * Ladder, in order: exact sessionId → exact display name → partial natural
@@ -327,6 +341,27 @@ export function nextAskHop(events: readonly CrossSessionLogEvent[]): number {
     return typeof source.hop === 'number' && Number.isFinite(source.hop) ? source.hop + 1 : 1
   }
   return 0
+}
+
+/**
+ * The askId of the inbound cross-session ask this session is currently
+ * answering, if any. Reads the same source vocabulary as {@link nextAskHop}
+ * but only the newest user message: once a plain human prompt arrives, the
+ * model is answering that instead, so no parent is recorded. Returns undefined
+ * when there is no inbound ask — the id is never parsed out of message text.
+ * @param events - this session's log events in order.
+ */
+export function inboundAskId(events: readonly CrossSessionLogEvent[]): string | undefined {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]
+    if (event.type !== 'user/message') continue
+    const data = event.data as unknown as { readonly message?: { readonly source?: unknown } }
+    const source = data.message?.source as { readonly kind?: unknown; readonly askId?: unknown } | undefined
+    return source?.kind === 'session-ask' && typeof source.askId === 'string' && source.askId.length > 0
+      ? source.askId
+      : undefined
+  }
+  return undefined
 }
 
 /**
@@ -983,6 +1018,8 @@ export async function askSession(
     readonly onDelivered?: (info: AskCardDelivery) => void
     /** UI hook: wait settled → close the ask card. Must not throw. */
     readonly onSettled?: (info: AskCardSettle) => void
+    /** `swarm.routingExclude`: these sessions are invisible to matching/candidates. */
+    readonly exclude?: readonly string[]
   },
 ): Promise<Record<string, unknown>> {
   const controller = getSessionController(ctx)
@@ -1009,11 +1046,36 @@ export async function askSession(
   pendingWaits.add(input.currentSessionId)
   try {
     const sessions: CrossSessionSummary[] = []
+    // Only these are offered as candidates or delivered to; excluded sessions
+    // are as-if absent, except that naming one explicitly gets its own refusal.
+    const allowed: CrossSessionSummary[] = []
+    const entries = exclusionEntries(input.exclude)
     let match: TargetMatch = { kind: 'missing' }
     try {
       const listed = await controller.list({}, signal)
       sessions.push(...listed.items)
-      match = matchTargetSession(sessions, input.target ?? '')
+      for (const session of sessions) {
+        if (!summaryExcluded(entries, session)) allowed.push(session)
+      }
+      match = matchTargetSession(allowed, input.target ?? '')
+      // A reference that matches nothing usable but DOES name an excluded
+      // session is refused here, before any delivery path is touched.
+      if (match.kind === 'missing' && entries.length > 0) {
+        const full = matchTargetSession(sessions, input.target ?? '')
+        const hitExcluded =
+          full.kind === 'unique'
+            ? sessions.some((session) => session.sessionId === full.target.sessionId && summaryExcluded(entries, session))
+            : full.kind === 'ambiguous' &&
+              full.candidates.some(
+                (candidate) => !allowed.some((session) => session.sessionId === candidate.sessionId),
+              )
+        if (hitExcluded && (input.target ?? '').trim().length > 0) {
+          return toToolError({
+            code: 'swarm-excluded',
+            message: '这个会话被设置为不参与蜂群（设置 → 插件 → 顾问群 → 全局蜂群 → 不参与路由的会话）。',
+          })
+        }
+      }
     } catch (error) {
       return {
         ok: false,
@@ -1022,7 +1084,7 @@ export async function askSession(
       }
     }
     return await runAsk(ctx, controller, signal, input, {
-      sessions,
+      sessions: allowed,
       match,
       log: input.log ?? (() => {}),
     })
@@ -1071,6 +1133,10 @@ async function runAsk(
   const target = listed.match.kind === 'unique' ? listed.match.target : { sessionId: '', name: '' }
   const targetRow = listed.sessions.find((session) => session.sessionId === target.sessionId)
   const askId = nextAskId()
+  // Call-chain trace: when this turn is answering an inbound ask, the outgoing
+  // ask records it as its parent. Read from the inbound message source only
+  // (never from text); undefined for a normal user-initiated ask.
+  const parentAskId = inboundAskId(input.currentEvents)
   const source: SessionAskMessageSource = {
     kind: 'session-ask',
     form: 'relay',
@@ -1114,6 +1180,7 @@ async function runAsk(
       state: 'waiting',
       createdAt: Date.now(),
       from,
+      ...(parentAskId === undefined ? {} : { parentAskId }),
     }
     try {
       writeAskRecord(storeDir, record)

@@ -24,6 +24,12 @@ export interface AskRecord {
   settledAt?: number
   /** ISO time at which the question was delivered. */
   from: string
+  /**
+   * The inbound cross-session ask this one was made in answer to, when the
+   * asking session was itself handling an ask (call-chain trace, not a reply
+   * link). Absent for a normal user-initiated ask.
+   */
+  parentAskId?: string
   answer?: string
   reply?: { conclusion?: string; basis?: string; uncertainty?: string }
   /** Confidence of a settled answer: ok / partial / failed. */

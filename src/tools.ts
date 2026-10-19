@@ -20,8 +20,10 @@ import {
   type CrossSessionSummary,
 } from './cross-session'
 import {
+  isSessionExcluded,
   loadAliases,
   routeSessionsWithEngine,
+  type ExcludableSession,
   type JevRouter,
   type RouteCandidate,
 } from './session-router'
@@ -510,6 +512,10 @@ export function registerAdvisorTools(
         }
       }
 
+      // Sessions the user excluded from the swarm: never candidates, never
+      // delivered to; naming one explicitly gets its own refusal.
+      const hidden = exclusionEntries(swarm)
+
       const controller = getSessionController(ctx)
       if (!controller) {
         return {
@@ -556,7 +562,11 @@ export function registerAdvisorTools(
       // auto-picked: choosing the session stays the user's act.
       const targetText = typeof args.target === 'string' ? args.target.trim() : ''
       if (targetText.length === 0 && swarm.routingEnabled !== false) {
-        const roster = visibleRosterSessions(listedItems, swarm.rosterIncludeSubagents)
+        // Excluded sessions are dropped before recall, so they can never be a
+        // candidate and any alias pointing at one is dropped with the roster.
+        const roster = visibleRosterSessions(listedItems, swarm.rosterIncludeSubagents).filter(
+          (row) => !isSessionExcluded(hidden, { sessionId: row.sessionId, names: [sessionDisplayName(row)] }),
+        )
         // Local scoring always runs (recall + safety net); the selected engine
         // may re-rank it. Every Jev failure falls back to this local order.
         const routeCandidates = await routeSessionsWithEngine(withSessionLogSizes(roster), question, {
@@ -564,6 +574,7 @@ export function registerAdvisorTools(
           aliases: knownRoutingAliases(routingAliasFile(), roster),
           currentSessionId: sessionId,
           engine: swarm.routingEngine === 'jev' ? 'jev' : 'local',
+          exclude: hidden,
           questionEn: typeof args.questionEn === 'string' ? args.questionEn : undefined,
           jev: routingJevRouter(service.getConfig().trigger.jev, exec.signal),
         })
@@ -614,6 +625,7 @@ export function registerAdvisorTools(
         context,
         waitMs: answerMode.waitMs,
         detach: answerMode.detach,
+        exclude: hidden,
         log: (message) => console.log(`[dsh-advisor-group] ask_session: ${message}`),
       })) as Record<string, unknown>
 
@@ -742,7 +754,10 @@ export function registerAdvisorTools(
       }
       try {
         const listed = await controller.list({}, exec.signal)
-        const rows = buildSessionRoster(listed.items, {
+        // The roster the model sees must match the routing pool: excluded
+        // sessions are hidden here as well.
+        const visible = listed.items.filter((item) => !isHiddenSession(swarm, item))
+        const rows = buildSessionRoster(visible, {
           query: typeof args.query === 'string' ? args.query : '',
           limit: typeof args.limit === 'number' ? args.limit : undefined,
           hideSubagents: swarm.rosterIncludeSubagents !== true,
@@ -792,6 +807,8 @@ export function registerAdvisorTools(
                 askId: { type: 'string', required: true },
                 sessionId: { type: 'string' },
                 targetSessionId: { type: 'string' },
+                /** Inbound ask this one descends from (call-chain trace), when any. */
+                parentAskId: { type: 'string' },
                 from: { type: 'string' },
                 status: { type: 'string', enum: ['ok', 'partial', 'failed'] },
                 targetName: { type: 'string', required: true },
@@ -887,6 +904,7 @@ function renderAskRecords(rows: readonly AskRecord[]): string {
   return rows
     .map((row) => {
       const head = `- [${stateLabel[row.state]}] ${row.targetName} · askId=${row.askId}`
+      const parent = row.parentAskId === undefined ? '' : `  （由 ${row.parentAskId} 转问）`
       const question = `  问题：${row.question.replace(/\s+/gu, ' ').slice(0, 120)}`
       const body =
         row.reply !== undefined
@@ -902,7 +920,7 @@ function renderAskRecords(rows: readonly AskRecord[]): string {
             : row.error !== undefined
               ? `  错误：${row.error}`
               : ''
-      return [head, question, body].filter((line) => line.length > 0).join('\n')
+      return [head, parent, question, body].filter((line) => line.length > 0).join('\n')
     })
     .join('\n\n')
 }
@@ -957,6 +975,23 @@ export function visibleRosterSessions<T extends RosterSource>(
   includeSubagents: boolean,
 ): readonly T[] {
   return includeSubagents ? sessions : sessions.filter((session) => session.origin !== 'subagent')
+}
+
+/** The exclusion entries from settings; anything malformed is ignored. */
+function exclusionEntries(swarm: Config['swarm']): readonly string[] {
+  return Array.isArray(swarm.routingExclude)
+    ? swarm.routingExclude.filter((entry): entry is string => typeof entry === 'string')
+    : []
+}
+
+/** The exclusion matcher's view of one listed session (title or fallback name). */
+function excludableOf(summary: CrossSessionSummary): ExcludableSession {
+  return { sessionId: summary.sessionId, names: [sessionDisplayName(summary)] }
+}
+
+/** True when this listed session is hidden by `swarm.routingExclude`. */
+function isHiddenSession(swarm: Config['swarm'], summary: CrossSessionSummary): boolean {
+  return isSessionExcluded(exclusionEntries(swarm), excludableOf(summary))
 }
 
 /** Alias file location: beside the detached ask records, under the plugin store. */
