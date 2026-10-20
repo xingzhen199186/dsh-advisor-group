@@ -1122,19 +1122,70 @@ export async function collectDeliveredAsk(
   }
 }
 
+let registryProbeLogged = false
+
+/** Test seam: forget that the registry probe already logged this process. */
+export function resetRegistryProbe(): void {
+  registryProbeLogged = false
+}
+
+/** Print the registry probe at most once per process, for host-log diagnosis. */
+function logRegistryProbe(found: boolean, workspaces: number, sessions: number): void {
+  if (registryProbeLogged) return
+  registryProbeLogged = true
+  console.log(
+    found
+      ? `[dsh-advisor-group] workspaceRegistry: ok (${workspaces} 个工区, ${sessions} 个已登记会话)`
+      : '[dsh-advisor-group] workspaceRegistry: unavailable — 已退回不过滤',
+  )
+}
+
+/**
+ * Resolve the host workspace registry from the plugin context. Cordis exposes a
+ * service either as a plain property or through reflection (`ctx.reflect.get`,
+ * which in non-strict mode returns undefined when the service is absent); a
+ * plain `ctx.get` is accepted as the last resort. Every path is tried in order
+ * and any throw falls through, so a host without the service simply yields
+ * `undefined` (no filtering) instead of failing the caller.
+ */
+function workspaceRegistryService(ctx: unknown): Record<string, unknown> | undefined {
+  const paths: Array<() => unknown> = [
+    () => (ctx as { readonly workspaceRegistry?: unknown } | undefined)?.workspaceRegistry,
+    () => {
+      const reflect = (ctx as { readonly reflect?: { readonly get?: unknown } } | undefined)?.reflect
+      const get = reflect?.get
+      if (typeof get !== 'function') return undefined
+      return (get as (name: string, strict?: boolean) => unknown).call(reflect, 'workspaceRegistry', false)
+    },
+    () => {
+      const get = (ctx as { readonly get?: unknown } | undefined)?.get
+      if (typeof get !== 'function') return undefined
+      return (get as (name: string) => unknown).call(ctx, 'workspaceRegistry')
+    },
+  ]
+  for (const resolve of paths) {
+    try {
+      const value = resolve()
+      if (value !== null && typeof value === 'object') return value as Record<string, unknown>
+    } catch {
+      // Try the next resolution path.
+    }
+  }
+  return undefined
+}
+
 /**
  * Archived session ids from the host workspace registry
  * (`workspaceRegistry.archivedSessionIds`, iterable). Used for the explicit
  * "this session is archived" refusal, and subtracted from the registered set.
  *
- * A missing service (older host) or a throwing accessor yields an empty set:
- * no filtering, no error.
+ * The registry is resolved through {@link workspaceRegistryService}; a missing
+ * service (older host) or a throwing accessor yields an empty set: no
+ * filtering, no error.
  */
 export function archivedSessionIds(ctx: unknown): Set<string> {
   try {
-    const registry = (ctx as {
-      readonly workspaceRegistry?: { readonly archivedSessionIds?: unknown }
-    } | undefined)?.workspaceRegistry
+    const registry = workspaceRegistryService(ctx)
     const ids = registry?.archivedSessionIds
     if (ids === null || ids === undefined) return new Set()
     if (typeof (ids as Iterable<unknown>)[Symbol.iterator] !== 'function') return new Set()
@@ -1152,31 +1203,47 @@ export function archivedSessionIds(ctx: unknown): Set<string> {
  * sessions that no workspace registers (e.g. sessions the user moved out of
  * every workspace), and the sidebar hides those. Callers filter with this set.
  *
+ * The registry itself is resolved through {@link workspaceRegistryService}
+ * (plain property, then `ctx.reflect.get(..., false)`, then `ctx.get`), so it
+ * works on hosts that only expose the service through reflection.
+ *
  * Returns `undefined` when the host has no workspace registry, its `list` is not
  * a function, `list()` does not return an array, or anything throws — callers
- * then skip the filter entirely (old-host behaviour), never fail.
+ * then skip the filter entirely (old-host behaviour), never fail. The outcome
+ * is logged once per process for diagnosis.
  */
 export function registeredSessionIds(ctx: unknown): Set<string> | undefined {
   try {
-    const registry = (ctx as {
-      readonly workspaceRegistry?: { readonly list?: unknown }
-    } | undefined)?.workspaceRegistry
-    if (registry === null || registry === undefined) return undefined
+    const registry = workspaceRegistryService(ctx)
+    if (registry === undefined) {
+      logRegistryProbe(false, 0, 0)
+      return undefined
+    }
     const list = registry.list
-    if (typeof list !== 'function') return undefined
+    if (typeof list !== 'function') {
+      logRegistryProbe(false, 0, 0)
+      return undefined
+    }
     const workspaces = (list as () => unknown).call(registry)
-    if (!Array.isArray(workspaces)) return undefined
+    if (!Array.isArray(workspaces)) {
+      logRegistryProbe(false, 0, 0)
+      return undefined
+    }
     const ids = new Set<string>()
+    let workspaceCount = 0
     for (const workspace of workspaces) {
       if (workspace === null || typeof workspace !== 'object') continue
+      workspaceCount += 1
       const sessionIds = (workspace as { readonly sessionIds?: unknown }).sessionIds
       if (sessionIds === null || sessionIds === undefined) continue
       if (typeof (sessionIds as Iterable<unknown>)[Symbol.iterator] !== 'function') continue
       for (const id of sessionIds as Iterable<unknown>) ids.add(String(id))
     }
     for (const archived of archivedSessionIds(ctx)) ids.delete(archived)
+    logRegistryProbe(true, workspaceCount, ids.size)
     return ids
   } catch {
+    logRegistryProbe(false, 0, 0)
     return undefined
   }
 }

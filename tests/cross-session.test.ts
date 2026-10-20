@@ -15,6 +15,7 @@ import {
   ASK_HOP_LIMIT,
   ASK_WAIT_DEFAULT_MS,
   ASK_WAIT_MAX_MS,
+  archivedSessionIds,
   askContentBytes,
   askSession,
   askStatus,
@@ -40,6 +41,7 @@ import {
   renderAskResult,
   renderCandidateBlock,
   resetPendingWaits,
+  resetRegistryProbe,
   sessionDisplayName,
   UNREGISTERED_SESSION_MESSAGE,
   waitForTargetIdle,
@@ -538,6 +540,74 @@ describe('workspace-registered sessions', () => {
     ).toBeUndefined()
     // An existing registry with no sessions is an EMPTY set, not undefined.
     expect(registeredSessionIds({ workspaceRegistry: { list: () => [] } })).toEqual(new Set())
+  })
+
+  it('resolves the registry from the direct property, reflect.get, or ctx.get', () => {
+    const direct = { workspaceRegistry: { list: () => [{ sessionIds: ['direct'] }] } }
+    expect([...(registeredSessionIds(direct) ?? [])]).toEqual(['direct'])
+
+    const strictCalls: boolean[] = []
+    const viaReflect = {
+      reflect: {
+        get: (name: string, strict: boolean) => {
+          strictCalls.push(strict)
+          return name === 'workspaceRegistry' ? { list: () => [{ sessionIds: ['reflect'] }] } : undefined
+        },
+      },
+    }
+    expect([...(registeredSessionIds(viaReflect) ?? [])]).toEqual(['reflect'])
+    // Both the registered and the archived resolution go through the same probe,
+    // so the reflection is consulted once per resolution — every call must be non-strict.
+    expect(strictCalls.length).toBeGreaterThan(0)
+    expect(strictCalls.every((strict) => strict === false)).toBe(true)
+
+    const viaGet = {
+      get: (name: string) =>
+        name === 'workspaceRegistry' ? { list: () => [{ sessionIds: ['get'] }] } : undefined,
+    }
+    expect([...(registeredSessionIds(viaGet) ?? [])]).toEqual(['get'])
+  })
+
+  it('falls through a throwing path, and every miss returns undefined', () => {
+    const throwingDirect = {
+      get workspaceRegistry(): never {
+        throw new Error('inject')
+      },
+      reflect: { get: () => ({ list: () => [{ sessionIds: ['fallback'] }] }) },
+    }
+    expect([...(registeredSessionIds(throwingDirect) ?? [])]).toEqual(['fallback'])
+
+    expect(registeredSessionIds({})).toBeUndefined()
+    expect(registeredSessionIds({ reflect: { get: () => undefined }, get: () => undefined })).toBeUndefined()
+  })
+
+  it('resolves archived ids through the same paths, and subtracts them', () => {
+    const ctx = {
+      reflect: { get: () => ({ archivedSessionIds: new Set(['z']), list: () => [{ sessionIds: ['a', 'z'] }] }) },
+    }
+    expect([...archivedSessionIds(ctx)]).toEqual(['z'])
+    expect([...(registeredSessionIds(ctx) ?? [])]).toEqual(['a'])
+  })
+
+  it('logs the registry probe once per process', () => {
+    resetRegistryProbe()
+    const lines: string[] = []
+    const spy = vi.spyOn(console, 'log').mockImplementation((message?: unknown) => {
+      lines.push(String(message))
+    })
+    try {
+      registeredSessionIds({ workspaceRegistry: { list: () => [{ sessionIds: ['a', 'b'] }] } })
+      registeredSessionIds({})
+      expect(lines).toEqual([
+        '[dsh-advisor-group] workspaceRegistry: ok (1 个工区, 2 个已登记会话)',
+      ])
+      resetRegistryProbe()
+      registeredSessionIds({})
+      expect(lines[1]).toBe('[dsh-advisor-group] workspaceRegistry: unavailable — 已退回不过滤')
+    } finally {
+      spy.mockRestore()
+      resetRegistryProbe()
+    }
   })
 
   it('never offers an unregistered session as a target-not-found candidate', async () => {
