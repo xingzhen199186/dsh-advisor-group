@@ -14,7 +14,10 @@
     "advisor",
     "multi-model",
     "consultation",
-    "crt"
+    "crt",
+    "cross-session",
+    "routing",
+    "swarm"
   ],
   "type": "module",
   "main": "lib/index.mjs",
