@@ -11,14 +11,16 @@
  * for resolution and the per-target guards. There is no routing here: an
  * unnamed or ambiguous target is skipped with a reason, never guessed.
  */
-import { writeAskRecord, type AskRecord } from './ask-store'
+import { writeAskRecord, readAskRecord, type AskRecord } from './ask-store'
 import {
   allowedAskSessions,
   ARCHIVED_SESSION_MESSAGE,
   archivedSessionIds,
   askStoreRoot,
+  buildBatchAnswerBackText,
   checkAskGuards,
   collectDeliveredAsk,
+  deliverAnswerBack,
   deliverAsk,
   getSessionController,
   inboundAskId,
@@ -76,6 +78,8 @@ export interface AskSessionsInput {
   readonly exclude?: readonly string[]
   /** `swarm.enabled`: when false every target is skipped. */
   readonly swarmEnabled: boolean
+  /** `swarm.deliverBack`: merged copy-back after the batch settles (default on). */
+  readonly deliverBack?: boolean
   readonly log?: (message: string) => void
 }
 
@@ -134,6 +138,8 @@ interface BatchContext {
   readonly storeDir: string
   readonly log: (message: string) => void
   readonly parentSignal: AbortSignal
+  /** `swarm.deliverBack`: one merged copy-back after every member settled. */
+  readonly deliverBack: boolean
 }
 
 /**
@@ -245,6 +251,48 @@ async function askOne(plan: DeliveryPlan, batch: BatchContext): Promise<BatchAsk
     }
   } finally {
     linked.dispose()
+  }
+}
+
+/**
+ * One merged copy-back for the whole batch: only `done` answers are included
+ * (timeout / error stay silent), sent after every target settled, and the
+ * done records are marked (or annotated on failure). Best effort throughout:
+ * a copy-back failure must never throw or lose the stored answer.
+ */
+async function deliverMergedBack(batch: BatchContext, results: readonly BatchAskResult[]): Promise<void> {
+  if (!batch.deliverBack) return
+  const done = results.filter((row) => row.state === 'done')
+  if (done.length === 0) return
+  const text = buildBatchAnswerBackText(
+    done.map((row) => ({ targetName: row.name, askId: row.askId, answer: row.answer })),
+  )
+  const outcome = await deliverAnswerBack(
+    batch.controller,
+    {
+      askerSessionId: batch.currentSessionId,
+      targetSessionId: done[0].sessionId,
+      targetName: done[0].name,
+      askId: nextAskId(),
+    },
+    text,
+  )
+  for (const row of done) {
+    try {
+      const record = readAskRecord(batch.storeDir, row.askId)
+      if (record === undefined || record.deliveredBack === true) continue
+      writeAskRecord(
+        batch.storeDir,
+        outcome.ok
+          ? { ...record, deliveredBack: true }
+          : {
+              ...record,
+              deliverBackNote: `自动回送失败：${outcome.error ?? 'unknown'}（答案仍在记录里，可用 ask_result 取回）`,
+            },
+      )
+    } catch {
+      // Best effort: marking the record must never break the batch result.
+    }
   }
 }
 
@@ -406,10 +454,19 @@ export async function askSessions(
     storeDir: askStoreRoot(),
     log,
     parentSignal: signal,
+    deliverBack: input.deliverBack !== false,
   }
   const tasks = plans.map((plan) => askOne(plan, batch))
   // With `any` only the winner is awaited; the other tasks keep running (their
-  // own records settle inside askOne) and are intentionally not awaited here.
-  const results: BatchAskResult[] = mode === 'any' ? [await Promise.race(tasks)] : await Promise.all(tasks)
+  // own records settle inside askOne). The merged copy-back always waits for
+  // every member, so a batch lands as ONE message instead of one per target.
+  if (mode === 'any') {
+    const allSettled = Promise.all(tasks)
+    const results: BatchAskResult[] = [await Promise.race(tasks)]
+    void allSettled.then((all) => deliverMergedBack(batch, all))
+    return { ok: true, count: results.length, results, skipped }
+  }
+  const results: BatchAskResult[] = await Promise.all(tasks)
+  await deliverMergedBack(batch, results)
   return { ok: true, count: results.length, results, skipped }
 }

@@ -964,6 +964,80 @@ async function deliverViaPrompt(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Answer copy-back (auto-delivery into the asking session)
+// ---------------------------------------------------------------------------
+
+/** One answer-copy message: source line plus the FULL answer (never truncated). */
+export function buildAnswerBackText(targetName: string, askId: string, answer: string): string {
+  return `【来自「${targetName}」 · askId=${askId}】\n${answer}`
+}
+
+/** The merged batch copy-back: one message for every done answer. */
+export function buildBatchAnswerBackText(
+  entries: readonly { readonly targetName: string; readonly askId: string; readonly answer: string }[],
+): string {
+  if (entries.length === 1) {
+    const only = entries[0]
+    return buildAnswerBackText(only.targetName, only.askId, only.answer)
+  }
+  const blocks = entries.map((entry) => buildAnswerBackText(entry.targetName, entry.askId, entry.answer))
+  return [`【批量回送 · 共 ${entries.length} 条】`, ...blocks].join('\n\n')
+}
+
+/** Outcome of one copy-back attempt; a failure never throws. */
+export interface AnswerBackOutcome {
+  readonly ok: boolean
+  readonly error?: string
+}
+
+/**
+ * Copy one settled answer back into the asking session. Reuses the same two
+ * delivery paths as a question (native `followup`, then the host `prompt` queue
+ * when the agent is not resolvable), so a busy asker simply receives it through
+ * the host's inbox. Every failure is returned, never thrown.
+ */
+export async function deliverAnswerBack(
+  controller: CrossSessionController,
+  input: {
+    readonly askerSessionId: string
+    readonly targetSessionId: string
+    readonly targetName: string
+    readonly askId: string
+  },
+  text: string,
+): Promise<AnswerBackOutcome> {
+  const content: ContentBlock[] = [{ type: 'text', text }]
+  const source: SessionAskMessageSource = {
+    kind: 'session-ask',
+    form: 'relay',
+    askId: `${input.askId}-answer`,
+    senderSessionId: input.targetSessionId,
+    senderName: input.targetName,
+    hop: 0,
+  }
+  try {
+    const resolved = await controller.resolveAgent(input.askerSessionId)
+    if ('agent' in resolved && resolved.agent) {
+      resolved.agent.followup(buildAskMessage(content, source))
+      return { ok: true }
+    }
+  } catch {
+    // Fall through to the host prompt queue, exactly like a question delivery.
+  }
+  try {
+    await controller.prompt({
+      requestId: `${input.askId}-answer`,
+      sessionId: input.askerSessionId,
+      mode: 'queue',
+      content,
+    })
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: describeHostError(error) }
+  }
+}
+
 async function watermarkViaResolve(controller: CrossSessionController, sessionId: string): Promise<number> {
   try {
     const resolved = await controller.resolveAgent(sessionId)
@@ -1471,6 +1545,8 @@ export async function askSession(
     readonly onSettled?: (info: AskCardSettle) => void
     /** `swarm.routingExclude`: these sessions are invisible to matching/candidates. */
     readonly exclude?: readonly string[]
+    /** `swarm.deliverBack`: copy a done answer back to the asker (default on). */
+    readonly deliverBack?: boolean
   },
 ): Promise<Record<string, unknown>> {
   const controller = getSessionController(ctx)
@@ -1580,6 +1656,8 @@ async function runAsk(
     readonly waitMs?: number
     /** Deliver now, collect in the background, return an askId immediately. */
     readonly detach?: boolean
+    /** `swarm.deliverBack`: copy the settled answer back into the asking session. */
+    readonly deliverBack?: boolean
     readonly onDelivered?: (info: AskCardDelivery) => void
     readonly onSettled?: (info: AskCardSettle) => void
   },
@@ -1682,10 +1760,36 @@ async function runAsk(
       } catch (error) {
         settled = { state: 'error', error: error instanceof Error ? error.message : String(error) }
       } finally {
+        let finalRecord: AskRecord = { ...record, ...settled, settledAt: Date.now() }
         try {
-          writeAskRecord(storeDir, { ...record, ...settled, settledAt: Date.now() })
+          writeAskRecord(storeDir, finalRecord)
         } catch (error) {
           console.warn('[dsh-advisor-group] 异步结果落盘失败：', error)
+        }
+        // Auto copy-back: `done` only (a midnight "timeout" notice is noise), and
+        // it must never block the settle path — every failure just leaves a note.
+        if (finalRecord.state === 'done' && input.deliverBack !== false) {
+          const outcome = await deliverAnswerBack(
+            controller,
+            {
+              askerSessionId: finalRecord.sessionId,
+              targetSessionId: finalRecord.targetSessionId,
+              targetName: finalRecord.targetName,
+              askId: finalRecord.askId,
+            },
+            buildAnswerBackText(finalRecord.targetName, finalRecord.askId, finalRecord.answer ?? ''),
+          )
+          finalRecord = outcome.ok
+            ? { ...finalRecord, deliveredBack: true }
+            : {
+                ...finalRecord,
+                deliverBackNote: `自动回送失败：${outcome.error ?? 'unknown'}（答案仍在记录里，可用 ask_result 取回）`,
+              }
+          try {
+            writeAskRecord(storeDir, finalRecord)
+          } catch (error) {
+            console.warn('[dsh-advisor-group] 回送状态落盘失败：', error)
+          }
         }
         detachedControllers.delete(background)
       }

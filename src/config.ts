@@ -152,6 +152,12 @@ export interface SwarmConfig {
   defaultWaitMs: number
   /** How long detached ask results are kept on disk, in hours (clamped to 1–720). */
   resultTtlHours: number
+  /**
+   * Copy a settled answer back into the asking session automatically
+   * (`state: done` only; timeout/error are never delivered back). On by
+   * default; off leaves results readable only through `ask_result`.
+   */
+  deliverBack?: boolean
   /** Whether the session roster lists subagent sessions. */
   rosterIncludeSubagents: boolean
   /**
@@ -308,6 +314,7 @@ const SwarmConfig: Schema<SwarmConfig> = Schema.object({
   ]).default('wait').description('Default response mode when the caller omits both waitMs and detach: wait (block for the answer) or detach (return an askId, read later with ask_result).'),
   defaultWaitMs: Schema.number().min(1000).max(600000).default(180000).description('Default wait ceiling in milliseconds when the caller omits waitMs (1–10 minutes).'),
   resultTtlHours: Schema.number().min(1).max(720).default(24).description('How long detached ask results are kept on disk, in hours (clamped to 1–720 before pruning).'),
+  deliverBack: Schema.boolean().default(true).description('Copy a settled answer back into the asking session automatically (done only; timeout and error are never delivered back). Off leaves results readable only through ask_result.'),
   rosterIncludeSubagents: Schema.boolean().default(false).description('List subagent sessions in the session roster.'),
   routingEnabled: Schema.boolean().default(true).description('Route an unnamed question to candidate sessions by keyword (no model call) instead of guessing a target; off keeps the old missing-target refusal.'),
   routingTopN: Schema.number().min(1).max(8).default(3).description('How many routing candidates ask_session returns when the caller names no target (1–8).'),

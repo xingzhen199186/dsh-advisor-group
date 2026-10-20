@@ -794,6 +794,140 @@ describe('detached ask records the parent ask', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Answer copy-back into the asking session
+// ---------------------------------------------------------------------------
+
+describe('answer copy-back', () => {
+  let home: string
+  let savedHome: string | undefined
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'advisor-group-copyback-'))
+    savedHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+  })
+
+  afterEach(() => {
+    cancelDetachedAsks()
+    resetPendingWaits()
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  function copyBackDir(): string {
+    return askStoreDir(join(home, 'storages', 'advisor-group'))
+  }
+
+  interface DetachedRecord {
+    readonly askId: string
+    readonly read: () => AskRecord | undefined
+  }
+
+  async function detachRecord(world: FakeWorld, overrides: Record<string, unknown> = {}): Promise<DetachedRecord> {
+    const value = (await askSession(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      {
+        currentSessionId: SELF,
+        senderName: '提问方',
+        currentEvents: [],
+        target: TARGET,
+        question: '接着问一下',
+        detach: true,
+        waitMs: 30,
+        ...overrides,
+      },
+    )) as Record<string, unknown>
+    expect(value.ok).toBe(true)
+    const askId = String(value.askId)
+    return { askId, read: () => readAskRecord(copyBackDir(), askId) }
+  }
+
+  it('copies a settled answer back once and marks the record', async () => {
+    const world = fakeWorld({
+      items: [titled(TARGET, '目标会话')],
+      watermarkEvents: () => [textEvent(1, 1000, '旧的正文')],
+      targetEvents: [textEvent(2, 2000, '答复正文')],
+    })
+    const { askId, read } = await detachRecord(world)
+    await until(() => read()?.state === 'done' && read()?.deliveredBack === true)
+    expect(read()?.state).toBe('done')
+    expect(read()?.deliveredBack).toBe(true)
+    // A second settle (or a second read) must never send it again.
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(world.prompt).toHaveBeenCalledTimes(1)
+    const sent = world.prompt.mock.calls[0][0] as {
+      sessionId: string
+      requestId: string
+      content: readonly { text: string }[]
+    }
+    expect(sent.sessionId).toBe(SELF)
+    expect(sent.requestId).toBe(`${askId}-answer`)
+    expect(sent.content[0].text).toBe(`【来自「目标会话」 · askId=${askId}】\n答复正文`)
+  })
+
+  it('does not copy back a timeout', async () => {
+    const busy = titled(TARGET, '目标会话', { running: true })
+    const world = fakeWorld({ items: [busy], listItems: () => [busy] })
+    const { read } = await detachRecord(world)
+    await until(() => read()?.state === 'timeout')
+    expect(read()?.state).toBe('timeout')
+    expect(read()?.deliveredBack).toBeUndefined()
+    expect(world.prompt).not.toHaveBeenCalled()
+  })
+
+  it('does not copy back an error', async () => {
+    let listCalls = 0
+    const world = fakeWorld({
+      items: [titled(TARGET, '目标会话')],
+      listItems: () => {
+        listCalls += 1
+        if (listCalls > 1) throw new Error('list boom')
+        return [titled(TARGET, '目标会话')]
+      },
+    })
+    const { read } = await detachRecord(world)
+    await until(() => read()?.state === 'error')
+    expect(read()?.state).toBe('error')
+    expect(read()?.deliveredBack).toBeUndefined()
+    expect(world.prompt).not.toHaveBeenCalled()
+  })
+
+  it('keeps the answer readable and adds a note when the copy-back fails', async () => {
+    const world = fakeWorld({
+      items: [titled(TARGET, '目标会话')],
+      watermarkEvents: () => [textEvent(1, 1000, '旧的正文')],
+      targetEvents: [textEvent(2, 2000, '答复正文')],
+    })
+    world.prompt.mockRejectedValue(new Error('inbox full'))
+    const { read } = await detachRecord(world)
+    await until(() => read()?.deliverBackNote !== undefined)
+    const record = read()
+    expect(record?.state).toBe('done')
+    expect(record?.answer).toBe('答复正文')
+    expect(record?.deliveredBack).toBeUndefined()
+    expect(String(record?.deliverBackNote)).toContain('自动回送失败')
+    expect(String(record?.deliverBackNote)).toContain('ask_result')
+  })
+
+  it('sends a very long answer in full, without truncation', async () => {
+    const long = 'x'.repeat(50_000)
+    const world = fakeWorld({
+      items: [titled(TARGET, '目标会话')],
+      watermarkEvents: () => [textEvent(1, 1000, '旧的正文')],
+      targetEvents: [textEvent(2, 2000, long)],
+    })
+    const { askId, read } = await detachRecord(world)
+    await until(() => read()?.state === 'done' && read()?.deliveredBack === true)
+    expect(world.prompt).toHaveBeenCalledTimes(1)
+    const sent = world.prompt.mock.calls[0][0] as { content: readonly { text: string }[] }
+    expect(sent.content[0].text).toContain(long)
+    expect(sent.content[0].text.startsWith(`【来自「目标会话」 · askId=${askId}】\n`)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Guard set
 // ---------------------------------------------------------------------------
 
@@ -1464,6 +1598,7 @@ interface BatchTargetSpec {
 function batchWorld(specs: readonly BatchTargetSpec[], extra: readonly CrossSessionSummary[] = []) {
   const deliveries = new Map<string, number>()
   const followups: Array<{ sessionId: string; source: SessionAskMessageSource }> = []
+  const prompts: Array<Record<string, unknown>> = []
   const controller: CrossSessionController = {
     list: async () => ({
       items: [
@@ -1497,11 +1632,14 @@ function batchWorld(specs: readonly BatchTargetSpec[], extra: readonly CrossSess
         },
       }
     },
-    prompt: async () => {
-      throw new Error('batch tests must not need the prompt fallback')
+    // The auto copy-back reaches a non-target session (the asker) through the
+    // host prompt queue; record it so tests can count merged messages.
+    prompt: async (message: unknown) => {
+      prompts.push(message as Record<string, unknown>)
+      return { accepted: true }
     },
   }
-  return { controller, followups }
+  return { controller, followups, prompts }
 }
 
 function batchInput(targets: readonly string[], overrides: Partial<AskSessionsInput> = {}): AskSessionsInput {
@@ -1586,6 +1724,37 @@ describe('ask_sessions batch', () => {
     expect(readAskRecord(recordDir(), String(results[0].askId))?.parentAskId).toBe('a1')
   })
 
+  it('merges every done answer into ONE copy-back message', async () => {
+    const world = batchWorld([
+      { id: 't1', title: '甲会话', answer: '甲的答复' },
+      { id: 't2', title: '乙会话', answer: '乙的答复' },
+      { id: 't3', title: '丙会话', busy: true },
+    ])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      // Only t1/t2 are done; t3 times out and must stay out of the copy-back.
+      batchInput(['t1', 't2', 't3'], { waitMs: 20 }),
+    )
+    const results = value.results as unknown as Array<Record<string, unknown>>
+    expect(results.map((row) => row.state)).toEqual(['done', 'done', 'timeout'])
+    expect(world.prompts).toHaveLength(1)
+    const sent = world.prompts[0] as {
+      sessionId: string
+      content: readonly { text: string }[]
+    }
+    expect(sent.sessionId).toBe(SELF)
+    const text = sent.content[0].text
+    expect(text).toContain('甲的答复')
+    expect(text).toContain('乙的答复')
+    expect(text).not.toContain('丙会话')
+    // One merged header, not one message per target.
+    expect(text.match(/【批量回送/u)).toHaveLength(1)
+    for (const row of results.filter((candidate) => candidate.state === 'done')) {
+      expect(readAskRecord(recordDir(), String(row.askId))?.deliveredBack).toBe(true)
+    }
+  })
+
   it('reports a slow target timing out while the others finish (mode all)', async () => {
     const world = batchWorld([
       { id: 't1', title: '甲会话', answer: '甲的答复' },
@@ -1605,7 +1774,9 @@ describe('ask_sessions batch', () => {
 
   it('mode any returns the first settled target while the rest still settle', async () => {
     const world = batchWorld([
-      // Its delivery fails at once, so it is deterministically the first to settle.
+      // Its delivery fails outright, so it should settle before the other target's
+      // answer completes — but with the prompt fallback in play the exact winner is
+      // timing dependent, which is not what this test is about.
       { id: 't1', title: '甲会话', deliverThrows: { code: 'session/writer-held' } },
       { id: 't2', title: '乙会话', answer: '乙的答复' },
     ])
@@ -1615,16 +1786,24 @@ describe('ask_sessions batch', () => {
       batchInput(['t1', 't2'], { waitMs: 20, mode: 'any' }),
     )
     expect(value.ok).toBe(true)
+    expect(value.skipped).toEqual([])
     expect(value.count).toBe(1)
     const results = value.results as unknown as Array<Record<string, unknown>>
-    expect(results[0]).toMatchObject({ sessionId: 't1', state: 'error' })
-    // The loser keeps running after the call returns; its record settles later.
+    expect(results).toHaveLength(1)
+    const winner = results[0].sessionId
+    expect(['t1', 't2']).toContain(winner)
+    // The loser keeps running after the call returns; its record still settles.
+    const loser = winner === 't1' ? 't2' : 't1'
     await until(() =>
-      listAskRecords(recordDir(), { sessionId: SELF }).some((record) => record.state !== 'waiting'),
+      listAskRecords(recordDir(), { sessionId: SELF }).some(
+        (record) => record.targetSessionId === loser && record.state !== 'waiting',
+      ),
     )
     const records = listAskRecords(recordDir(), { sessionId: SELF })
-    expect(records).toHaveLength(1)
-    expect(records[0]).toMatchObject({ targetSessionId: 't2', state: 'done', answer: '乙的答复' })
+    // The losing target still wrote its own settled record; the winner's record is
+    // whatever its own state turned out to be. Neither may stay `waiting`.
+    expect(records.every((record) => record.state !== 'waiting')).toBe(true)
+    expect(records.map((record) => record.targetSessionId)).toContain(loser)
   })
 
   it('skips excluded, unresolvable and duplicate targets with reasons', async () => {

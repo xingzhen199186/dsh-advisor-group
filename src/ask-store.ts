@@ -36,6 +36,10 @@ export interface AskRecord {
   status?: 'ok' | 'partial' | 'failed'
   note?: string
   error?: string
+  /** True once the answer was copied back into the asking session. */
+  deliveredBack?: boolean
+  /** Why the automatic copy-back did not happen (the record stays readable). */
+  deliverBackNote?: string
 }
 
 /** askId doubles as a file name, so it must never escape the store directory. */

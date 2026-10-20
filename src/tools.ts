@@ -631,6 +631,7 @@ export function registerAdvisorTools(
         waitMs: answerMode.waitMs,
         detach: answerMode.detach,
         exclude: hidden,
+        deliverBack: swarm.deliverBack !== false,
         log: (message) => console.log(`[dsh-advisor-group] ask_session: ${message}`),
       })) as Record<string, unknown>
 
@@ -786,6 +787,7 @@ export function registerAdvisorTools(
         defaultWaitMs: swarm.defaultWaitMs,
         exclude: exclusionEntries(swarm),
         swarmEnabled: swarm.enabled !== false,
+        deliverBack: swarm.deliverBack !== false,
         log: (message) => console.log(`[dsh-advisor-group] ask_sessions: ${message}`),
       })
     },
@@ -966,6 +968,10 @@ export function registerAdvisorTools(
                 error: { type: 'string' },
                 /** Display only: body probed from a still-waiting target. */
                 provisional: { type: 'string' },
+                /** True when the settled answer was copied back automatically. */
+                deliveredBack: { type: 'boolean' },
+                /** Why the automatic copy-back did not happen, when it failed. */
+                deliverBackNote: { type: 'string' },
               },
             },
           },
@@ -1068,9 +1074,13 @@ export function renderAskRecords(rows: readonly AskRecordRow[]): string {
   }
   return rows
     .map((row) => {
-      const head = `- [${stateLabel[row.state]}] ${row.targetName} · askId=${row.askId}`
+      const head = `- [${stateLabel[row.state]}] ${row.targetName} · askId=${row.askId}${
+        row.deliveredBack === true ? ' · 已自动回送' : ''
+      }`
       const parent = row.parentAskId === undefined ? '' : `  （由 ${row.parentAskId} 转问）`
       const question = `  问题：${row.question.replace(/\s+/gu, ' ').slice(0, 120)}`
+      const backNote =
+        row.deliverBackNote === undefined ? '' : `  回送说明：${row.deliverBackNote.replace(/\s+/gu, ' ')}`
       const body =
         row.reply !== undefined
           ? [
@@ -1089,7 +1099,9 @@ export function renderAskRecords(rows: readonly AskRecordRow[]): string {
         row.provisional === undefined ? '' : (provisionalBodySection(row.provisional) ?? '')
       const provisionalLines =
         provisional.length === 0 ? [] : provisional.split('\n').map((line) => `  ${line}`)
-      return [head, parent, question, body, ...provisionalLines].filter((line) => line.length > 0).join('\n')
+      return [head, parent, question, body, backNote, ...provisionalLines]
+        .filter((line) => line.length > 0)
+        .join('\n')
     })
     .join('\n\n')
 }
