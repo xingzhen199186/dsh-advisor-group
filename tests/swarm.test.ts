@@ -51,8 +51,8 @@ vi.mock('../src/cross-session', async (importOriginal) => {
 })
 
 import { Config, unwrapVolatileConfig, type Config as ConfigShape } from '../src/config'
-import { registerAdvisorTools, resolveAskDefaults, visibleRosterSessions } from '../src/tools'
-import { askStoreDir, writeAskRecord, type AskRecord } from '../src/ask-store'
+import { registerAdvisorTools, renderAskRecords, resolveAskDefaults, visibleRosterSessions } from '../src/tools'
+import { askStoreDir, ASK_BOOT_ID, readAskRecord, writeAskRecord, type AskRecord } from '../src/ask-store'
 import { askStoreRoot } from '../src/cross-session'
 import type { AdvisorGroupService } from '../src/service'
 
@@ -319,6 +319,7 @@ describe('ask_result prunes expired detached results', () => {
       state: 'waiting',
       createdAt,
       from: new Date(createdAt).toISOString(),
+      bootId: ASK_BOOT_ID,
     }
   }
 
@@ -348,5 +349,26 @@ describe('ask_result prunes expired detached results', () => {
     writeAskRecord(dir, record('two-hours-old', Date.now() - 2 * HOUR))
     // 100000 → clamped to 720 hours: the same record survives.
     await expect(listedIds(100000)).resolves.toEqual(['two-hours-old'])
+  })
+
+  it('settles a wait left by an earlier host as interrupted', async () => {
+    const dir = askStoreDir(join(home, 'storages', 'advisor-group'))
+    writeAskRecord(dir, { ...record('orphan', Date.now()), bootId: 'previous-boot' })
+    const value = await run(swarmConfig({ resultTtlHours: 24 }), 'ask_result')
+    expect(value.ok).toBe(true)
+    const results = value.results as Array<{ askId: string; state: string }>
+    expect(results.find((row) => row.askId === 'orphan')?.state).toBe('interrupted')
+    expect(readAskRecord(dir, 'orphan')?.state).toBe('interrupted')
+    const text = renderAskRecords(value.results as never)
+    expect(text).toContain('已中断')
+    expect(text).toContain('重启')
+  })
+})
+
+describe('list_sessions degradation note', () => {
+  it('says when the workspace registry filter could not run', async () => {
+    const value = await run(swarmConfig(), 'list_sessions', {}, selfExec())
+    expect(value.ok).toBe(true)
+    expect(String(value.note)).toContain('未提供工作区登记')
   })
 })

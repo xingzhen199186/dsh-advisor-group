@@ -35,7 +35,7 @@ import {
 import type { ConsultSession, ConsultSummary } from './types'
 import type { Config } from './config'
 import { buildSessionRoster, renderRoster, shortSessionName, withSessionLogSizes, type RosterRow, type RosterSource } from './session-roster'
-import { listAskRecords, pruneAskRecords, readAskRecord, type AskRecord } from './ask-store'
+import { listAskRecords, pruneAskRecords, readAskRecord, reconcileStaleAsk, writeAskRecord, type AskRecord } from './ask-store'
 import { askSessions } from './multi-ask'
 import type { Session } from '@deepseek-ai/dsh-session'
 
@@ -845,6 +845,8 @@ export function registerAdvisorTools(
           },
           error: { type: 'string' },
           message: { type: 'string' },
+          // Present only when a degradation changed what the list means.
+          note: { type: 'string' },
         },
       },
       render: (args, value) =>
@@ -852,9 +854,11 @@ export function registerAdvisorTools(
           ? [
               {
                 type: 'text',
-                text: renderRoster(value.sessions as RosterRow[], {
-                  filtered: String(args.query ?? '').trim().length > 0,
-                }),
+                text:
+                  renderRoster(value.sessions as RosterRow[], {
+                    filtered: String(args.query ?? '').trim().length > 0,
+                  }) +
+                  (typeof value.note === 'string' && value.note.length > 0 ? `\n\n${value.note}` : ''),
               },
             ]
           : [
@@ -903,7 +907,16 @@ export function registerAdvisorTools(
         // Same short display names the rendered text uses, so the structured
         // rows never show a full path twice for a title-less session.
         const sessions = rows.map((row) => ({ ...row, name: shortSessionName(row.name, row.cwd) }))
-        return { ok: true, count: sessions.length, sessions }
+        return {
+          ok: true,
+          count: sessions.length,
+          sessions,
+          // Degradation stays visible: without a registry the list cannot be
+          // restricted to the sessions the sidebar shows.
+          ...(registered === undefined
+            ? { note: '当前宿主未提供工作区登记信息，名录未做「只显示侧栏可见会话」的过滤。' }
+            : {}),
+        }
       } catch (error) {
         return {
           ok: false,
@@ -920,7 +933,7 @@ export function registerAdvisorTools(
   const askResultTool = defineTool({
     name: 'ask_result',
     description:
-      "Read the result of a detached ask_session (called with detach: true). Pass askId for one result, or omit it to list this session's recent asks. States: waiting (the peer is still working — this is NOT a failure and NOT a reason to ask again; the send was already durable), done (answer ready), timeout (the wait window ended; a partial answer may exist), error. Read-only: it never wakes the target.",
+      "Read the result of a detached ask_session (called with detach: true). Pass askId for one result, or omit it to list this session's recent asks. States: waiting (the peer is still working — this is NOT a failure and NOT a reason to ask again; the send was already durable), done (answer ready), timeout (the wait window ended; a partial answer may exist), error, interrupted (the host restarted while waiting, so the answer was never collected — check the target session or ask again). Read-only: it never wakes the target.",
     parameters: {
       askId: {
         type: 'string',
@@ -1054,10 +1067,20 @@ async function withProvisionalBodies(
   controller: CrossSessionController | undefined,
   records: readonly AskRecord[],
 ): Promise<AskRecordRow[]> {
-  if (controller === undefined) return records.map((row) => ({ ...row }))
   return Promise.all(
     records.map(async (row) => {
-      if (row.state !== 'waiting') return { ...row }
+      // A wait opened by an earlier host process can never settle: its loop is
+      // gone with that process. Mark it instead of showing 「等待中」 forever.
+      const stale = reconcileStaleAsk(row)
+      if (stale !== undefined) {
+        try {
+          writeAskRecord(askStoreRoot(), stale)
+        } catch (error) {
+          console.warn('[dsh-advisor-group] 中断记录落盘失败：', error)
+        }
+        return { ...stale }
+      }
+      if (row.state !== 'waiting' || controller === undefined) return { ...row }
       const text = await probeWaitingBody(controller, row)
       return text === undefined ? { ...row } : { ...row, provisional: text }
     }),
@@ -1071,6 +1094,7 @@ export function renderAskRecords(rows: readonly AskRecordRow[]): string {
     done: '已完成',
     timeout: '超时',
     error: '出错',
+    interrupted: '已中断',
   }
   return rows
     .map((row) => {
@@ -1099,7 +1123,11 @@ export function renderAskRecords(rows: readonly AskRecordRow[]): string {
         row.provisional === undefined ? '' : (provisionalBodySection(row.provisional) ?? '')
       const provisionalLines =
         provisional.length === 0 ? [] : provisional.split('\n').map((line) => `  ${line}`)
-      return [head, parent, question, body, backNote, ...provisionalLines]
+      const note =
+        row.note === undefined || row.note.length === 0
+          ? ''
+          : `  说明：${row.note.replace(/\s+/gu, ' ')}`
+      return [head, parent, question, body, note, backNote, ...provisionalLines]
         .filter((line) => line.length > 0)
         .join('\n')
     })

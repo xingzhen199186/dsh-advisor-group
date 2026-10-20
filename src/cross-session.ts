@@ -23,7 +23,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { askStoreDir, writeAskRecord, type AskRecord } from './ask-store'
+import { ASK_BOOT_ID, askStoreDir, writeAskRecord, type AskRecord } from './ask-store'
 import { isSessionExcluded, type JevDecisionLogEntry } from './session-router'
 
 /** Maximum combined UTF-8 bytes of question + context (design §六.5). */
@@ -1737,6 +1737,8 @@ async function runAsk(
       state: 'waiting',
       createdAt: Date.now(),
       from,
+      bootId: ASK_BOOT_ID,
+      fromSeq: delivery.receipt.fromSeq,
       ...(parentAskId === undefined ? {} : { parentAskId }),
     }
     try {

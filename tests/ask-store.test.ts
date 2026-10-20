@@ -3,10 +3,12 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  ASK_BOOT_ID,
   askStoreDir,
   listAskRecords,
   pruneAskRecords,
   readAskRecord,
+  reconcileStaleAsk,
   writeAskRecord,
   type AskRecord,
 } from '../src/ask-store'
@@ -173,5 +175,30 @@ describe('pruneAskRecords', () => {
 
   it('is a no-op on a missing store directory', () => {
     expect(pruneAskRecords(askStoreDir(freshDir()), 1000, 100000)).toBe(0)
+  })
+})
+
+describe('reconcileStaleAsk', () => {
+  it('marks a wait left by an earlier process as interrupted', () => {
+    const settled = reconcileStaleAsk(makeRecord('ask-stale', { bootId: 'previous-boot' }), 'current-boot')
+    expect(settled?.state).toBe('interrupted')
+    expect(settled?.note).toContain('重启')
+    expect(typeof settled?.settledAt).toBe('number')
+  })
+
+  it('leaves a wait owned by this process alone', () => {
+    expect(reconcileStaleAsk(makeRecord('ask-live', { bootId: ASK_BOOT_ID }))).toBeUndefined()
+  })
+
+  it('does not rewrite a settled record', () => {
+    expect(
+      reconcileStaleAsk(makeRecord('ask-done', { state: 'done', bootId: 'previous-boot' }), 'current-boot'),
+    ).toBeUndefined()
+  })
+
+  it('treats a legacy waiting record without a boot id as stale', () => {
+    const settled = reconcileStaleAsk(makeRecord('ask-legacy'), 'current-boot')
+    expect(settled?.state).toBe('interrupted')
+    expect(settled?.note).toContain('更早')
   })
 })

@@ -57,7 +57,7 @@ import {
   type CrossSessionSummary,
   type SessionAskMessageSource,
 } from '../src/cross-session'
-import { askStoreDir, listAskRecords, readAskRecord, type AskRecord } from '../src/ask-store'
+import { ASK_BOOT_ID, askStoreDir, listAskRecords, readAskRecord, type AskRecord } from '../src/ask-store'
 import { registerAdvisorTools, renderAskRecords } from '../src/tools'
 import { askSessions, type AskSessionsInput } from '../src/multi-ask'
 import type { AdvisorGroupService } from '../src/service'
@@ -790,6 +790,12 @@ describe('detached ask records the parent ask', () => {
     const record = await detachAndRead([userEvent(1, 1, { kind: 'user' })])
     expect(record).toBeDefined()
     expect(record?.parentAskId).toBeUndefined()
+  })
+
+  it('stamps the wait with this host process and the delivery watermark', async () => {
+    const record = await detachAndRead([])
+    expect(record?.bootId).toBe(ASK_BOOT_ID)
+    expect(typeof record?.fromSeq).toBe('number')
   })
 })
 

@@ -4,8 +4,10 @@ import {
   buildStepSequence,
   buildToolStepViews,
   extractActionDescription,
+  mergeLiveOverlay,
   sanitizeClientContent,
   type AdvisorGroupState,
+  type LiveBucket,
 } from '../src/client/index'
 
 function baseState(): AdvisorGroupState {
@@ -346,5 +348,77 @@ describe('cross-session ask card state', () => {
     expect(state.status).toBe('completed')
     expect(state.summary?.conclusion).toBe('区间语义说明')
     expect(state.mode).toBe('ask')
+  })
+})
+
+describe('live overlay merge (SSE × durable messages)', () => {
+  const message = {
+    sessionId: 'session-1',
+    turn: 1,
+    step: 1,
+    role: 'advisor' as const,
+    advisorId: 'advisor-a',
+    advisorName: '顾问A',
+    round: 1,
+    content: '持久化正文',
+  }
+
+  function bucket(overrides: Partial<LiveBucket> = {}): LiveBucket {
+    return {
+      content: '',
+      thinking: '',
+      thinkingSegments: [],
+      committedLen: 0,
+      contentSegments: [],
+      committedContentLen: 0,
+      phase: 'answer',
+      finalized: false,
+      toolSteps: [],
+      ...overrides,
+    }
+  }
+
+  it('hands authority back to the durable message once finalized', () => {
+    const merged = mergeLiveOverlay([message], {
+      'advisor-a::1': bucket({ content: '流式内容', finalized: true }),
+    })
+    expect(merged[0]?.content).toBe('持久化正文')
+  })
+
+  it('streams the uncommitted live text as the body', () => {
+    const merged = mergeLiveOverlay([message], {
+      'advisor-a::1': bucket({ content: '流式正文' }),
+    })
+    expect(merged[0]?.content).toBe('流式正文')
+  })
+
+  it('keeps a tool-phase body separate and marks the phase', () => {
+    const merged = mergeLiveOverlay([message], {
+      'advisor-a::1': bucket({ content: '我先读一下文件', phase: 'tool' }),
+    })
+    expect(merged[0]?.livePhase).toBe('tool')
+    expect(merged[0]?.liveBody).toBe('我先读一下文件')
+  })
+
+  it('buckets deltas by advisor and round', () => {
+    const secondRound = { ...message, round: 2, content: '第二轮持久化' }
+    const merged = mergeLiveOverlay([message, secondRound], {
+      'advisor-a::2': bucket({ content: '第二轮流式' }),
+    })
+    expect(merged[0]?.content).toBe('持久化正文')
+    expect(merged[1]?.content).toBe('第二轮流式')
+  })
+
+  it('prefers longer live thinking and its committed segments', () => {
+    const merged = mergeLiveOverlay([message], {
+      'advisor-a::1': bucket({
+        thinking: '更长的实时思考',
+        thinkingSegments: ['第一段'],
+        contentSegments: ['行动一'],
+      }),
+    })
+    expect(merged[0]?.thinking).toBe('更长的实时思考')
+    expect(merged[0]?.thinkingSegments).toEqual(['第一段'])
+    expect(merged[0]?.actionDescriptions).toEqual(['行动一'])
   })
 })

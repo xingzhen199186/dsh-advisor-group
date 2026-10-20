@@ -10,6 +10,14 @@
  */
 import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+
+/**
+ * Identity of this host process. A record created by another process can no
+ * longer be waited on (its background loop died with that process), so a
+ * `waiting` record carrying a different boot id is reconciled when read.
+ */
+export const ASK_BOOT_ID = randomUUID()
 
 /** One persisted detached ask. `reply` mirrors the structured answer fields. */
 export interface AskRecord {
@@ -19,7 +27,7 @@ export interface AskRecord {
   targetSessionId: string
   targetName: string
   question: string
-  state: 'waiting' | 'done' | 'timeout' | 'error'
+  state: 'waiting' | 'done' | 'timeout' | 'error' | 'interrupted'
   createdAt: number
   settledAt?: number
   /** ISO time at which the question was delivered. */
@@ -40,11 +48,15 @@ export interface AskRecord {
   deliveredBack?: boolean
   /** Why the automatic copy-back did not happen (the record stays readable). */
   deliverBackNote?: string
+  /** Host process that opened the wait (see {@link ASK_BOOT_ID}). */
+  bootId?: string
+  /** Target log watermark at delivery; lets a later read tell old from new text. */
+  fromSeq?: number
 }
 
 /** askId doubles as a file name, so it must never escape the store directory. */
 const ASK_ID_PATTERN = /^[A-Za-z0-9._-]{1,80}$/
-const STATES = new Set<AskRecord['state']>(['waiting', 'done', 'timeout', 'error'])
+const STATES = new Set<AskRecord['state']>(['waiting', 'done', 'timeout', 'error', 'interrupted'])
 
 /** The store directory for a base dir such as `$DSH_HOME/storages/advisor-group`. */
 export function askStoreDir(baseDir: string): string {
@@ -76,6 +88,25 @@ function parseRecord(text: string): AskRecord | undefined {
     return undefined
   }
   return isAskRecord(value) ? value : undefined
+}
+
+/**
+ * Settle a `waiting` record whose wait belonged to a previous host process.
+ * The background loop that would have collected the answer died with that
+ * process, so leaving the record `waiting` promises something that will never
+ * happen. Returns the rewritten record, or undefined when nothing is stale.
+ */
+export function reconcileStaleAsk(record: AskRecord, bootId: string = ASK_BOOT_ID): AskRecord | undefined {
+  if (record.state !== 'waiting' || record.bootId === bootId) return undefined
+  return {
+    ...record,
+    state: 'interrupted',
+    settledAt: Date.now(),
+    note:
+      record.bootId === undefined
+        ? '这条异步提问来自更早的插件版本，等待状态已无法确认；对方可能已经作答，但答案没有被自动收回。请到对方会话里查看，或重新提问。'
+        : '宿主在等待期间重启，等待被中断；对方可能已经作答，但答案没有被自动收回。请到对方会话里查看，或重新提问。',
+  }
 }
 
 /**

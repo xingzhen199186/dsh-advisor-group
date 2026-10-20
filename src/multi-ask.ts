@@ -11,7 +11,7 @@
  * for resolution and the per-target guards. There is no routing here: an
  * unnamed or ambiguous target is skipped with a reason, never guessed.
  */
-import { writeAskRecord, readAskRecord, type AskRecord } from './ask-store'
+import { ASK_BOOT_ID, writeAskRecord, readAskRecord, type AskRecord } from './ask-store'
 import {
   allowedAskSessions,
   ARCHIVED_SESSION_MESSAGE,
@@ -187,6 +187,8 @@ async function askOne(plan: DeliveryPlan, batch: BatchContext): Promise<BatchAsk
       state: 'waiting',
       createdAt: Date.now(),
       from,
+      bootId: ASK_BOOT_ID,
+      fromSeq: delivery.receipt.fromSeq,
       ...(batch.parentAskId === undefined ? {} : { parentAskId: batch.parentAskId }),
     }
     record = waitingRecord

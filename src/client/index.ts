@@ -904,6 +904,81 @@ function AdvisorSteps({
 /** Auto-hide delay for transient card notices (request failures, resync). */
 const NOTICE_TTL_MS = 6000
 
+/** One SSE bucket: every live delta for one advisor in one round. */
+export interface LiveBucket {
+  content: string
+  thinking: string
+  thinkingSegments: string[]
+  committedLen: number
+  /** Text committed at each tool boundary — the per-round 📋 行动 rows. */
+  contentSegments: string[]
+  committedContentLen: number
+  /** Latest stream phase: 'tool' = current text is a round announcement,
+   *  'answer' = current text is the final answer body. */
+  phase: 'tool' | 'answer'
+  /** Set when the `done` frame arrives; from then on the durable message
+   *  (final answer + actionDescriptions + toolSteps) is authoritative. */
+  finalized: boolean
+  toolSteps: Array<{ kind: string; name: string; text: string; atMs?: number }>
+}
+
+export type LiveOverlay = Record<string, LiveBucket>
+
+/**
+ * Merge the SSE live overlay into the durable messages, per `advisorId::round`.
+ * Pure and exported so the rules that matter — `done` hands authority back to
+ * the durable message, only uncommitted text streams as the body, a tool-phase
+ * body is a pending 📋 action — are testable without a browser.
+ */
+export function mergeLiveOverlay(
+  messages: AdvisorGroupState['messages'],
+  live: LiveOverlay,
+): Array<AdvisorGroupState['messages'][number] & { liveBody?: string; livePhase?: 'tool' | 'answer' }> {
+  return messages.map((message) => {
+    if (message.role !== 'advisor') return message
+    const advisorId = message.advisorId ?? ''
+    const streamed = live[`${advisorId}::${message.round ?? 1}`]
+    if (!streamed) return message
+    // Once the server published `done`, the durable message event is the full
+    // final answer (content + actionDescriptions + thinkingSegments + toolSteps)
+    // and the cumulative SSE buffer must NOT override it.
+    if (streamed.finalized) return message
+    // Body: only the current round's uncommitted text. Text committed at tool
+    // boundaries is rendered as 📋 行动 rows (official text → reasoning → tool).
+    const liveBody = sanitizeClientContent(streamed.content.slice(streamed.committedContentLen))
+    const content = liveBody.trim() ? liveBody : sanitizeClientContent(message.content)
+    const thinking =
+      (streamed.thinking?.length ?? 0) > (message.thinking?.length ?? 0)
+        ? streamed.thinking
+        : message.thinking
+    const toolSteps =
+      (streamed.toolSteps?.length ?? 0) > (message.toolSteps?.length ?? 0)
+        ? streamed.toolSteps
+        : message.toolSteps ?? []
+    const liveSegments = streamed.thinkingSegments?.length ? streamed.thinkingSegments : []
+    const baseSegments = message.thinkingSegments?.length
+      ? message.thinkingSegments
+      : message.thinking
+        ? [message.thinking]
+        : []
+    const thinkingSegments = liveSegments.length ? liveSegments : baseSegments
+    const liveActions = streamed.contentSegments?.length
+      ? streamed.contentSegments.map((segment) => sanitizeClientContent(segment))
+      : []
+    const baseActions = message.actionDescriptions?.length ? message.actionDescriptions : []
+    const actionDescriptions = liveActions.length ? liveActions : baseActions
+    return {
+      ...message,
+      content,
+      thinking,
+      thinkingSegments,
+      toolSteps,
+      actionDescriptions,
+      ...(streamed.phase === 'tool' ? { liveBody, livePhase: streamed.phase } : {}),
+    } as AdvisorGroupState['messages'][number] & { liveBody?: string; livePhase?: 'tool' | 'answer' }
+  })
+}
+
 function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactNode {
   const data = props.node.data
   const sessionId = data.sessionId
@@ -914,27 +989,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
   // SSE live overlay bucketed by `advisorId::round` so multi-round relays never
   // leak a later round's deltas into an earlier round's bubble (see the
   // sequential auto-deepen pipeline). Durable messages stay the base of truth.
-  const [live, setLive] = useState<
-    Record<
-      string,
-      {
-        content: string
-        thinking: string
-        thinkingSegments: string[]
-        committedLen: number
-        /** Text committed at each tool boundary — the per-round 📋 行动 rows. */
-        contentSegments: string[]
-        committedContentLen: number
-        /** Latest stream phase: 'tool' = current text is a round announcement,
-         *  'answer' = current text is the final answer body. */
-        phase: 'tool' | 'answer'
-        /** Set when the `done` frame arrives; from then on the durable message
-         *  (final answer + actionDescriptions + toolSteps) is authoritative. */
-        finalized: boolean
-        toolSteps: Array<{ kind: string; name: string; text: string; atMs?: number }>
-      }
-    >
-  >({})
+  const [live, setLive] = useState<LiveOverlay>({})
   const [contextCollapsed, setContextCollapsed] = useState(true)
   const lastEventIdRef = useRef(0)
   const lastBootIdRef = useRef('')
@@ -1110,49 +1165,7 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
     }
   }, [sessionId, streamTokenReady])
 
-  const mergedMessages = data.messages.map((message) => {
-    if (message.role !== 'advisor') return message
-    const advisorId = message.advisorId ?? ''
-    const streamed = live[`${advisorId}::${message.round ?? 1}`]
-    if (!streamed) return message
-    // Once the server published `done`, the durable message event is the full
-    // final answer (content + actionDescriptions + thinkingSegments + toolSteps)
-    // and the cumulative SSE buffer must NOT override it.
-    if (streamed.finalized) return message
-    // Body: only the current round's uncommitted text. Text committed at tool
-    // boundaries is rendered as 📋 行动 rows (official text → reasoning → tool).
-    const liveBody = sanitizeClientContent(streamed.content.slice(streamed.committedContentLen))
-    const content = liveBody.trim() ? liveBody : sanitizeClientContent(message.content)
-    const thinking =
-      (streamed.thinking?.length ?? 0) > (message.thinking?.length ?? 0)
-        ? streamed.thinking
-        : message.thinking
-    const toolSteps =
-      (streamed.toolSteps?.length ?? 0) > (message.toolSteps?.length ?? 0)
-        ? streamed.toolSteps
-        : message.toolSteps ?? []
-    const liveSegments = streamed.thinkingSegments?.length ? streamed.thinkingSegments : []
-    const baseSegments = message.thinkingSegments?.length
-      ? message.thinkingSegments
-      : message.thinking
-        ? [message.thinking]
-        : []
-    const thinkingSegments = liveSegments.length ? liveSegments : baseSegments
-    const liveActions = streamed.contentSegments?.length
-      ? streamed.contentSegments.map((segment) => sanitizeClientContent(segment))
-      : []
-    const baseActions = message.actionDescriptions?.length ? message.actionDescriptions : []
-    const actionDescriptions = liveActions.length ? liveActions : baseActions
-    return {
-      ...message,
-      content,
-      thinking,
-      thinkingSegments,
-      toolSteps,
-      actionDescriptions,
-      ...(streamed.phase === 'tool' ? { liveBody, livePhase: streamed.phase } : {}),
-    } as typeof message & { liveBody?: string; livePhase?: 'tool' | 'answer' }
-  })
+  const mergedMessages = mergeLiveOverlay(data.messages, live)
 
   const shortId = data.sessionId.length > 8 ? data.sessionId.slice(0, 8) : data.sessionId
   const title = isAsk
