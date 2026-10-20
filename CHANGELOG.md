@@ -15,7 +15,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- **The three-line reply convention and the 4,000-character answer cap are gone** (user decision). Asking every target for 「结论 / 依据 / 不确定」 in three lines was compressing broad answers — a five-question ask had to be squeezed into three lines and cost an extra round — while the parts that earned their keep (`status`, askId attribution, the interval note) never depended on it. The delivered envelope now carries only the sender, the question and optional background, the answer is returned whole, and `status` (`ok` | `partial` | `timeout` | `failed`) derives from how the wait ended and whether anything was said. The opportunistic parser stays for peers that answer in that shape anyway.
+- **The three-line reply convention and the 4,000-character answer cap are gone** (user decision). Asking every target for 「结论 / 依据 / 不确定」 in three lines was compressing broad answers — a five-question ask had to be squeezed into three lines and cost an extra round — while the parts that earned their keep (`status`, askId attribution, the interval note) never depended on it. The delivered envelope now carries only the sender, the question and optional background, the answer is returned whole, and `status` (`ok` | `partial` | `failed`) derives from how the wait ended and whether anything was said. The opportunistic parser stays for peers that answer in that shape anyway.
 
 ### Fixed
 
