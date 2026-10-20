@@ -1,6 +1,6 @@
 # dsh-advisor-group
 
-> A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that lets the main model consult **multiple expert advisor models** in a retro chat-group card — for professional, long-tail world-knowledge, high-risk, or uncertain questions.
+> A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that lets one session **borrow wisdom outward and memory sideways** — the main model consults **multiple expert advisor models** in a retro chat-group card for professional, long-tail world-knowledge, high-risk or uncertain questions, and asks **another session** that already knows, instead of re-deriving it from scratch.
 
 [![dsh-plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
 
@@ -59,17 +59,46 @@ npx @deepseek-ai/dsh web
    - type `@顾问群` in your question to force a consultation, or
    - ask a professional/uncertain question — the plugin escalates automatically when appropriate.
 
-`ask_advisors` tools available to the model: `ask_advisors`, `toggle_advisor_group`, `ask_session`.
+Tools available to the model: `ask_advisors`, `toggle_advisor_group`, `ask_session`, `list_sessions`, `ask_result`.
 
-## 🔗 Ask another session
+## 🐝 The global swarm: sessions that can ask each other
 
-Besides consulting advisors, the plugin ships one more tool, `ask_session`: it hands a question to **another live session** (another window or tab in the same host) and wakes that session to answer.
+### One session is an expert with memory
 
-- **Picking the target**: an exact session id, an exact title, or a natural partial name — the workspace directory name is enough (a session under `I:\极简遥控器\…` is found by saying 「极简遥控器」). One match is used directly; several matches become a candidate list (**running** sessions and recently active ones first) for you or the model to choose from. It never guesses.
-- **What you get back**: everything the target said between the **delivery receipt** and its next **whole-session idle** — "what that session said in that window", **not** a one-to-one reply to your message. On timeout (180 s by default, configurable) it returns what it already collected and does **not** interrupt the target.
-- **What you see**: the asking side shows a chat-group card — first "已投递，等待对方回应…", then the target's answer bubble and the "📌 投递说明" note (which delivery channel was used and how the wait ended). A failed target lookup opens no card; the error stays in the tool row.
-- **Guards**: hop ≤ 2 (no ping-pong relay), no self or subagent target, one concurrent wait per session, a 32 KB payload budget; the target's turn is **never** cancelled.
-- **Cost**: one ordinary target turn, billed on the target session's own model; it does **not** count against the daily consultation quota.
+Every session accumulates context: the code it read, the detours it took, the decisions it settled. A session is not a throwaway chat window but a **node with memory** — and re-deriving what another session already knows is both slower and more expensive.
+
+So the plugin does two things: it borrows **wisdom** outward (consulting expert models) and **memory** sideways (asking the session that already knows). Both are opt-in, and neither takes the decision away from you.
+
+### Four principles
+
+1. **Reuse, don't rebuild.** The session that already knows answers better and faster — its context and its cache prefix are warm.
+2. **Peers, no root.** Sessions ask each other as equals; nothing dispatches from the centre. No central bottleneck, and no single session that must know everything.
+3. **Candidates, never autopilot.** Routing proposes candidates with reasons; delivery needs you or the model to name one. Better to ask once more than to wake the wrong session.
+4. **Task-first, never chatter.** Hop limit, one concurrent wait per session, long runs detached so they never block, silent fallback on every failure. **More nodes is not more intelligence — routing quality is.**
+
+### Three tools
+
+| Tool | What it does |
+|---|---|
+| `list_sessions` | The roster: title, working directory, age, running state. Read-only — it never wakes anyone. |
+| `ask_session` | Hands a question to another session and wakes it; waits by default, or with `detach: true` returns an `askId` immediately. |
+| `ask_result` | Reads a detached result (`waiting` / `done` / `timeout` / `error`); the record carries `parentAskId`, so a relay chain can be walked. |
+
+### Finding the one to ask
+
+Without a named target, the plugin scores sessions on **title + working-directory segments** (CJK split into two-character groups), then lets a few hard rules decide: a session's own name spoken in your message, a title keyword, a directory segment. Ties resolve by: running → substantive context → fresher → clearer direction → shorter title.
+
+Optionally add a **Jev** judge (Settings → Plugins → advisor-group → 全局蜂群 → routing engine): the candidates are handed over as a **closed option set** with a "none of these" escape, and a low-confidence answer keeps the local order.
+
+Jev can also judge *whether* a turn should consult another session at all — **off / local prefilter + Jev (default) / every turn**. The default first runs a zero-cost clue prefilter, so only a message that points at another session *and* names no target spends a call. Even a positive judgment only adds one suggestion line to the next system prompt; whether to deliver stays the model's call.
+
+### Practicalities and honest limits
+
+- **Picking the target**: an exact session id, an exact title, or a natural partial name — the workspace directory name is enough (a session under `I:\极简遥控器\…` is found by saying 「极简遥控器」). One match is used directly; several matches become a candidate list. It never guesses.
+- **What you get back**: everything the target said between the **delivery receipt** and its next **whole-session idle** — "what that session said in that window", **not** a one-to-one reply. A `status` (`ok` / `partial` / `failed`) says how trustworthy it is.
+- **What you see**: the asking side shows a chat-group card — "已投递，等待对方回应…", then the answer bubble and the "📌 投递说明" note. A failed lookup opens no card; the error stays in the tool row.
+- **Guards**: hop ≤ 2, no self or subagent target, one concurrent wait per session, a 32 KB payload budget, sessions you list under 「不参与路由的会话」 never appear as candidates and refuse a direct ask; the target's turn is **never** cancelled.
+- **Cost**: one ordinary target turn, billed on the target session's own model; it does **not** count against the daily consultation quota. Detached results are pruned on read, and every Jev decision is logged to `storages/advisor-group/asks/routing-jev.log`.
 
 In one line: say "ask the 极简遥控器 session how far along it is".
 
