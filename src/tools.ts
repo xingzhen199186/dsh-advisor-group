@@ -8,6 +8,8 @@ import { appendAdvisorStart, appendAskAnswer, appendAskStart } from './session-l
 import {
   askSession,
   logJevDecision,
+  probeWaitingBody,
+  provisionalBodySection,
   registeredSessionIds,
   sessionDisplayName,
   ASK_WAIT_DEFAULT_MS,
@@ -18,6 +20,7 @@ import {
   type AskCardDelivery,
   type AskCardSettle,
   type AskReply,
+  type CrossSessionController,
   type CrossSessionLogEvent,
   type CrossSessionSummary,
 } from './cross-session'
@@ -961,6 +964,8 @@ export function registerAdvisorTools(
                 },
                 note: { type: 'string' },
                 error: { type: 'string' },
+                /** Display only: body probed from a still-waiting target. */
+                provisional: { type: 'string' },
               },
             },
           },
@@ -1006,10 +1011,15 @@ export function registerAdvisorTools(
           // Ignore: pruning is best-effort by design.
         }
         const askId = typeof args.askId === 'string' ? args.askId.trim() : ''
-        const results =
+        const records =
           askId.length > 0
             ? [readAskRecord(dir, askId)].filter((row): row is AskRecord => row !== undefined)
             : listAskRecords(dir, sessionId.length > 0 ? { sessionId } : undefined).slice(0, 20)
+        // A waiting record may already have body text on the target's side (the
+        // user sees it in their window long before the target's turn ends).
+        // Probe read-only and attach it for display; the record itself is not
+        // touched and its state stays `waiting`.
+        const results = await withProvisionalBodies(getSessionController(ctx), records)
         return { ok: true, count: results.length, results }
       } catch (error) {
         return {
@@ -1026,8 +1036,30 @@ export function registerAdvisorTools(
   return [askAdvisors, toggleAdvisorGroup, askSessionTool, askSessionsTool, listSessionsTool, askResultTool]
 }
 
+/** A record plus the read-only provisional body probed for display. */
+export type AskRecordRow = AskRecord & { readonly provisional?: string }
+
+/**
+ * Attach the provisional body to still-waiting records (display only). Skips
+ * the probe entirely when the host exposes no session controller, and a failed
+ * probe leaves the record unchanged, so the old output survives.
+ */
+async function withProvisionalBodies(
+  controller: CrossSessionController | undefined,
+  records: readonly AskRecord[],
+): Promise<AskRecordRow[]> {
+  if (controller === undefined) return records.map((row) => ({ ...row }))
+  return Promise.all(
+    records.map(async (row) => {
+      if (row.state !== 'waiting') return { ...row }
+      const text = await probeWaitingBody(controller, row)
+      return text === undefined ? { ...row } : { ...row, provisional: text }
+    }),
+  )
+}
+
 /** One compact block per detached ask result, for the model to read. */
-function renderAskRecords(rows: readonly AskRecord[]): string {
+export function renderAskRecords(rows: readonly AskRecordRow[]): string {
   const stateLabel: Record<AskRecord['state'], string> = {
     waiting: '等待中',
     done: '已完成',
@@ -1053,7 +1085,11 @@ function renderAskRecords(rows: readonly AskRecord[]): string {
             : row.error !== undefined
               ? `  错误：${row.error}`
               : ''
-      return [head, parent, question, body].filter((line) => line.length > 0).join('\n')
+      const provisional =
+        row.provisional === undefined ? '' : (provisionalBodySection(row.provisional) ?? '')
+      const provisionalLines =
+        provisional.length === 0 ? [] : provisional.split('\n').map((line) => `  ${line}`)
+      return [head, parent, question, body, ...provisionalLines].filter((line) => line.length > 0).join('\n')
     })
     .join('\n\n')
 }

@@ -508,6 +508,64 @@ export function joinAnswerPieces(pieces: readonly string[]): string {
   return pieces.join('\n\n')
 }
 
+/** A provisional body longer than this is truncated for display. */
+export const PROVISIONAL_BODY_LIMIT = 2000
+
+/**
+ * Reconstruct the delivery watermark from the recorded delivery time: the
+ * highest event seq at or before `fromMs`. The waiting record does not persist
+ * the seq cut, so this recovers an equivalent floor from timestamps for a
+ * read-only probe (settling still uses the real recorded watermark).
+ * @param events - the target's log events in order.
+ * @param fromMs - delivery time in ms since epoch.
+ */
+export function deliveryWatermark(events: readonly CrossSessionLogEvent[], fromMs: number): number {
+  if (!Number.isFinite(fromMs)) return -1
+  let highest = -1
+  for (const event of events) {
+    if (!Number.isFinite(event.time) || event.time > fromMs) continue
+    if (typeof event.seq === 'number' && event.seq > highest) highest = event.seq
+  }
+  return highest
+}
+
+/**
+ * Read-only probe for a still-waiting detached ask: did the target already
+ * write body text after this delivery? Reuses {@link collectAnswer} with the
+ * reconstructed watermark. Display only — nothing is written back and the
+ * record stays `waiting`. Any failure (bad timestamp, missing agent, host
+ * error) returns undefined so the caller keeps the old output.
+ */
+export async function probeWaitingBody(
+  controller: CrossSessionController,
+  record: { readonly targetSessionId: string; readonly from: string },
+): Promise<string | undefined> {
+  try {
+    const fromMs = Date.parse(record.from)
+    if (!Number.isFinite(fromMs)) return undefined
+    const resolved = await controller.resolveAgent(record.targetSessionId)
+    if (!('agent' in resolved) || !resolved.agent) return undefined
+    const events = agentEvents(resolved.agent)
+    const text = joinAnswerPieces(collectAnswer(events, deliveryWatermark(events, fromMs)).pieces).trim()
+    return text.length > 0 ? text : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * One labelled provisional-body block (display only), truncated with a note.
+ * @param text - the body collected so far.
+ * @returns a two-part block, or undefined when there is no body.
+ */
+export function provisionalBodySection(text: string): string | undefined {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return undefined
+  const body = trimmed.slice(0, PROVISIONAL_BODY_LIMIT)
+  const cut = trimmed.length > PROVISIONAL_BODY_LIMIT ? '\n…（正文过长，仅显示前 2000 字）' : ''
+  return `（尚未落定：目标可能仍在继续，下面是目前已收到的正文）\n${body}${cut}`
+}
+
 /** Structured view of a target's answer; every field is optional. */
 export interface AskReply {
   readonly conclusion?: string

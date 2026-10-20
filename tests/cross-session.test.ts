@@ -26,6 +26,7 @@ import {
   CANDIDATE_DISPLAY_LIMIT,
   checkAskGuards,
   collectAnswer,
+  deliveryWatermark,
   fallbackSessionName,
   getSessionController,
   inboundAskId,
@@ -37,6 +38,9 @@ import {
   nextAskHop,
   normalizeWaitMs,
   parseAskReply,
+  probeWaitingBody,
+  PROVISIONAL_BODY_LIMIT,
+  provisionalBodySection,
   registeredSessionIds,
   renderAskResult,
   renderCandidateBlock,
@@ -53,8 +57,8 @@ import {
   type CrossSessionSummary,
   type SessionAskMessageSource,
 } from '../src/cross-session'
-import { askStoreDir, listAskRecords, readAskRecord } from '../src/ask-store'
-import { registerAdvisorTools } from '../src/tools'
+import { askStoreDir, listAskRecords, readAskRecord, type AskRecord } from '../src/ask-store'
+import { registerAdvisorTools, renderAskRecords } from '../src/tools'
 import { askSessions, type AskSessionsInput } from '../src/multi-ask'
 import type { AdvisorGroupService } from '../src/service'
 
@@ -659,6 +663,88 @@ describe('workspace-registered sessions', () => {
     const { ctx, signal, input } = askInput(world, { target: '构建会话', waitMs: 20 })
     const value = (await askSession(ctx, signal, input)) as Record<string, unknown>
     expect(value.ok).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Provisional body for a still-waiting detached ask (display only)
+// ---------------------------------------------------------------------------
+
+const FROM_MS = 1_700_000_000_500
+
+function waitingRecord(extra: Partial<AskRecord> = {}): AskRecord {
+  return {
+    askId: 'ask-waiting',
+    sessionId: SELF,
+    targetSessionId: TARGET,
+    targetName: '目标会话',
+    question: '那个报错改了吗？',
+    state: 'waiting',
+    createdAt: FROM_MS - 1000,
+    from: new Date(FROM_MS).toISOString(),
+    ...extra,
+  }
+}
+
+function probeController(events: readonly CrossSessionLogEvent[]): CrossSessionController {
+  return {
+    list: async () => ({ items: [] }),
+    resolveAgent: async () => ({
+      agent: {
+        session: { id: TARGET, header: { cwd: 'C:\\work' }, snapshotEvents: () => events },
+        followup: vi.fn(),
+      },
+    }),
+    prompt: vi.fn(),
+  } as unknown as CrossSessionController
+}
+
+describe('provisional body for a waiting record', () => {
+  it('probes body text produced after delivery', async () => {
+    const controller = probeController([
+      textEvent(1, FROM_MS - 1000, '投递前的旧答案'),
+      textEvent(2, FROM_MS + 5000, '目标已经写出的正文'),
+    ])
+    expect(await probeWaitingBody(controller, waitingRecord())).toBe('目标已经写出的正文')
+  })
+
+  it('returns undefined when nothing was written after delivery', async () => {
+    const onlyOld = probeController([textEvent(1, FROM_MS - 1000, '投递前的旧答案')])
+    expect(await probeWaitingBody(onlyOld, waitingRecord())).toBeUndefined()
+    expect(await probeWaitingBody(probeController([]), waitingRecord())).toBeUndefined()
+  })
+
+  it('silently falls back when the target cannot be read', async () => {
+    const controller = {
+      list: async () => ({ items: [] }),
+      resolveAgent: async () => {
+        throw new Error('host down')
+      },
+      prompt: vi.fn(),
+    } as unknown as CrossSessionController
+    await expect(probeWaitingBody(controller, waitingRecord())).resolves.toBeUndefined()
+    expect(deliveryWatermark([textEvent(1, FROM_MS - 1, 'x')], Number.NaN)).toBe(-1)
+  })
+
+  it('labels the provisional body without changing the waiting state', () => {
+    const out = renderAskRecords([{ ...waitingRecord(), provisional: '目标已经写出的正文' }])
+    expect(out).toContain('- [等待中] 目标会话 · askId=ask-waiting')
+    expect(out).toContain('（尚未落定：目标可能仍在继续，下面是目前已收到的正文）')
+    expect(out).toContain('目标已经写出的正文')
+  })
+
+  it('keeps the old output when there is no provisional body', () => {
+    expect(renderAskRecords([waitingRecord()])).toBe(
+      ['- [等待中] 目标会话 · askId=ask-waiting', '  问题：那个报错改了吗？'].join('\n'),
+    )
+    expect(provisionalBodySection('   ')).toBeUndefined()
+  })
+
+  it('truncates a long body at the display limit with a note', () => {
+    const long = 'x'.repeat(2500)
+    const section = provisionalBodySection(long)
+    expect(section).toContain(`${'x'.repeat(PROVISIONAL_BODY_LIMIT)}\n…（正文过长，仅显示前 2000 字）`)
+    expect(renderAskRecords([{ ...waitingRecord(), provisional: long }]).length).toBeLessThan(2500)
   })
 })
 
