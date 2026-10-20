@@ -16,17 +16,17 @@
 
 ## ✨ Features
 
-- **Auto-deepen consultation pipeline** — one `ask_advisors` call runs up to `maxRounds` rounds (1–5, default 2): round 1 uses your question as-is, and every later round first has the driver model write a deeper follow-up (with `autoDeepen` off, the original question repeats); within a round the advisors relay in order (A → B sees A → C sees A+B → …), and the driver closes with a **synthesis** that is always generated, independent of `autoDeepen`.
-- **Advisors can call session tools (2026-09-05)** — before answering, an advisor may call the tools visible in the current DSH session (read-only whitelist by default: read/grep/glob/web_search/web_fetch…), through the official `ctx.tools` pipeline (scope dispatch, guards, pre/post policies), capped at 4 tool rounds before it must answer in text; each call appears as a `⛭ tool name · running / done / ⚠ failed` row in the card, expandable to its input and output. Switch to all session tools or off in settings.
-- **Resume after a stop** — when you stop a consultation or DSH restarts, the card's 「⏹ 停止」 turns into 「▶ 继续聊天」 → `POST /advisor-group/resume` continues from the checkpoint (unanswered advisors answer, answered ones are not re-asked, remaining rounds run, the synthesis is still produced); snapshots persist to `storages/advisor-group/sessions/<id>.json` (advisor ids/messages/status only, no credentials) and survive restarts.
-- **Zero-config driver model** — deep follow-ups are written by the driver model, reusing the current agent's provider/model, so no extra API key or model setup is needed; it falls back to `discussion.driverModel` when the session header is unavailable.
-- **Three ways to activate** — `@顾问群` mention (force-start), same question repeated 3 times without resolution, or main-model self-assessed confidence below the threshold.
-- **Optional Jev semantic pre-classification (off by default)** — when `trigger.jev.enabled` is on, a configured Jev model judges non-force-started consultations first (escalation / high-risk / web-search fit, thresholds under `trigger.jev.*`); if Jev is unavailable the local rules-based classifier still decides. With `trigger.jev.useEnglishState`, the judge reads the caller-supplied English gist (`questionEn`) instead of the Chinese question — display and session records stay Chinese.
-- **Retro CRT chat cards** — green/amber/blue CRT themes, scanlines, LIVE/DONE headers, auto-expanded thinking panel with auto-scroll; advisor Markdown rendered with a link-protocol whitelist (headings, lists, code, quotes, links, tables).
-- **Ask another session (`ask_session`)** — hands one question to another live session and wakes it; `list_sessions` shows the roster and `ask_result` reads detached results. What comes back is not a one-to-one reply — limits, cost and usage are in **The global swarm** below.
-- **Provider presets (12 platforms · 28 presets)** — DeepSeek, Moonshot Kimi, Kimi Code, Aliyun Bailian, Zhipu AI, OpenAI, Claude, Gemini, SiliconFlow, AIHubMix, OpenRouter, **OpenCode Go** (OpenAI/Anthropic-compatible variants included).
-- **Security-minded by design** — API keys use official `SecretField` semantics (never returned to the browser; `apiKeysByProvider` key history is server-side only), SSRF-guarded diagnostics (https-only / loopback, no IP literals, no redirects), per-boot token auth on `/advisor-group/*` routes, and a configurable daily consultation cap (see **Daily quota**).
-- **Runtime toggle** — `toggle_advisor_group` enables/disables the plugin and persists the flag to settings.
+- **Auto-deepen consultation pipeline** — one `ask_advisors` call runs up to `maxRounds` rounds (1–5, default 2). Round 1 uses your question as-is. Later rounds begin with a deeper follow-up from the driver model, or repeat the question if `autoDeepen` is disabled. Within each round, advisors relay in sequence (A → B sees A → C sees A+B → …). The driver concludes with a synthesis that always generates, regardless of `autoDeepen`.
+- **Advisors can call session tools (2026-09-05)** — advisors can invoke tools visible to the session before answering. By default, access is limited to a read-only whitelist (read/grep/glob/web_search/web_fetch…). Tool calls route through the official `ctx.tools` pipeline (scope dispatch, guards, and pre/post policies), capped at 4 tool rounds before the advisor must reply in text. Each invocation appears as a `⛭ tool name · running / done / ⚠ failed` row in the card, expandable to inspect input and output. Switch between all session tools or off in settings.
+- **Resume after a stop** — if a user stops the consultation or DSH restarts, the card's 「⏹ 停止」 button changes to 「▶ 继续聊天」 (Resume chat). Clicking it triggers `POST /advisor-group/resume` to continue from the checkpoint: unanswered advisors respond, previously answered ones are not queried again, remaining rounds run, and the final synthesis generates as usual. Session snapshots persist to `storages/advisor-group/sessions/<id>.json` (storing advisor IDs, messages, and statuses without credentials) and recover cleanly across restarts.
+- **Zero-config driver model** — the driver model writes deep follow-up questions by reusing the active agent's provider and model. No separate API key or model configuration is required. If session headers are unreadable, it falls back to `discussion.driverModel`.
+- **Three ways to activate** — mention `@顾问群` to force start; repeat the same question 3 times without resolution; or let the main model trigger consultation when its confidence drops below the threshold.
+- **Optional Jev semantic pre-classification (off by default)** — when `trigger.jev.enabled` is active, the configured Jev model evaluates unforced requests (determining advisor need, high risk, or web-search suitability based on `trigger.jev.*` thresholds). If Jev is unreachable, the local rule-based classifier handles the decision. When `trigger.jev.useEnglishState` is enabled, Jev evaluates the caller-provided English gist (`questionEn`) instead of the Chinese prompt, while UI cards and session logs remain in Chinese.
+- **Retro CRT chat cards** — green, amber, and blue themes with scanline effects and LIVE/DONE status badges. The 💭 thinking panel opens by default and expands as streams arrive. Content renders via lightweight Markdown with a strict link-protocol whitelist, supporting headings, lists, code blocks, blockquotes, links, and tables.
+- **Ask another session (`ask_session`)** — forwards a question to another live session and wakes it. Use `list_sessions` to browse the roster and `ask_result` to collect asynchronous outputs. Responses represent conversation windows rather than 1-to-1 answers; see **The global swarm** for boundaries, cost, and usage.
+- **Provider presets (12 platforms · 28 presets)** — DeepSeek, Moonshot Kimi, Kimi Code, Aliyun Bailian, Zhipu AI, OpenAI, Claude, Gemini, SiliconFlow, AIHubMix, OpenRouter, and **OpenCode Go** (including OpenAI and Anthropic-compatible variants).
+- **Security-minded by design** — API keys follow official `SecretField` semantics and are never returned to the browser. The `apiKeysByProvider` credential archive stays strictly server-side. Diagnostic endpoints enforce SSRF protections (HTTPS-only, loopback allowed, rejecting raw IP literals and redirects). All `/advisor-group/*` routes require a per-boot token. You can also enforce a daily limit on new consultations (see **Daily quota**).
+- **Runtime toggle** — `toggle_advisor_group` enables or disables the plugin and persists the setting.
 
 ## ✅ Compatibility
 
@@ -36,7 +36,7 @@
 | Node | `^22.19.0 \|\| >=24.0.0` |
 | Platforms | DSH Web and the desktop app (same client bundle) + headless host logic |
 
-> On the lower bound: `0.1.7-rc.2` is still inside the declared peer range, but it was **not re-verified this round** — typecheck, tests and the build all ran against `0.2.1-rc.2`. If an older 0.1.x host refuses to load the plugin, that is an interface gap, not something this release broke.
+> On the lower bound: `0.1.7-rc.2` remains inside the declared peer range, but was not re-verified during this round. Type checks, tests, and build were all completed against `0.2.1-rc.2`. If an older 0.1.x host fails to load the plugin, the issue stems from interface changes rather than bugs in this release.
 
 ## 📦 Installation
 
@@ -64,7 +64,7 @@ npx @deepseek-ai/dsh web
 <img width="791" height="797" alt="image" src="https://github.com/user-attachments/assets/5fba07bc-8c36-40f1-b423-d206aa495192" />
 
 1. Restart DSH web and hard-refresh the browser (`Ctrl+Shift+R`).
-2. Go to **Settings → Plugins → Advisor Group**: configure your advisors (provider route + model; use *获取模型列表* to pull the authoritative model list) and tune `maxRounds`, thresholds, and the UI theme.
+2. Go to **Settings → Plugins → Advisor Group**: configure your advisors (provider route + model; use *获取模型列表* (Fetch model list) to pull the authoritative model list) and tune `maxRounds`, thresholds, and the UI theme.
 3. Just start a conversation:
    - type `@顾问群` in your question to force a consultation, or
    - ask a professional/uncertain question — the plugin escalates automatically when appropriate.
@@ -96,18 +96,20 @@ So the plugin does two things: it borrows **wisdom** outward (consulting expert 
 
 ### Finding the one to ask
 
-Without a named target, the plugin scores sessions on **title + working-directory segments** (CJK split into two-character groups), then lets a few hard rules decide: a session's own name spoken in your message, a title keyword, a directory segment. The order is: score → title hit over directory-only hit → running → context thick enough (log size at or above the 160,380-byte floor) → activity band (hot/warm/cold) → larger context within the same project → more recent activity → shorter title.
+Without a named target, the plugin scores sessions based on **title + working-directory segments** (with CJK text split into two-character groups). A few hard rules then narrow the candidates: a session's exact name mentioned in your message, a title keyword match, or a directory match.
 
-Optionally add a **Jev** judge (Settings → Plugins → advisor-group → 全局蜂群 → routing engine): the candidates are handed over as a **closed option set** with a "none of these" escape, and a low-confidence answer keeps the local order.
+Sorting evaluates criteria in order: score → title hit over directory-only hit → whether running → sufficient context (log size reaching the 160,380-byte floor) → activity recency (hot/warm/cold) → larger context within the same project → more recent activity → shorter title.
 
-Jev can also judge *whether* a turn should consult another session at all — **off / local prefilter + Jev (default) / every turn**. The default first runs a zero-cost clue prefilter, so only a message that points at another session *and* names no target spends a call. Even a positive judgment only adds one suggestion line to the next system prompt; whether to deliver stays the model's call.
+You can optionally add a **Jev** judge (Settings → Plugins → Advisor Group → 全局蜂群 [Global swarm] → 路由方式 [Routing method]). Candidates are passed as a closed option set with a "none of these" fallback; a low-confidence decision keeps the local ranking.
+
+Jev can also evaluate whether a turn should consult another session at all. There are three modes: off, local prefilter + Jev (default), and every turn. The default mode runs a zero-cost clue prefilter first: it only calls Jev when a message clearly points to another session and names no target. Even when Jev recommends a query, it only injects a suggestion line into the next system prompt. Whether to deliver the message remains the main model's choice.
 
 ### Practicalities and honest limits
 
-- **Picking the target**: an exact session id, an exact title, or a natural partial name — the workspace directory name is enough (a session under `I:\极简遥控器\…` is found by saying 「极简遥控器」). One match is used directly; several matches become a candidate list. It never guesses.
-- **What you get back**: everything the target said between the **delivery receipt** and its next **whole-session idle** — "what that session said in that window", **not** a one-to-one reply. A `status` (`ok` / `partial` / `failed`) says how trustworthy it is.
-- **What you see**: the asking side shows a chat-group card — "已投递，等待对方回应…", then the answer bubble and the "📌 投递说明" note. A failed lookup opens no card; the error stays in the tool row.
-- **Guards**: hop ≤ 2, no self or subagent target, one concurrent wait per session, a 32 KB payload budget, detached results pruned after their TTL, sessions you list under 「不参与路由的会话」 never appear as candidates and refuse a direct ask; the target's turn is **never** cancelled.
+- **Picking the target**: provide an exact session ID, exact title, or a natural short name. The workspace directory name is usually sufficient (for example, refer to a session under `I:\极简遥控器\…` as 「极简遥控器」). A unique match routes immediately. Multiple matches produce a candidate list for you to choose from. The plugin never guesses.
+- **What you get back**: everything the target said between the **delivery receipt** and its next **whole-session idle** state. This captures what the session produced during that window, rather than a 1-to-1 reply. A `status` flag (`ok` / `partial` / `failed`) indicates response reliability.
+- **What you see**: the sender side opens a chat-group card displaying 「已投递，等待对方回应…」 (Delivered, awaiting response...), followed by the response bubble and a 「📌 投递说明」 (Delivery details) note. If target resolution fails, no card opens and the error is reported directly in the tool row.
+- **Guards**: hops are capped at 2, asking oneself or subagents is forbidden, each session allows only one concurrent wait, and the payload budget is 32 KB. Detached results are cleaned up after their TTL expires. Sessions listed under 「不参与路由的会话」 (Sessions excluded from routing) never appear as candidates and reject direct requests. Target sessions are never cancelled midway.
 - **Cost**: see **Usage and cost**. Detached results are pruned on read, and every Jev decision is logged to `storages/advisor-group/asks/routing-jev.log`.
 
 In one line: say "ask the 极简遥控器 session how far along it is".
@@ -160,30 +162,32 @@ In one line: say "ask the 极简遥控器 session how far along it is".
 
 ## 🧮 Daily quota
 
-The plugin ships a cost safety valve: it counts **new consultations** per UTC calendar day, default cap 50, changeable or switchable on the settings page. Only new consultations count — resuming (「▶ 继续聊天」) and follow-ups never consume quota. The check and the increment happen inside one synchronous block, so two consultations cannot slip through the same window; the counter is written atomically to `$DSH_HOME/storages/advisor-group/daily-guard.json`, survives restarts, and resets at the UTC day boundary. When the cap is reached `ask_advisors` does not start and returns a one-line explanation; the settings page shows "today's remaining consultations X / Y", and with the cap off the plugin still counts for display without blocking.
+The plugin includes a cost safety valve. It tracks **new consultations** per UTC calendar day (default cap: 50), which can be adjusted or disabled in settings. The quota applies solely to newly initiated consultations. Resuming conversations via 「▶ 继续聊天」 (Resume chat) and follow-up prompts do not consume quota.
+
+Evaluation and increment occur within a single synchronous block, preventing concurrency race conditions. The counter persists atomically to `$DSH_HOME/storages/advisor-group/daily-guard.json`, survives restarts, and resets at 00:00 UTC. When the quota is reached, `ask_advisors` aborts and returns an explanatory message. The settings page displays "today's remaining consultations X / Y" in real time. Disabling the cap continues tracking counts without blocking requests.
 
 ## 💸 Usage and cost
 
-One consultation is not one call but a chain of them. With the defaults (`maxRounds = 2`, at most 3 advisors) a new consultation costs **8** model calls: round 1 = 3 advisor calls; round 2 = 1 driver follow-up + 3 advisor calls; then 1 driver synthesis. Advisors that use tools add one more model call per tool round (at most 4 rounds per advisor plus one forced text-only round), so the real count can be noticeably higher than 8.
+A single consultation consists of a chain of model calls. Under the default configuration (`maxRounds = 2`, up to 3 advisors), launching a new consultation involves **8** model calls: round 1 initiates 3 advisor calls; round 2 includes 1 driver follow-up and 3 advisor calls; finally, the driver generates 1 overall synthesis. If advisors invoke tools, each tool loop adds an extra model call (capped at 4 tool rounds per advisor, plus 1 final text response), so actual usage may exceed 8 calls.
 
-Billing follows each channel: advisors bill on the route and model you gave them, while the driver bills on the current session's model. To keep costs down, lower `maxRounds`, configure fewer advisors, set `tools: 'off'` for advisors, and set a daily cap you are comfortable with (see **Daily quota**). Resuming after an interruption ("▶ 继续聊天") only asks the advisors that had not finished, so it costs less than starting over.
+Billing is calculated independently per channel. Advisors bill against their configured routes and models, while the driver model bills against the current session's model. To minimize expenses, you can lower `maxRounds`, reduce the number of advisors, set `tools: 'off'` for advisors, and configure an appropriate limit under **Daily quota**. If a consultation is interrupted, clicking 「▶ 继续聊天」 (Resume chat) only queries pending advisors without restarting the entire run, costing substantially less than a fresh consultation.
 
-`ask_session` is outside the consultation quota: it wakes the target session, which answers with one ordinary turn billed on that session's own model, and it never counts as a new consultation.
+`ask_session` does not consume consultation quota. It simply wakes the target session to run a standard response turn billed to that session's own model, and does not count as a new advisor consultation.
 
 ## 🔒 Security & privacy
 
-- Direct API keys can be stored in the DSH `settings.yaml` (marked secret, never returned to the browser by `describe`); prefer `apiKeyEnv` (env-var mode) if you don't want keys on disk.
-- `/advisor-group/*` routes use a per-boot shared token for local single-user use — **not** multi-user auth. Add a reverse-proxy auth layer before LAN exposure.
-- Diagnostics endpoints resolve the real key server-side and validate the target URL against an https-only / loopback SSRF guard; DNS-rebinding protection is a documented out-of-scope limitation.
-- How the daily consultation cap is counted, stored and reset is described under **Daily quota**.
-- Classifier shadow mode: with `trigger.requireClassifier` on, every judgment — including forced or classifier-skipped calls such as `@顾问群` and repeat-3 (`provider: 'bypass'`) — appends one observation sample (read-only `/advisor-group/shadow`), used for threshold tuning only and never influencing behavior.
-- **`advisorTools: 'all'` is an elevated-risk scope.** It exposes every session-visible tool to the advisor models, including writable/execution ones (`pwsh`, `bash`, `write`, config/SSH tools), executed through the official guarded pipeline. Only enable it for advisors you trust (e.g., your own local models). Tool calling only works on the direct-http (OpenAI/Anthropic) channel: the DSH built-in route reuses host credentials and does not support it, so set `baseURL` / `apiKey` / `apiKeyEnv` for any advisor that needs tools. Every non-read-only invocation is logged with `console.warn` for audit; prefer the default `readonly` or `off` (read-only whitelist in **Features**).
+- Direct API keys can be stored in DSH `settings.yaml` (marked as secret, never returned to the browser by `describe`). If you prefer not to store keys on disk, use the `apiKeyEnv` environment variable mode.
+- The `/advisor-group/*` routes utilize a per-boot shared token designed for single-user local setups. Add a reverse-proxy authentication layer before exposing ports to a local network or the public internet.
+- Diagnostic endpoints resolve keys server-side before contacting providers, applying SSRF validation (HTTPS-only and loopback allowed). DNS rebinding is a known architectural boundary.
+- For counting rules, storage paths, and reset schedules regarding the daily quota, see **Daily quota**.
+- Classifier shadow mode: when `trigger.requireClassifier` is enabled, all classification samples are appended to the read-only endpoint `/advisor-group/shadow` (including forced triggers like `@顾问群` or repeated-question scenarios, tagged as `provider: 'bypass'`). This data is used exclusively for threshold tuning and never affects runtime logic.
+- **`advisorTools: 'all'` is an elevated-risk scope.** It exposes all session-visible tools (including write and command execution tools such as `pwsh`, `bash`, and `write`) to advisor models under official guard pipelines. Enable this only for trusted local models. Tool calling requires the direct-http (OpenAI/Anthropic) channel; the DSH built-in channel reuses host credentials and cannot invoke tools. Configure `baseURL`, `apiKey`, or `apiKeyEnv` for any advisor needing tools. Every non-read-only tool execution triggers a `console.warn` audit log. The default recommendation is `readonly` or `off` (see read-only whitelist in **Features**).
 
 ## ⚠️ Known limitations
 
-- A hard crash of the DSH host can leave an already-open card showing **LIVE** until the page is refreshed (a disconnect notice now appears); refresh restores the true state from the session log.
-- Risk notes are **fact-based, never text-based**: a consultation reports truncation (an advisor stream cut off by timeout or network) and cancellation/stop. Users see them on **stopped or completed** cards and in the session log, and the main model receives them in the `ask_advisors` result. Advisor prose is not scanned for keywords — the earlier text heuristic was removed in 0.1.1 because it also fired on plain negations such as 「没有任何风险」.
-- Cross-session asking (`ask_session`) has **no per-session tool-hiding switch**: `swarm.enabled` is the master switch, and while it is on the three session tools are visible in every session, relying on their descriptions to keep use to explicit user requests; two sessions asking each other at the same time is not detected.
+- If the DSH host crashes abruptly, an active card may continue displaying **LIVE** until refreshed (a disconnection notice is now displayed). Refreshing restores the true state from session logs.
+- Risk notices are strictly fact-based rather than text-based. They track truncations (advisor streams interrupted by timeout or network drop) and cancellations (consultation stopped by user). Notices appear in stopped or completed cards and return to the main model via `ask_advisors`. Advisor responses are not scanned for keywords; text-heuristic matching was removed in v0.1.1 to avoid false positives on negative statements like 「没有任何风险」.
+- Cross-session queries (`ask_session`) currently lack a per-session tool visibility toggle. When `swarm.enabled` is active, the three session tools remain visible across all sessions, relying on system prompts to limit usage to explicit user instructions. Mutual wait deadlocks between two sessions are not currently detected.
 
 ## 🛠️ Development
 
