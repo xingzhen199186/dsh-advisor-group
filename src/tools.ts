@@ -1039,7 +1039,13 @@ export function registerAdvisorTools(
         // Probe read-only and attach it for display; the record itself is not
         // touched and its state stays `waiting`.
         const results = await withProvisionalBodies(getSessionController(ctx), records)
-        return { ok: true, count: results.length, results }
+        // bootId/fromSeq are store bookkeeping for restart reconciliation, not
+        // part of the tool contract; the schema forbids undeclared properties.
+        const visible = results.map((row) => {
+          const { bootId: _bootId, fromSeq: _fromSeq, ...rest } = row
+          return rest
+        })
+        return { ok: true, count: visible.length, results: visible }
       } catch (error) {
         return {
           ok: false,

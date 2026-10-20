@@ -359,6 +359,9 @@ describe('ask_result prunes expired detached results', () => {
     const results = value.results as Array<{ askId: string; state: string }>
     expect(results.find((row) => row.askId === 'orphan')?.state).toBe('interrupted')
     expect(readAskRecord(dir, 'orphan')?.state).toBe('interrupted')
+    const row = (value.results as Array<Record<string, unknown>>).find((item) => item.askId === 'orphan')
+    expect(row).not.toHaveProperty('bootId')
+    expect(row).not.toHaveProperty('fromSeq')
     const text = renderAskRecords(value.results as never)
     expect(text).toContain('已中断')
     expect(text).toContain('重启')
