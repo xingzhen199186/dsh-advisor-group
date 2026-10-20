@@ -7,6 +7,7 @@ import type { AdvisorGroupService } from './service'
 import { appendAdvisorStart, appendAskAnswer, appendAskStart } from './session-log'
 import {
   askSession,
+  logJevDecision,
   sessionDisplayName,
   ASK_WAIT_DEFAULT_MS,
   ASK_WAIT_MAX_MS,
@@ -577,6 +578,7 @@ export function registerAdvisorTools(
           exclude: hidden,
           questionEn: typeof args.questionEn === 'string' ? args.questionEn : undefined,
           jev: routingJevRouter(service.getConfig().trigger.jev, exec.signal),
+          log: logJevDecision,
         })
         if (routeCandidates.length > 0) {
           return {

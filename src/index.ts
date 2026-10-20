@@ -4,7 +4,7 @@ import { Config, unwrapVolatileConfig, type Config as ConfigShape } from './conf
 import { AdvisorGroupService } from './service'
 import { registerAdvisorTools, visibleRosterSessions } from './tools'
 import { registerAdvisorSettingsAndRoutes } from './settings-api'
-import { cancelDetachedAsks, getSessionController } from './cross-session'
+import { cancelDetachedAsks, getSessionController, logJevDecision } from './cross-session'
 import { buildAdvisorPrompt } from './prompt'
 import { guardAdvisorPrompts, reportPromptGuardFindings } from './prompt-guard'
 import { withSessionLogSizes } from './session-roster'
@@ -82,6 +82,7 @@ async function suggestCrossSession(input: {
       mode: config.swarm.routingAsk ?? 'gated',
       candidates,
       judge,
+      log: logJevDecision,
     })
     if (hint === undefined) return
     rememberCrossSessionHint(input.sessionId, hint)
@@ -138,9 +139,17 @@ export function apply(ctx: Context, config: ConfigShape): void {
     if (cfg.enabled === false || cfg.swarm.enabled === false) return
     const mode = cfg.swarm.routingAsk ?? 'gated'
     if (mode === 'off') return
-    if (mode === 'gated' && !shouldConsiderCrossSession(text)) return
+    const configured = jevConfigured(cfg.trigger.jev)
+    if (mode === 'gated' && !shouldConsiderCrossSession(text)) {
+      // Cheap stop before any I/O; still recorded so "no hint" is explainable.
+      logJevDecision({ kind: 'ask', question: text, called: false, configured, decision: 'skipped' })
+      return
+    }
     const jev = cfg.trigger.jev
-    if (jev === undefined || !jevConfigured(jev)) return
+    if (jev === undefined || !configured) {
+      logJevDecision({ kind: 'ask', question: text, called: false, configured: false, decision: 'skipped' })
+      return
+    }
     void suggestCrossSession({
       ctx,
       service,

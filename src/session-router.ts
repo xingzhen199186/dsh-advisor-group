@@ -103,6 +103,35 @@ export type JevRouter = (input: {
   candidates: readonly RouteCandidate[]
 }) => Promise<JevRerankDecision | undefined>
 
+/**
+ * One recorded Jev decision attempt, written by {@link logJevDecision} in
+ * `src/cross-session.ts`. Diagnostics only: nothing reads it back, and a write
+ * failure must never touch the routing path.
+ */
+export interface JevDecisionLogEntry {
+  /** `route` = candidate re-ranking; `ask` = the cross-session suggestion. */
+  kind: 'route' | 'ask'
+  /** ISO timestamp; the logger defaults it to `new Date().toISOString()`. */
+  at?: string
+  /** The user question/turn that was judged (truncated by the logger). */
+  question: string
+  /** True once the Jev request was actually issued. */
+  called: boolean
+  /** True when Jev credentials/endpoint were available. */
+  configured: boolean
+  /**
+   * `recommend` = acted on; `keep` = answered but the order/hint stays as it
+   * was; `none` = no usable answer (low confidence, "none", unknown id);
+   * `skipped` = never asked; `error` = the call failed (message recorded).
+   */
+  decision: 'recommend' | 'keep' | 'none' | 'skipped' | 'error'
+  pickedId?: string
+  pickedTitle?: string
+  confidence?: number
+  candidates?: readonly { id: string; title: string }[]
+  error?: string
+}
+
 /** Default and hard caps for how many candidates one pass returns (schema: 1–8). */
 const DEFAULT_TOP_N = 3
 const MIN_TOP_N = 1
@@ -750,6 +779,35 @@ export interface RouteSessionsOptions {
 }
 
 /**
+ * What a Jev route answer amounts to — the single source of truth for both the
+ * ordering below and the diagnostics log:
+ * - `recommend`: ≥ 0.75 and the picked candidate is in the list and not first;
+ * - `keep`: 0.45–0.75, or a confident pick that is already first (nothing moves);
+ * - `none`: missing/unknown/"none"/low confidence (below 0.45).
+ */
+export function classifyJevRouteDecision(
+  candidates: readonly RouteCandidate[],
+  decision: JevRerankDecision | undefined,
+): { kind: 'recommend' | 'keep' | 'none'; picked?: RouteCandidate; confidence?: number } {
+  if (decision === undefined || decision === null) return { kind: 'none' }
+  const choice = typeof decision.choice === 'string' ? decision.choice.trim() : ''
+  const confidence =
+    typeof decision.confidence === 'number' && Number.isFinite(decision.confidence)
+      ? decision.confidence
+      : undefined
+  if (choice.length === 0 || confidence === undefined) return { kind: 'none' }
+  const picked = candidates.find((candidate) => candidate.sessionId === choice)
+  if (confidence < JEV_DEFER_THRESHOLD) return { kind: 'none', confidence }
+  if (confidence < JEV_RECOMMEND_THRESHOLD) {
+    return { kind: 'keep', confidence, ...(picked === undefined ? {} : { picked }) }
+  }
+  // "none" and any id outside the option list are not a usable answer.
+  if (picked === undefined) return { kind: 'none', confidence }
+  if (candidates[0]?.sessionId === picked.sessionId) return { kind: 'keep', confidence, picked }
+  return { kind: 'recommend', confidence, picked }
+}
+
+/**
  * Re-order the local candidate list with Jev's closed-set answer.
  *
  * Only a confident pick (≥ {@link JEV_RECOMMEND_THRESHOLD}) for a session that
@@ -762,22 +820,14 @@ export function applyJevDecision(
   decision: JevRerankDecision | undefined,
 ): RouteCandidate[] {
   const list = Array.isArray(candidates) ? [...candidates] : []
-  if (list.length === 0 || decision === undefined || decision === null) return list
-  const choice = typeof decision.choice === 'string' ? decision.choice.trim() : ''
-  const confidence =
-    typeof decision.confidence === 'number' && Number.isFinite(decision.confidence)
-      ? decision.confidence
-      : undefined
-  if (choice.length === 0 || confidence === undefined) return list
-  // Below the defer line the answer is not even a weak preference.
-  if (confidence < JEV_DEFER_THRESHOLD) return list
-  // 0.45–0.75 is a weak preference: keep the local order on purpose.
-  if (confidence < JEV_RECOMMEND_THRESHOLD) return list
-  // "none" and any id outside the option list simply are not found here.
-  const index = list.findIndex((candidate) => candidate.sessionId === choice)
+  const verdict = classifyJevRouteDecision(list, decision)
+  if (verdict.kind !== 'recommend') return list
+  const picked = verdict.picked
+  if (picked === undefined) return list
+  const index = list.findIndex((candidate) => candidate.sessionId === picked.sessionId)
   if (index <= 0) return list
-  const [picked] = list.splice(index, 1)
-  return [{ ...picked, reason: `${picked.reason}${JEV_PICK_NOTE}` }, ...list]
+  const [found] = list.splice(index, 1)
+  return [{ ...found, reason: `${found.reason}${JEV_PICK_NOTE}` }, ...list]
 }
 
 /** Options for the engine-aware entry point: a local pass plus the Jev seam. */
@@ -786,6 +836,8 @@ export interface RouteEngineOptions extends RouteSessionsOptions {
   questionEn?: string
   /** Injected Jev client; absent means "not configured" → local order + a note. */
   jev?: JevRouter
+  /** Diagnostics sink (the plugin passes `logJevDecision`); never required. */
+  log?: (entry: JevDecisionLogEntry) => void
 }
 
 /**
@@ -797,6 +849,9 @@ export interface RouteEngineOptions extends RouteSessionsOptions {
  * credentials, timeout, HTTP error, unparseable response, an id that is not in
  * the list — silently returns the local order and never throws: routing is a
  * proposal, never a delivery, so an engine fault must not fail the ask.
+ *
+ * Diagnostics: one log line per Jev decision attempt (a pure local pass writes
+ * nothing). Logging is injected so this module stays free of the store.
  */
 export async function routeSessionsWithEngine(
   sessions: readonly RosterSource[],
@@ -805,15 +860,45 @@ export async function routeSessionsWithEngine(
 ): Promise<RouteCandidate[]> {
   const engine: RoutingEngine = options?.engine === 'jev' ? 'jev' : 'local'
   const local = routeSessions(sessions, question, { ...options, engine })
-  if (engine !== 'jev' || local.length === 0) return local
+  // Pure local: Jev was never consulted, so there is nothing to record.
+  if (engine !== 'jev') return local
+  const log = options?.log
+  const recorded = {
+    kind: 'route' as const,
+    question,
+    candidates: local.map((candidate) => ({ id: candidate.sessionId, title: candidate.name })),
+  }
+  if (local.length === 0) {
+    log?.({ ...recorded, called: false, configured: options?.jev !== undefined, decision: 'skipped' })
+    return local
+  }
   if (options?.jev === undefined) {
     // Selected but not configured: behave exactly like local, and say so.
+    log?.({ ...recorded, called: false, configured: false, decision: 'skipped' })
     return local.map((candidate) => ({ ...candidate, reason: `${candidate.reason}${JEV_UNCONFIGURED_NOTE}` }))
   }
   try {
     const decision = await options.jev({ question, questionEn: options.questionEn, candidates: local })
+    const verdict = classifyJevRouteDecision(local, decision)
+    const picked = verdict.picked
+    const confidence = verdict.confidence
+    log?.({
+      ...recorded,
+      called: true,
+      configured: true,
+      decision: verdict.kind,
+      ...(picked === undefined ? {} : { pickedId: picked.sessionId, pickedTitle: picked.name }),
+      ...(confidence === undefined ? {} : { confidence }),
+    })
     return applyJevDecision(local, decision)
-  } catch {
+  } catch (error) {
+    log?.({
+      ...recorded,
+      called: true,
+      configured: true,
+      decision: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    })
     return local
   }
 }
@@ -929,27 +1014,72 @@ export interface CrossSessionTurnInput {
   candidates: readonly RouteCandidate[]
   /** The injected Jev client; absent = not configured = silent. */
   judge?: JevCrossSessionClient
+  /** Diagnostics sink (the plugin passes `logJevDecision`); never required. */
+  log?: (entry: JevDecisionLogEntry) => void
 }
 
 /**
  * Decide whether this turn earns a hint: `off` never asks, `gated` asks only
  * after the prefilter passes, `always` asks on every turn. Never throws and
  * never returns a hint for a sensitive / low-confidence / unparseable answer.
+ *
+ * Diagnostics: one log line per judgment attempt — a prefilter or
+ * no-candidates stop is recorded as `skipped` with `called: false` (a
+ * deliberate `off` mode writes nothing), and a Jev answer as `recommend` (a
+ * hint was produced) or `none` (any veto).
  */
 export async function crossSessionHintForTurn(input: CrossSessionTurnInput): Promise<string | undefined> {
   if (input.mode === 'off') return undefined
-  if (input.mode === 'gated' && !shouldConsiderCrossSession(input.text)) return undefined
   const candidates = Array.isArray(input.candidates) ? input.candidates : []
-  if (candidates.length === 0) return undefined
-  if (input.judge === undefined) return undefined
+  const recorded = {
+    kind: 'ask' as const,
+    question: input.text,
+    candidates: candidates.map((candidate) => ({ id: candidate.sessionId, title: candidate.name })),
+  }
+  if (input.mode === 'gated' && !shouldConsiderCrossSession(input.text)) {
+    input.log?.({ ...recorded, called: false, configured: input.judge !== undefined, decision: 'skipped' })
+    return undefined
+  }
+  if (candidates.length === 0) {
+    input.log?.({ ...recorded, called: false, configured: input.judge !== undefined, decision: 'skipped' })
+    return undefined
+  }
+  if (input.judge === undefined) {
+    input.log?.({ ...recorded, called: false, configured: false, decision: 'skipped' })
+    return undefined
+  }
   try {
     const judgment = await input.judge({
       text: input.text,
       ...(input.textEn === undefined ? {} : { textEn: input.textEn }),
       candidates,
     })
-    return crossSessionSuggestionLine(judgment, candidates)
-  } catch {
+    const hint = crossSessionSuggestionLine(judgment, candidates)
+    const pickId =
+      judgment === undefined || typeof judgment.pick !== 'string' ? '' : judgment.pick.trim()
+    const picked =
+      pickId.length > 0 ? candidates.find((candidate) => candidate.sessionId === pickId) : undefined
+    const confidence =
+      judgment !== undefined && typeof judgment.askConfidence === 'number'
+        ? judgment.askConfidence
+        : undefined
+    input.log?.({
+      ...recorded,
+      called: true,
+      configured: true,
+      decision: hint === undefined ? 'none' : 'recommend',
+      ...(picked === undefined ? {} : { pickedId: picked.sessionId, pickedTitle: picked.name }),
+      ...(confidence === undefined ? {} : { confidence }),
+    })
+    return hint
+  } catch (error) {
+    input.log?.({
+      ...recorded,
+      called: true,
+      configured: true,
+      decision: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    })
     // Silent by design: a suggestion is optional and must never surface.
     return undefined
   }

@@ -20,10 +20,11 @@
  */
 import { createUserMessage, type ContentBlock, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { askStoreDir, writeAskRecord, type AskRecord } from './ask-store'
-import { isSessionExcluded } from './session-router'
+import { isSessionExcluded, type JevDecisionLogEntry } from './session-router'
 
 /** Maximum combined UTF-8 bytes of question + context (design §六.5). */
 export const ASK_CONTENT_MAX_BYTES = 32000
@@ -523,6 +524,62 @@ const pendingWaits = new Set<TargetSessionId>()
 export function askStoreRoot(): string {
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   return askStoreDir(join(dshHome, 'storages', 'advisor-group'))
+}
+
+/** Longest question text kept in one diagnostics line. */
+const JEV_LOG_QUESTION_MAX = 300
+/** Longest candidate title kept in one diagnostics line. */
+const JEV_LOG_TITLE_MAX = 80
+
+/** Clamp a diagnostic string; non-strings read as ''. */
+function clipLogText(value: unknown, max: number): string {
+  const text = typeof value === 'string' ? value : ''
+  return text.length <= max ? text : text.slice(0, max)
+}
+
+/**
+ * Append ONE JSON line describing a Jev decision attempt to
+ * `<askStoreRoot()>/routing-jev.log`.
+ *
+ * Diagnostics only: the directory is created on demand, `question` is clamped
+ * to 300 characters and each candidate title to 80, and EVERY failure is
+ * ignored so a log write can never disturb the routing path. Nothing reads the
+ * file back; humans (and the settings diagnostics) do.
+ * @param entry - the attempt: kind, question, whether Jev was called/configured,
+ *   the resulting decision, and (when known) the pick and its confidence.
+ */
+export function logJevDecision(entry: JevDecisionLogEntry): void {
+  try {
+    const line = JSON.stringify({
+      at: typeof entry.at === 'string' && entry.at.length > 0 ? entry.at : new Date().toISOString(),
+      kind: entry.kind === 'ask' ? 'ask' : 'route',
+      question: clipLogText(entry.question, JEV_LOG_QUESTION_MAX),
+      called: entry.called === true,
+      configured: entry.configured === true,
+      decision: entry.decision,
+      ...(typeof entry.pickedId === 'string' && entry.pickedId.length > 0 ? { pickedId: entry.pickedId } : {}),
+      ...(typeof entry.pickedTitle === 'string' && entry.pickedTitle.length > 0
+        ? { pickedTitle: clipLogText(entry.pickedTitle, JEV_LOG_TITLE_MAX) }
+        : {}),
+      ...(typeof entry.confidence === 'number' && Number.isFinite(entry.confidence)
+        ? { confidence: entry.confidence }
+        : {}),
+      ...(Array.isArray(entry.candidates)
+        ? {
+            candidates: entry.candidates.map((candidate) => ({
+              id: clipLogText(candidate?.id, JEV_LOG_TITLE_MAX),
+              title: clipLogText(candidate?.title, JEV_LOG_TITLE_MAX),
+            })),
+          }
+        : {}),
+      ...(typeof entry.error === 'string' && entry.error.length > 0 ? { error: entry.error } : {}),
+    })
+    const dir = askStoreRoot()
+    mkdirSync(dir, { recursive: true })
+    appendFileSync(join(dir, 'routing-jev.log'), `${line}\n`, 'utf8')
+  } catch {
+    // Diagnostics must never affect behaviour: a failed write is silent.
+  }
 }
 
 /** Background loops started by `detach: true`; cancelled when the plugin unloads. */
