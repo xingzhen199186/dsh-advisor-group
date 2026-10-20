@@ -1,10 +1,9 @@
 # dsh-advisor-group
 
-> [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件：让一个会话**既能向外借智慧，也能向旁边借记忆**。
+> [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件：让一个会话**既能向其他模型借智慧，也能向其他会话借记忆**。
 >
-> 遇到专业、长尾世界知识、高风险或不确定的问题，主模型召集多位**专家顾问模型**，在复古 CRT 聊天组卡片中真流式会诊；遇到别的会话已经知道的事，它跨会话去问，而不是从头再查一遍。
+> 遇到专业、长尾世界知识、高风险或不确定的问题，主模型召集多位**专家顾问模型**，在复古 CRT 聊天组卡片中真流式会诊；遇到别的会话已经知道的事，跨会话去问，复用已有上下文，无需从头再查。
 >
-> 想试的话：`dsh plugin --profile web add dsh-advisor-group`，重启 DSH，在问题里带上 `@顾问群`。
 
 [![dsh-plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
 
