@@ -1581,6 +1581,21 @@ describe('list_sessions row diagnostics', () => {
     expect(ids).toContain('remote-1')
   })
 
+  it('hides workspace-archived sessions from the roster', async () => {
+    const config = toolConfig()
+    const service = { getConfig: () => config } as unknown as AdvisorGroupService
+    const tools = registerAdvisorTools(service, {
+      workspaceRegistry: { archivedSessionIds: new Set(['remote-2']) },
+    }) as unknown as ToolLike[]
+    const tool = tools.find((candidate) => candidate.name === 'list_sessions')
+    if (tool === undefined) throw new Error('missing tool list_sessions')
+    const value = (await tool.execute({}, { signal: new AbortController().signal })) as Record<string, unknown>
+    expect(value.ok).toBe(true)
+    const ids = (value.sessions as Array<Record<string, unknown>>).map((session) => session.sessionId)
+    expect(ids).not.toContain('remote-2')
+    expect(ids).toContain('remote-1')
+  })
+
   it('reports hasTitle, drops noise rows, and shortens fallback names', async () => {
     const savedRoster = world.roster
     const updatedAt = 1_700_000_000_000

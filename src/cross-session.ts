@@ -139,6 +139,7 @@ export type CrossSessionErrorCode =
   | 'delivery-failed'
   | 'delivery-rejected'
   | 'swarm-excluded'
+  | 'session-archived'
 
 export interface CrossSessionTarget {
   readonly sessionId: string
@@ -149,7 +150,14 @@ export interface CrossSessionCandidate {
   readonly sessionId: string
   readonly name: string
   readonly hint: string
+  /** Working directory, when known (display only: tells same-title rows apart). */
+  readonly cwd?: string
+  /** Human age, e.g. 「3 天前」 (display only). */
+  readonly age?: string
 }
+
+/** Refusal/skip reason for a session the user archived in the workspace. */
+export const ARCHIVED_SESSION_MESSAGE = '这个会话已归档，先在工作区里取消归档才能唤醒它'
 
 export interface CrossSessionInterval {
   readonly from: string
@@ -242,15 +250,100 @@ export function sessionDisplayName(summary: CrossSessionSummary): string {
 /** Matching outcome for one target reference: exact id, unique title, ambiguous, or none. */
 export type TargetMatch =
   | { readonly kind: 'unique'; readonly target: CrossSessionTarget }
-  | { readonly kind: 'ambiguous'; readonly candidates: CrossSessionCandidate[] }
+  | {
+      readonly kind: 'ambiguous'
+      readonly candidates: CrossSessionCandidate[]
+      /** Full same-name match count when `candidates` is capped for display. */
+      readonly total?: number
+    }
   | { readonly kind: 'missing' }
 
-function candidateOf(summary: CrossSessionSummary): CrossSessionCandidate {
+/** Max candidate lines one refusal/skip prints; the rest is summarized. */
+export const CANDIDATE_DISPLAY_LIMIT = 10
+
+const AGE_MINUTE_MS = 60_000
+
+/**
+ * Human age for one session, for display only: 「刚刚」 / 「N 分钟前」 /
+ * 「N 小时前」 / 「N 天前」 / 「N 个月前」 / 「N 年前」.
+ * @param updatedAt - last-activity timestamp in ms.
+ * @param now - clock to measure against.
+ */
+function relativeAge(updatedAt: number, now: number): string {
+  const age = now - updatedAt
+  if (!Number.isFinite(age)) return '（未知时间）'
+  if (age < AGE_MINUTE_MS) return '刚刚'
+  const minutes = Math.floor(age / AGE_MINUTE_MS)
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days} 天前`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `${months} 个月前`
+  return `${Math.floor(months / 12)} 年前`
+}
+
+function candidateOf(summary: CrossSessionSummary, now = Date.now()): CrossSessionCandidate {
+  const cwd = summary.cwd
   return {
     sessionId: summary.sessionId,
     name: sessionDisplayName(summary),
-    hint: fallbackSessionName(summary.cwd, summary.updatedAt),
+    hint: fallbackSessionName(cwd, summary.updatedAt),
+    ...(typeof cwd === 'string' && cwd.length > 0 ? { cwd } : {}),
+    age: relativeAge(summary.updatedAt, now),
   }
+}
+
+/** `- name · sessionId · cwd · 多久前` for one candidate (display only). */
+export function candidateLine(candidate: CrossSessionCandidate): string {
+  const cwd = typeof candidate.cwd === 'string' && candidate.cwd.length > 0 ? candidate.cwd : '（未知工作目录）'
+  const age = typeof candidate.age === 'string' && candidate.age.length > 0 ? candidate.age : '（未知时间）'
+  return `- ${candidate.name} · ${candidate.sessionId} · ${cwd} · ${age}`
+}
+
+/**
+ * The candidate block appended to an ambiguous / not-found refusal and to batch
+ * skip reasons. Display only — matching never uses it.
+ *
+ * - One hint line when a title repeats.
+ * - At most {@link CANDIDATE_DISPLAY_LIMIT} candidate lines, each carrying
+ *   name · sessionId · cwd · 多久前.
+ * - A remainder note when the list was truncated; the rest stay addressable by
+ *   sessionId or directory, they are just not spread out.
+ * - Ordering is the caller's: running first, then most recently updated. Names
+ *   and ids are never used for sorting.
+ * @param candidates - the ordered candidate pool (may be longer than the cap).
+ * @param options.total - full match count when the pool is already capped.
+ * @param options.sameTitle - false makes the remainder note say 「会话」 rather
+ *   than 「同名会话」 (used for the not-found recent list).
+ */
+export function renderCandidateBlock(
+  candidates: readonly CrossSessionCandidate[],
+  options?: { total?: number; sameTitle?: boolean },
+): string {
+  const pool = Array.isArray(candidates) ? candidates : []
+  const shown = pool.slice(0, CANDIDATE_DISPLAY_LIMIT)
+  const total = Math.max(shown.length, Math.floor(options?.total ?? pool.length))
+  const nameCounts = new Map<string, number>()
+  for (const candidate of pool) nameCounts.set(candidate.name, (nameCounts.get(candidate.name) ?? 0) + 1)
+  const repeated = [...nameCounts.values()].some((count) => count > 1)
+  const lines: string[] = []
+  if (repeated) lines.push('同名会话较多：按下面的 sessionId 或目录指定')
+  lines.push(...shown.map(candidateLine))
+  if (total > shown.length) {
+    const noun = options?.sameTitle === false ? '个会话' : '个同名会话'
+    lines.push(`…还有 ${total - shown.length} ${noun}，可用目录关键词进一步收窄`)
+  }
+  return lines.join('\n')
+}
+
+/** Every listed session as a display candidate: running first, then most recent. */
+export function recentCandidates(
+  sessions: readonly CrossSessionSummary[],
+  now = Date.now(),
+): CrossSessionCandidate[] {
+  return orderCandidates(sessions).map((session) => candidateOf(session, now))
 }
 
 /** Most-recently-active first, running sessions ahead of idle ones. */
@@ -261,11 +354,8 @@ function orderCandidates(rows: readonly CrossSessionSummary[]): readonly CrossSe
   })
 }
 
-/** Partial candidates are capped: a broad needle must stay a readable list. */
-const PARTIAL_CANDIDATE_LIMIT = 10
-
 /** When nothing matches, this many recent sessions come back as candidates. */
-const NOT_FOUND_CANDIDATE_LIMIT = 8
+const NOT_FOUND_CANDIDATE_LIMIT = CANDIDATE_DISPLAY_LIMIT
 
 /** The exclusion entries carried by `swarm.routingExclude`; malformed values are ignored. */
 function exclusionEntries(value: unknown): readonly string[] {
@@ -305,7 +395,14 @@ export function matchTargetSession(
     return { kind: 'unique', target: { sessionId: exact[0].sessionId, name: sessionDisplayName(exact[0]) } }
   }
   if (exact.length > 1) {
-    return { kind: 'ambiguous', candidates: orderCandidates(exact).map(candidateOf) }
+    // Display-only cap: `total` keeps the full count so the refusal can
+    // summarize the hidden tail.
+    const ordered = orderCandidates(exact).map((session) => candidateOf(session))
+    return {
+      kind: 'ambiguous',
+      candidates: ordered.slice(0, CANDIDATE_DISPLAY_LIMIT),
+      total: ordered.length,
+    }
   }
   const partial = sessions.filter(
     (session) =>
@@ -316,9 +413,11 @@ export function matchTargetSession(
     return { kind: 'unique', target: { sessionId: partial[0].sessionId, name: sessionDisplayName(partial[0]) } }
   }
   if (partial.length === 0) return { kind: 'missing' }
+  const ordered = orderCandidates(partial).map((session) => candidateOf(session))
   return {
     kind: 'ambiguous',
-    candidates: orderCandidates(partial).slice(0, PARTIAL_CANDIDATE_LIMIT).map(candidateOf),
+    candidates: ordered.slice(0, CANDIDATE_DISPLAY_LIMIT),
+    total: ordered.length,
   }
 }
 
@@ -1019,15 +1118,42 @@ export async function collectDeliveredAsk(
 }
 
 /**
+ * Archived session ids from the host workspace registry
+ * (`workspaceRegistry.archivedSessionIds`, iterable). Archived sessions remain
+ * in the raw session list while the sidebar hides them, so the roster, routing
+ * candidates and batch targets must exclude them here.
+ *
+ * A missing service (older host) or a throwing accessor yields an empty set:
+ * no filtering, no error.
+ */
+export function archivedSessionIds(ctx: unknown): Set<string> {
+  try {
+    const registry = (ctx as {
+      readonly workspaceRegistry?: { readonly archivedSessionIds?: unknown }
+    } | undefined)?.workspaceRegistry
+    const ids = registry?.archivedSessionIds
+    if (ids === null || ids === undefined) return new Set()
+    if (typeof (ids as Iterable<unknown>)[Symbol.iterator] !== 'function') return new Set()
+    return new Set([...(ids as Iterable<unknown>)].map((id) => String(id)))
+  } catch {
+    return new Set()
+  }
+}
+
+/**
  * The listed sessions that may take part in an ask: `swarm.routingExclude`
- * matches are dropped. Shared by `ask_session` and `ask_sessions`.
+ * matches and workspace-archived sessions are dropped. Shared by `ask_session`
+ * and `ask_sessions`.
  */
 export function allowedAskSessions(
   sessions: readonly CrossSessionSummary[],
   exclude: unknown,
+  archived?: ReadonlySet<string>,
 ): CrossSessionSummary[] {
   const entries = exclusionEntries(exclude)
-  return sessions.filter((session) => !summaryExcluded(entries, session))
+  return sessions.filter(
+    (session) => !summaryExcluded(entries, session) && !(archived?.has(session.sessionId) ?? false),
+  )
 }
 
 /** Fixed guard values for one call; separated so tests can drive them directly. */
@@ -1061,19 +1187,22 @@ export function checkAskGuards(input: {
   if (match.kind === 'missing') {
     // A miss is the moment the caller is tempted to dig session ids out of log
     // directories: hand over the recent sessions instead, titled as the user
-    // sees them, so the choice can go back to the user.
-    const recent = orderCandidates(input.sessions).slice(0, NOT_FOUND_CANDIDATE_LIMIT).map(candidateOf)
+    // sees them, so the choice can go back to the user. Display only: the pool
+    // is ordered (running first, then most recent) and the block caps itself.
+    const pool = recentCandidates(input.sessions)
+    const block = renderCandidateBlock(pool, { sameTitle: false })
     return {
       code: 'target-not-found',
-      message:
-        '没有找到匹配的会话。下面列出最近的会话，请把候选交给用户挑选（标题或 sessionId 都可以）；不要再去翻会话日志或目录找 id。',
-      candidates: recent,
+      message: `没有找到匹配的会话。下面列出最近的会话，请把候选交给用户挑选（标题或 sessionId 都可以）；不要再去翻会话日志或目录找 id。${block.length > 0 ? `\n${block}` : ''}`,
+      candidates: pool.slice(0, NOT_FOUND_CANDIDATE_LIMIT),
     }
   }
   if (match.kind === 'ambiguous') {
+    const total = Math.max(match.candidates.length, match.total ?? match.candidates.length)
+    const block = renderCandidateBlock(match.candidates, { total })
     return {
       code: 'target-ambiguous',
-      message: `有 ${match.candidates.length} 个会话都叫这个名字，不能猜。请把候选交给用户挑选（用 sessionId 指定即可精确命中）。`,
+      message: `有 ${total} 个会话都叫这个名字，不能猜。请把候选交给用户挑选（用 sessionId 指定即可精确命中）。${block.length > 0 ? `\n${block}` : ''}`,
       candidates: match.candidates,
     }
   }
@@ -1199,22 +1328,32 @@ export async function askSession(
   pendingWaits.add(input.currentSessionId)
   try {
     const sessions: CrossSessionSummary[] = []
-    // Only these are offered as candidates or delivered to; excluded sessions
-    // are as-if absent, except that naming one explicitly gets its own refusal.
+    // Only these are offered as candidates or delivered to; excluded and
+    // archived sessions are as-if absent, except that naming one explicitly
+    // gets its own refusal.
     const allowed: CrossSessionSummary[] = []
     const entries = exclusionEntries(input.exclude)
+    const archived = archivedSessionIds(ctx)
     let match: TargetMatch = { kind: 'missing' }
     try {
       const listed = await controller.list({}, signal)
       sessions.push(...listed.items)
       for (const session of sessions) {
-        if (!summaryExcluded(entries, session)) allowed.push(session)
+        if (summaryExcluded(entries, session)) continue
+        if (archived.has(session.sessionId)) continue
+        allowed.push(session)
       }
-      match = matchTargetSession(allowed, input.target ?? '')
-      // A reference that matches nothing usable but DOES name an excluded
-      // session is refused here, before any delivery path is touched.
-      if (match.kind === 'missing' && entries.length > 0) {
-        const full = matchTargetSession(sessions, input.target ?? '')
+      const targetText = (input.target ?? '').trim()
+      match = matchTargetSession(allowed, targetText)
+      if (match.kind === 'missing' && targetText.length > 0) {
+        const full = matchTargetSession(sessions, targetText)
+        // An archived session is refused explicitly: the host's archived-session
+        // gate would reject the delivery anyway, and the user must unarchive it.
+        if (full.kind === 'unique' && archived.has(full.target.sessionId)) {
+          return toToolError({ code: 'session-archived', message: ARCHIVED_SESSION_MESSAGE })
+        }
+        // A reference that matches nothing usable but DOES name an excluded
+        // session is refused here, before any delivery path is touched.
         const hitExcluded =
           full.kind === 'unique'
             ? sessions.some((session) => session.sessionId === full.target.sessionId && summaryExcluded(entries, session))
@@ -1222,7 +1361,7 @@ export async function askSession(
               full.candidates.some(
                 (candidate) => !allowed.some((session) => session.sessionId === candidate.sessionId),
               )
-        if (hitExcluded && (input.target ?? '').trim().length > 0) {
+        if (hitExcluded) {
           return toToolError({
             code: 'swarm-excluded',
             message: '这个会话被设置为不参与蜂群（设置 → 插件 → 顾问群 → 全局蜂群 → 不参与路由的会话）。',

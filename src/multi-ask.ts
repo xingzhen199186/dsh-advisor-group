@@ -14,6 +14,8 @@
 import { writeAskRecord, type AskRecord } from './ask-store'
 import {
   allowedAskSessions,
+  ARCHIVED_SESSION_MESSAGE,
+  archivedSessionIds,
   askStoreRoot,
   checkAskGuards,
   collectDeliveredAsk,
@@ -24,6 +26,8 @@ import {
   nextAskHop,
   nextAskId,
   normalizeWaitMs,
+  recentCandidates,
+  renderCandidateBlock,
   sessionDisplayName,
   trackBackgroundController,
   type AskSessionRejection,
@@ -321,7 +325,8 @@ export async function askSessions(
     for (const target of targets) skipped.push({ target, reason: '读取会话列表失败' })
     return skippedOnly(skipped)
   }
-  const allowed = allowedAskSessions(full, input.exclude)
+  const archived = archivedSessionIds(ctx)
+  const allowed = allowedAskSessions(full, input.exclude, archived)
   const own = full.find((session) => session.sessionId === input.currentSessionId)
   const senderName = own === undefined ? '未命名会话' : sessionDisplayName(own)
   const hop = nextAskHop(input.currentEvents)
@@ -336,20 +341,27 @@ export async function askSessions(
     }
     const match = matchTargetSession(allowed, target)
     if (match.kind === 'ambiguous') {
-      skipped.push({ target, reason: `有 ${match.candidates.length} 个同名会话` })
+      const total = Math.max(match.candidates.length, match.total ?? match.candidates.length)
+      const block = renderCandidateBlock(match.candidates, { total })
+      skipped.push({ target, reason: `有 ${total} 个同名会话${block.length > 0 ? `\n${block}` : ''}` })
       continue
     }
     if (match.kind === 'missing') {
       const fullMatch = matchTargetSession(full, target)
-      if (
+      if (fullMatch.kind === 'unique' && archived.has(fullMatch.target.sessionId)) {
+        skipped.push({ target, reason: ARCHIVED_SESSION_MESSAGE })
+      } else if (
         fullMatch.kind === 'unique' &&
         !allowed.some((session) => session.sessionId === fullMatch.target.sessionId)
       ) {
         skipped.push({ target, reason: '这个会话被设置为不参与蜂群' })
       } else if (fullMatch.kind === 'ambiguous') {
-        skipped.push({ target, reason: `有 ${fullMatch.candidates.length} 个同名会话` })
+        const total = Math.max(fullMatch.candidates.length, fullMatch.total ?? fullMatch.candidates.length)
+        const block = renderCandidateBlock(fullMatch.candidates, { total })
+        skipped.push({ target, reason: `有 ${total} 个同名会话${block.length > 0 ? `\n${block}` : ''}` })
       } else {
-        skipped.push({ target, reason: '没有找到匹配的会话' })
+        const block = renderCandidateBlock(recentCandidates(allowed), { sameTitle: false })
+        skipped.push({ target, reason: `没有找到匹配的会话${block.length > 0 ? `\n${block}` : ''}` })
       }
       continue
     }

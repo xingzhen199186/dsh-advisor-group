@@ -10,16 +10,20 @@ vi.mock('@deepseek-ai/dsh-tools', () => ({
 }))
 
 import {
+  ARCHIVED_SESSION_MESSAGE,
   ASK_CONTENT_MAX_BYTES,
   ASK_HOP_LIMIT,
   ASK_WAIT_DEFAULT_MS,
   ASK_WAIT_MAX_MS,
+  archivedSessionIds,
   askContentBytes,
   askSession,
   askStatus,
   buildAskEnvelope,
   buildAskMessage,
   cancelDetachedAsks,
+  candidateLine,
+  CANDIDATE_DISPLAY_LIMIT,
   checkAskGuards,
   collectAnswer,
   fallbackSessionName,
@@ -34,6 +38,7 @@ import {
   normalizeWaitMs,
   parseAskReply,
   renderAskResult,
+  renderCandidateBlock,
   resetPendingWaits,
   sessionDisplayName,
   waitForTargetIdle,
@@ -421,6 +426,132 @@ describe('swarm exclusion (swarm.routingExclude)', () => {
     const candidates = value.candidates as Array<{ sessionId: string }>
     expect(candidates.map((candidate) => candidate.sessionId)).not.toContain(TARGET)
     expect(candidates.map((candidate) => candidate.sessionId)).toContain('session-open')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Candidate display (sessionId · cwd · age, capped list)
+// ---------------------------------------------------------------------------
+
+describe('candidate display', () => {
+  it('caps a same-title list at 10 and summarizes the rest', () => {
+    const sessions = Array.from({ length: 15 }, (_, index) =>
+      titled(`s${index}`, 'jev浏览器', { updatedAt: 1_700_000_000_000 + index }),
+    )
+    const match = matchTargetSession(sessions, 'jev浏览器')
+    expect(match.kind).toBe('ambiguous')
+    if (match.kind !== 'ambiguous') return
+    expect(match.candidates).toHaveLength(CANDIDATE_DISPLAY_LIMIT)
+    const block = renderCandidateBlock(match.candidates, { total: match.total })
+    const lines = block.split('\n')
+    expect(lines[0]).toBe('同名会话较多：按下面的 sessionId 或目录指定')
+    expect(lines).toHaveLength(1 + CANDIDATE_DISPLAY_LIMIT + 1)
+    expect(block).toContain('…还有 5 个同名会话，可用目录关键词进一步收窄')
+    // Existing order (running first, then most recent) is preserved: s14..s5.
+    expect(lines[1]).toContain('s14')
+    expect(lines[CANDIDATE_DISPLAY_LIMIT]).toContain('s5')
+  })
+
+  it('renders name · sessionId · cwd · age on a candidate line', () => {
+    expect(
+      candidateLine({ sessionId: 'session-9', name: 'jev浏览器', hint: '', cwd: 'I:\\JEV', age: '3 天前' }),
+    ).toBe('- jev浏览器 · session-9 · I:\\JEV · 3 天前')
+  })
+
+  it('tells two rows with the same title apart', () => {
+    const block = renderCandidateBlock([
+      { sessionId: 'a', name: 'jev浏览器', hint: '', cwd: 'I:\\one', age: '刚刚' },
+      { sessionId: 'b', name: 'jev浏览器', hint: '', cwd: 'I:\\two', age: '2 天前' },
+    ])
+    const lines = block.split('\n').filter((line) => line.startsWith('- '))
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).not.toBe(lines[1])
+    expect(lines[0]).toContain('a')
+    expect(lines[1]).toContain('b')
+  })
+
+  it('caps the ambiguity refusal at 10 and keeps the reminder line', () => {
+    const sessions = Array.from({ length: 15 }, (_, index) =>
+      titled(`s${index}`, '同名', { updatedAt: 1_700_000_000_000 + index }),
+    )
+    const match = matchTargetSession(sessions, '同名')
+    const rejection = checkAskGuards({
+      guards: { currentSessionId: SELF, hop: 0 },
+      match,
+      sessions,
+      question: 'q',
+    })
+    expect(rejection?.code).toBe('target-ambiguous')
+    expect(rejection?.candidates).toHaveLength(CANDIDATE_DISPLAY_LIMIT)
+    expect(rejection?.message).toContain('有 15 个会话都叫这个名字')
+    expect(rejection?.message).toContain('同名会话较多')
+    expect(rejection?.message).toContain('…还有 5 个同名会话，可用目录关键词进一步收窄')
+  })
+
+  it('returns an empty block when there is nothing to show', () => {
+    expect(renderCandidateBlock([])).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Workspace-archived sessions
+// ---------------------------------------------------------------------------
+
+describe('workspace-archived sessions', () => {
+  it('reads the archived ids, and tolerates a missing or throwing service', () => {
+    expect([...archivedSessionIds({ workspaceRegistry: { archivedSessionIds: new Set(['a', 'b']) } })]).toEqual([
+      'a',
+      'b',
+    ])
+    expect(archivedSessionIds({})).toEqual(new Set())
+    expect(archivedSessionIds(undefined)).toEqual(new Set())
+    expect(
+      archivedSessionIds({
+        get workspaceRegistry(): never {
+          throw new Error('no inject')
+        },
+      }),
+    ).toEqual(new Set())
+  })
+
+  it('never offers an archived session as a target-not-found candidate', async () => {
+    const world = fakeWorld({ items: [titled(TARGET, '构建会话'), titled('session-open', '正常会话')] })
+    const { ctx, signal, input } = askInput(world, { target: '不存在的会话名' })
+    const value = (await askSession(
+      {
+        ...(ctx as Record<string, unknown>),
+        workspaceRegistry: { archivedSessionIds: new Set([TARGET]) },
+      },
+      signal,
+      input,
+    )) as Record<string, unknown>
+    expect(value.error).toBe('target-not-found')
+    const candidates = value.candidates as Array<{ sessionId: string }>
+    expect(candidates.map((candidate) => candidate.sessionId)).not.toContain(TARGET)
+    expect(candidates.map((candidate) => candidate.sessionId)).toContain('session-open')
+  })
+
+  it('refuses an explicit archived target without delivering', async () => {
+    const world = fakeWorld({ items: [titled(TARGET, '构建会话')] })
+    const { ctx, signal, input } = askInput(world)
+    const value = (await askSession(
+      {
+        ...(ctx as Record<string, unknown>),
+        workspaceRegistry: { archivedSessionIds: new Set([TARGET]) },
+      },
+      signal,
+      input,
+    )) as Record<string, unknown>
+    expect(value).toMatchObject({ ok: false, error: 'session-archived', message: ARCHIVED_SESSION_MESSAGE })
+    expect(world.followup).not.toHaveBeenCalled()
+    expect(world.prompt).not.toHaveBeenCalled()
+  })
+
+  it('does not filter when the host has no workspace registry', async () => {
+    const world = fakeWorld({ items: [titled(TARGET, '构建会话')] })
+    const { ctx, signal, input } = askInput(world, { target: '构建会话', waitMs: 20 })
+    const value = (await askSession(ctx, signal, input)) as Record<string, unknown>
+    expect(value.ok).toBe(true)
   })
 })
 
@@ -1320,11 +1451,33 @@ describe('ask_sessions batch', () => {
     expect(value.ok).toBe(true)
     expect(value.count).toBe(1)
     expect((value.results as unknown as unknown as Array<Record<string, unknown>>)[0].sessionId).toBe('t1')
-    expect(value.skipped).toEqual([
-      { target: '不存在', reason: '没有找到匹配的会话' },
+    // The unresolvable target carries the capped recent-session block.
+    expect(value.skipped).toHaveLength(3)
+    expect(value.skipped[0]?.target).toBe('不存在')
+    expect(value.skipped[0]?.reason).toContain('没有找到匹配的会话')
+    expect(value.skipped[0]?.reason).toContain('t1')
+    expect(value.skipped.slice(1)).toEqual([
       { target: '被排除的会话', reason: '这个会话被设置为不参与蜂群' },
       { target: '', reason: '没点名' },
     ])
+  })
+
+  it('skips a workspace-archived target with the archived reason', async () => {
+    const world = batchWorld([
+      { id: 't1', title: '甲会话', answer: '甲的答复' },
+      { id: 't2', title: '乙会话', answer: '乙的答复' },
+    ])
+    const value = await askSessions(
+      {
+        sessionController: world.controller,
+        workspaceRegistry: { archivedSessionIds: new Set(['t1']) },
+      },
+      new AbortController().signal,
+      batchInput(['t1', 't2'], { waitMs: 20 }),
+    )
+    expect(value.count).toBe(1)
+    expect((value.results as unknown as unknown as Array<Record<string, unknown>>)[0].sessionId).toBe('t2')
+    expect(value.skipped).toEqual([{ target: 't1', reason: ARCHIVED_SESSION_MESSAGE }])
   })
 
   it('fails the whole call only when every target is skipped', async () => {

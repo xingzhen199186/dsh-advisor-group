@@ -6,6 +6,7 @@ import { classifyWithJev, jevConfigured, routeWithJev, type JevClassificationRes
 import type { AdvisorGroupService } from './service'
 import { appendAdvisorStart, appendAskAnswer, appendAskStart } from './session-log'
 import {
+  archivedSessionIds,
   askSession,
   logJevDecision,
   sessionDisplayName,
@@ -451,6 +452,9 @@ export function registerAdvisorTools(
                 sessionId: { type: 'string', required: true },
                 name: { type: 'string', required: true },
                 hint: { type: 'string', required: true },
+                /** Display-only fields that tell identical titles apart. */
+                cwd: { type: 'string' },
+                age: { type: 'string' },
               },
             },
           },
@@ -486,18 +490,9 @@ export function registerAdvisorTools(
           : [
               {
                 type: 'text',
-                text: `【ask_session 未完成：${String(value.error ?? 'unknown')}】\n${String(value.message ?? '')}${
-                  Array.isArray(value.candidates) && value.candidates.length > 0
-                    ? `\n候选会话：\n${value.candidates
-                        .map(
-                          (item) =>
-                            `- ${String((item as { readonly name?: unknown }).name ?? '')} · ${String(
-                              (item as { readonly sessionId?: unknown }).sessionId ?? '',
-                            )}`,
-                        )
-                        .join('\n')}`
-                    : ''
-                }${renderRouteCandidates(value.routeCandidates)}`,
+                // The refusal message already carries the candidate block
+                // (name · sessionId · cwd · 多久前, capped + summarized).
+                text: `【ask_session 未完成：${String(value.error ?? 'unknown')}】\n${String(value.message ?? '')}${renderRouteCandidates(value.routeCandidates)}`,
               },
             ],
     },
@@ -564,10 +559,14 @@ export function registerAdvisorTools(
       // auto-picked: choosing the session stays the user's act.
       const targetText = typeof args.target === 'string' ? args.target.trim() : ''
       if (targetText.length === 0 && swarm.routingEnabled !== false) {
-        // Excluded sessions are dropped before recall, so they can never be a
-        // candidate and any alias pointing at one is dropped with the roster.
+        // Excluded and workspace-archived sessions are dropped before recall, so
+        // they can never be a candidate and any alias pointing at one is dropped
+        // with the roster.
+        const archived = archivedSessionIds(ctx)
         const roster = visibleRosterSessions(listedItems, swarm.rosterIncludeSubagents).filter(
-          (row) => !isSessionExcluded(hidden, { sessionId: row.sessionId, names: [sessionDisplayName(row)] }),
+          (row) =>
+            !archived.has(row.sessionId) &&
+            !isSessionExcluded(hidden, { sessionId: row.sessionId, names: [sessionDisplayName(row)] }),
         )
         // Local scoring always runs (recall + safety net); the selected engine
         // may re-rank it. Every Jev failure falls back to this local order.
@@ -754,7 +753,15 @@ export function registerAdvisorTools(
           return `${head}\n  ${body}`.trimEnd()
         })
         if (skipped.length > 0) {
-          blocks.push('跳过：', ...skipped.map((row) => `- ${String(row.target ?? '')}：${String(row.reason ?? '')}`))
+          blocks.push(
+            '跳过：',
+            ...skipped.map((row) => {
+              // Skip reasons may carry the multi-line candidate block; indent
+              // continuation lines so each skip stays one readable entry.
+              const reason = String(row.reason ?? '').split('\n').join('\n  ')
+              return `- ${String(row.target ?? '')}：${reason}`
+            }),
+          )
         }
         return [{ type: 'text', text: blocks.length > 0 ? blocks.join('\n') : '没有投递任何会话。' }]
       },
@@ -875,9 +882,12 @@ export function registerAdvisorTools(
       }
       try {
         const listed = await controller.list({}, exec.signal)
-        // The roster the model sees must match the routing pool: excluded
-        // sessions are hidden here as well.
-        const visible = listed.items.filter((item) => !isHiddenSession(swarm, item))
+        // The roster the model sees must match the routing pool: excluded and
+        // workspace-archived sessions are hidden here as well.
+        const archived = archivedSessionIds(ctx)
+        const visible = listed.items.filter(
+          (item) => !isHiddenSession(swarm, item) && !archived.has(item.sessionId),
+        )
         const rows = buildSessionRoster(visible, {
           query: typeof args.query === 'string' ? args.query : '',
           limit: typeof args.limit === 'number' ? args.limit : undefined,

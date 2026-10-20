@@ -231,16 +231,24 @@ describe('renderRoster', () => {
 
   it('renders a heading, one line per row, and the state flags', () => {
     expect(renderRoster(rows)).toBe(
-      ['共 2 个会话', '- 修插件 — I:\\demo · 刚刚 · 运行中', '- 旧会话 — （未知工作目录） · 2 天前 · 子代理'].join(
-        '\n',
-      ),
+      [
+        '共 2 个会话',
+        '- 修插件 · a — I:\\demo · 刚刚 · 运行中',
+        '- 旧会话 · b — （未知工作目录） · 2 天前 · 子代理',
+      ].join('\n'),
     )
+  })
+
+  it('puts the sessionId on every line so identical titles stay distinguishable', () => {
+    const rendered = renderRoster(rows)
+    expect(rendered).toContain('· a —')
+    expect(rendered).toContain('· b —')
   })
 
   it('renders the empty notice and the filtered heading', () => {
     expect(renderRoster([])).toBe('没有匹配的会话。')
     expect(renderRoster([rows[0]], { filtered: true })).toBe(
-      ['匹配 1 个会话', '- 修插件 — I:\\demo · 刚刚 · 运行中'].join('\n'),
+      ['匹配 1 个会话', '- 修插件 · a — I:\\demo · 刚刚 · 运行中'].join('\n'),
     )
   })
 
@@ -251,7 +259,7 @@ describe('renderRoster', () => {
   it('shows a title-less session by its last path segment, not the whole path twice', () => {
     const titleless = buildSessionRoster([source({ cwd: 'I:\\极简遥控器\\极简遥控器', updatedAt: Date.now() })])
     expect(renderRoster(titleless)).toBe(
-      ['共 1 个会话', '- 极简遥控器 — I:\\极简遥控器\\极简遥控器 · 刚刚'].join('\n'),
+      ['共 1 个会话', '- 极简遥控器 · session-1 — I:\\极简遥控器\\极简遥控器 · 刚刚'].join('\n'),
     )
   })
 })

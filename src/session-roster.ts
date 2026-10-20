@@ -380,18 +380,20 @@ export function buildSessionRoster(
 }
 
 /**
- * Render the roster as the text the model reads. `hasTitle` stays out of the
- * text on purpose: it is a diagnostic fact, not a hint for the model.
+ * Render the roster as the text the model reads. The sessionId is appended to
+ * every line so identical titles stay distinguishable (the structured rows
+ * already carry it). `hasTitle` stays out of the text on purpose: it is a
+ * diagnostic fact, not a hint for the model.
  * @param rows - ordered rows from {@link buildSessionRoster}.
  * @param options.filtered - true when a query produced these rows, so the head reads 匹配.
- * @returns heading plus one `- <name> — <hint>` line per row, or the empty notice.
+ * @returns heading plus one `- <name> · <sessionId> — <hint>` line per row, or the empty notice.
  */
 export function renderRoster(rows: readonly RosterRow[], options?: { filtered?: boolean }): string {
   if (rows.length === 0) return '没有匹配的会话。'
   const head = `${options?.filtered === true ? '匹配' : '共'} ${rows.length} 个会话`
   const lines = rows.map((row) => {
     const flags = `${row.running ? ' · 运行中' : ''}${row.subagent ? ' · 子代理' : ''}`
-    return `- ${shortSessionName(row.name, row.cwd)} — ${row.hint}${flags}`
+    return `- ${shortSessionName(row.name, row.cwd)} · ${row.sessionId} — ${row.hint}${flags}`
   })
   return [head, ...lines].join('\n')
 }
