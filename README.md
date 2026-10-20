@@ -62,6 +62,15 @@ DSH 里每个会话都在积累上下文：读过的代码、走过的弯路、�
 - **失败即沉默**：Jev 超时、回包异常、返回了名录外的会话——一律退回本地规则，不打扰、不投递、不刷警告。
 - **可追溯**：每次 Jev 判断落一行日志到 `storages/advisor-group/asks/routing-jev.log`，事后能看清它到底判了什么。
 
+### 实操细节
+
+- **怎么指定目标**：完整会话号、一字不差的标题，或者自然的名字都行——工作目录名就够（例如 `I:\极简遥控器\…` 下的会话，说「极简遥控器」即可）。唯一命中就直接问；几个命中会列出候选由你挑；拿不准的时候它绝不猜。
+- **界面上看到什么**：提问方一侧弹出聊天组卡片——先是「已投递，等待对方回应…」，然后出现对方的答案气泡和「📌 投递说明」（走的哪条通道、等到什么时候结束）。指定目标失败不弹卡片，只在工具行里如实报错。
+- **不想等怎么办**：默认同步等待（180 秒，可调），超时只返回已收到的内容且**不打断对方**；想边等边干就传 `detach`，投递即返回编号，之后用 `ask_result` 取。
+- **成本**：占用对方会话一次普通回合，按其自身模型计费；**不计入**每日咨询配额。
+
+一句话用法：直接说「问一下极简遥控器那个会话：进度到哪了」。
+
 ## ✅ 兼容性
 
 | 项目 | 状态 |
@@ -102,18 +111,6 @@ npx @deepseek-ai/dsh web
 
 模型可用工具：`ask_advisors`、`toggle_advisor_group`、`ask_session`。
 
-## 🔗 跨会话提问
-
-除了问顾问，插件还带一个工具 `ask_session`：把一个问题交给**另一个活着的会话**（同一宿主里的另一个窗口或标签），并唤醒它作答。
-
-- **怎么指定目标**：完整会话号、一字不差的标题，或者自然的名字都行——工作目录名就够（例如 `I:\极简遥控器\…` 下的会话，说「极简遥控器」即可）。唯一命中就直接问；好几个命中会列出候选（**正在运行**的、最近活跃的排前面），由你或模型挑一个；拿不准的时候它绝不猜。
-- **你会拿到什么**：从**投递回执**到对方会话**下一次整体空闲**之间，它产出的全部文字——这是「那段时间里对方说的话」，**不是**逐条对应的回答。超时（默认 180 秒，可调）只返回已经收到的内容，并且**不会打断对方**。
-- **界面上看到什么**：提问方一侧弹出聊天组卡片——先是「已投递，等待对方回应…」，然后出现对方的答案气泡和「📌 投递说明」（走的哪条通道、等到什么时候结束）。指定目标失败这类情况不弹卡片，只在工具行里如实报错。
-- **护栏**：跳数上限 2（防止两个会话来回接力）、不能问自己或子会话、同一会话同时只能等一个、单次载荷上限 32 KB；**任何情况下都不会取消对方的回合**。
-- **成本**：占用对方会话一次普通回合，按其自身模型计费；**不计入**每日咨询配额。
-
-一句话用法：直接说「问一下极简遥控器那个会话：进度到哪了」。
-
 ## ⚙️ 配置项
 
 | 键 | 类型 | 默认 | 说明 |
@@ -137,6 +134,16 @@ npx @deepseek-ai/dsh web
 | `trigger.jev.confidenceThreshold` | number | `0.6` | Jev 判「该找顾问」为是（或 0–1 分数达到该值）时升级 |
 | `trigger.jev.highRiskThreshold` | number | 跟随 `jev.confidenceThreshold` | Jev 判「高风险」为是（或 0–1 分数达到该值）时标记高风险；未设置则跟随 `trigger.jev.confidenceThreshold` |
 | `trigger.jev.useEnglishState` | boolean | `false` | 判定改用主模型附带的英文概要（`questionEn`）而非中文原问；展示与会话记录仍为中文 |
+| `swarm.enabled` | boolean | `true` | 跨会话功能总开关；关闭后 `ask_session` / `list_sessions` / `ask_result` 明确拒绝，不静默失效 |
+| `swarm.defaultMode` | string | `'wait'` | 默认应答方式：`wait` 同步等待｜`detach` 异步投递（显式传参永远优先） |
+| `swarm.defaultWaitMs` | number | `180000` | 默认等待上限（毫秒，1000–600000） |
+| `swarm.resultTtlHours` | number | `24` | 异步结果保留时长（小时，1–720；取结果时顺带清理过期记录） |
+| `swarm.rosterIncludeSubagents` | boolean | `false` | 会话名录是否列出子代理会话 |
+| `swarm.routingEnabled` | boolean | `true` | 没点名目标时，按问题匹配候选（只提候选，绝不自动投递） |
+| `swarm.routingTopN` | number | `3` | 返回的候选个数（1–8） |
+| `swarm.routingEngine` | string | `'local'` | 路由方式：`local` 本地打分｜`jev` 交 Jev 排序（闭合选项，失败自动回落本地） |
+| `swarm.routingAsk` | string | `'gated'` | 是否该问别的会话：`off`｜`gated` 本地预过滤 + Jev（默认）｜`always` 每轮都问 |
+| `swarm.routingExclude` | string[] | `[]` | 不参与路由的会话（标题关键词或完整 sessionId，一行一个）；被点名时拒绝投递 |
 | `ui.theme` | string | `retro-green` | 卡片主题（retro-green / retro-amber / retro-blue） |
 | `ui.showTimestamps` | boolean | `true` | 显示时间戳 |
 | `ui.autoExpand` | boolean | `true` | 自动展开卡片 |

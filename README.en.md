@@ -124,6 +124,16 @@ In one line: say "ask the 极简遥控器 session how far along it is".
 | `trigger.jev.confidenceThreshold` | number | `0.6` | Escalate when Jev answers `needsAdvisor` yes (or its 0–1 score reaches this value) |
 | `trigger.jev.highRiskThreshold` | number | follows `jev.confidenceThreshold` | Flag high-risk when Jev answers `high_risk` yes (or its 0–1 score reaches this value); unset = follows `trigger.jev.confidenceThreshold` |
 | `trigger.jev.useEnglishState` | boolean | `false` | Judge using the caller-supplied English gist (`questionEn`) instead of the Chinese question; display and session records stay Chinese |
+| `swarm.enabled` | boolean | `true` | Master switch for cross-session work; off makes `ask_session` / `list_sessions` / `ask_result` refuse instead of failing quietly |
+| `swarm.defaultMode` | string | `'wait'` | Default reply mode: `wait` (blocking) or `detach` (deliver and return an `askId`); an explicit argument always wins |
+| `swarm.defaultWaitMs` | number | `180000` | Default wait ceiling in ms (1000–600000) |
+| `swarm.resultTtlHours` | number | `24` | How long detached results are kept, in hours (1–720); expired records are pruned on read |
+| `swarm.rosterIncludeSubagents` | boolean | `false` | List subagent sessions in the roster |
+| `swarm.routingEnabled` | boolean | `true` | With no named target, match candidates from the question (candidates only — never delivered automatically) |
+| `swarm.routingTopN` | number | `3` | How many candidates to return (1–8) |
+| `swarm.routingEngine` | string | `'local'` | `local` scoring, or `jev` which reranks a closed option set and falls back to local on any failure |
+| `swarm.routingAsk` | string | `'gated'` | Whether a turn should consult another session: `off`, `gated` (local prefilter + Jev, default), `always` |
+| `swarm.routingExclude` | string[] | `[]` | Sessions excluded from routing (a title keyword or an exact sessionId per line); naming one is refused |
 | `ui.theme` | string | `retro-green` | Chat card theme (`retro-green` / `retro-amber` / `retro-blue`) |
 | `ui.showTimestamps` | boolean | `true` | Show timestamps |
 | `ui.autoExpand` | boolean | `true` | Auto-expand card |
