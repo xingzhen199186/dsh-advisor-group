@@ -962,6 +962,96 @@ const EXPLICIT_TARGET = [
 ]
 
 /**
+ * Harness-injected context blocks. They arrive as user-role messages but are
+ * never the user's own words, so the cross-session judgment must ignore them.
+ * Observed live (2026-10-20): the runtime-context snapshot, the Mnemon memory
+ * snapshot and the per-turn time line were each judged as a user turn.
+ */
+const INJECTED_CONTEXT_PREFIXES = [
+  'Current runtime context',
+  'MNEM RUNTIME MEMORY SNAPSHOT',
+  'Time sampled while preparing turn',
+  'Browser time zone for this request',
+  'You are an AI agent powered by DeepSeek Harness',
+] as const
+
+/**
+ * True when the trimmed text starts with a known harness-injected prefix. This
+ * is the belt-and-braces guard behind the source-kind gate: a host that
+ * mislabels injected context as a user prompt still must not trigger a Jev call.
+ */
+export function isInjectedContextText(text: string): boolean {
+  if (typeof text !== 'string') return false
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return false
+  return INJECTED_CONTEXT_PREFIXES.some((prefix) => trimmed.startsWith(prefix))
+}
+
+/** Text blocks of one inbound `user/message` event, joined; undefined otherwise. */
+export function userMessageTextOf(event: unknown): string | undefined {
+  if (event === null || typeof event !== 'object') return undefined
+  const value = event as { type?: unknown; data?: unknown }
+  if (value.type !== 'user/message') return undefined
+  const data = value.data
+  if (data === null || typeof data !== 'object') return undefined
+  const content = (data as { content?: unknown }).content
+  if (!Array.isArray(content)) return undefined
+  const text = content
+    .filter((part): part is { type?: unknown; text?: string } => part !== null && typeof part === 'object')
+    .filter((part) => part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text as string)
+    .join(' ')
+    .trim()
+  return text.length > 0 ? text : undefined
+}
+
+/**
+ * True only when the event is a genuine human prompt.
+ *
+ * Evidence (DSH `MessageSourceMap` in `@deepseek-ai/dsh-llm` + this host's real
+ * session logs): a `user/message` event carries its producer on
+ * `data.source` — a typed prompt is `{ kind: 'user' }`, an injected runtime
+ * context snapshot is `{ kind: 'runtime-context', form: 'snapshot', sections:
+ * [...] }`, and a cross-session relay is `{ kind: 'session-ask', askId, ... }`.
+ * Anything other than exactly `kind: 'user'` (including a missing source) is
+ * not the user's own words.
+ */
+export function isGenuineUserPrompt(event: unknown): boolean {
+  if (event === null || typeof event !== 'object') return false
+  const value = event as { type?: unknown; data?: unknown }
+  if (value.type !== 'user/message') return false
+  const data = value.data as { source?: unknown } | undefined
+  const source = data?.source
+  if (source === null || typeof source !== 'object') return false
+  return (source as { kind?: unknown }).kind === 'user'
+}
+
+/**
+ * Per-session mark: an injected-context skip was already logged for the current
+ * turn, so the next injected block stays silent. One line per turn, never one
+ * line per block.
+ */
+const injectedSkipLogged = new Set<string>()
+
+/** True when this injected block should write its once-per-turn skip line. */
+export function shouldLogInjectedSkip(sessionId: string): boolean {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return true
+  if (injectedSkipLogged.has(sessionId)) return false
+  injectedSkipLogged.add(sessionId)
+  return true
+}
+
+/** A genuine prompt starts a new turn: allow the next injected skip line. */
+export function resetInjectedSkipLog(sessionId: string | undefined): void {
+  if (typeof sessionId === 'string' && sessionId.length > 0) injectedSkipLogged.delete(sessionId)
+}
+
+/** Forgets every injected-skip mark. Test seam; nothing else needs to call it. */
+export function clearInjectedSkipLog(): void {
+  injectedSkipLogged.clear()
+}
+
+/**
  * Pure, network-free prefilter: does this text look like it points at another
  * session or at work another session has already done? True only when a
  * pointer phrase / project-like token is present AND the turn does not already
@@ -1023,10 +1113,10 @@ export interface CrossSessionTurnInput {
  * after the prefilter passes, `always` asks on every turn. Never throws and
  * never returns a hint for a sensitive / low-confidence / unparseable answer.
  *
- * Diagnostics: one log line per judgment attempt — a prefilter or
- * no-candidates stop is recorded as `skipped` with `called: false` (a
- * deliberate `off` mode writes nothing), and a Jev answer as `recommend` (a
- * hint was produced) or `none` (any veto).
+ * Diagnostics: one log line per judgment attempt — injected context, a
+ * prefilter stop or a no-candidates stop is recorded as `skipped` with
+ * `called: false` (a deliberate `off` mode writes nothing), and a Jev answer as
+ * `recommend` (a hint was produced) or `none` (any veto).
  */
 export async function crossSessionHintForTurn(input: CrossSessionTurnInput): Promise<string | undefined> {
   if (input.mode === 'off') return undefined
@@ -1035,6 +1125,13 @@ export async function crossSessionHintForTurn(input: CrossSessionTurnInput): Pro
     kind: 'ask' as const,
     question: input.text,
     candidates: candidates.map((candidate) => ({ id: candidate.sessionId, title: candidate.name })),
+  }
+  // Belt and braces behind the hook's source-kind gate: injected context is a
+  // user-role message but never a user turn, so it is never judged — in any
+  // mode, including `always`.
+  if (isInjectedContextText(input.text)) {
+    input.log?.({ ...recorded, called: false, configured: input.judge !== undefined, decision: 'skipped' })
+    return undefined
   }
   if (input.mode === 'gated' && !shouldConsiderCrossSession(input.text)) {
     input.log?.({ ...recorded, called: false, configured: input.judge !== undefined, decision: 'skipped' })

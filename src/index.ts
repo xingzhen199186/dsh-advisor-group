@@ -12,9 +12,14 @@ import { jevConfigured, judgeCrossSessionWithJev } from './providers/jev'
 import {
   appendCrossSessionHint,
   crossSessionHintForTurn,
+  isGenuineUserPrompt,
+  isInjectedContextText,
   rememberCrossSessionHint,
+  resetInjectedSkipLog,
   routeSessions,
   shouldConsiderCrossSession,
+  shouldLogInjectedSkip,
+  userMessageTextOf,
   type JevCrossSessionClient,
 } from './session-router'
 import './events'
@@ -24,19 +29,6 @@ export const name = 'dsh-advisor-group'
 export const inject = ['tools', 'llm', 'systemPrompt', 'sessions']
 
 export { Config }
-
-/** Text of an inbound user-message event, or null when the event is not one. */
-function userMessageText(event: { type: string; data?: unknown }): string | null {
-  if (event.type !== 'user/message') return null
-  const data = event.data as { content?: Array<{ type?: string; text?: string }> } | undefined
-  if (!data?.content) return null
-  const text = data.content
-    .filter((part) => part.type === 'text' && typeof part.text === 'string')
-    .map((part) => part.text as string)
-    .join(' ')
-    .trim()
-  return text.length > 0 ? text : null
-}
 
 /**
  * One background cross-session suggestion pass: recall the local candidates
@@ -131,14 +123,40 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // (see appendCrossSessionHint): nothing is delivered and the turn is never
   // blocked. `gated` mode is cheap by design — the pure prefilter decides
   // whether this turn may cost one Jev call; `always` asks on every turn.
+  //
+  // Only the user's OWN prompt is judged. Every user-role message (typed
+  // prompts, injected context, relayed asks) is a `user/message` event, and its
+  // producer kind lives on `data.source` — see `isGenuineUserPrompt`. The
+  // injected blocks (runtime context, memory snapshot, per-turn time line) were
+  // each judged as a user turn on 2026-10-20; the source gate stops that, and
+  // `isInjectedContextText` catches a host that mislabels them as `kind: 'user'`.
+  // One skipped diagnostics line per turn, never one per injected block.
   ctx.on('session/event', (session: Session, event: { type: string; data?: unknown }) => {
-    const text = userMessageText(event)
-    if (text === null) return
+    const text = userMessageTextOf(event)
+    if (text === undefined) return
     const cfg = service.getConfig()
     // The plugin's master switch and the swarm switch both silence suggestions.
     if (cfg.enabled === false || cfg.swarm.enabled === false) return
+    // `off` writes nothing at all, injected context included (no attempts).
     const mode = cfg.swarm.routingAsk ?? 'gated'
     if (mode === 'off') return
+    const injected = isInjectedContextText(text)
+    if (!isGenuineUserPrompt(event) || injected) {
+      // Injected context and relayed asks are never judged. Only injected
+      // context earns a diagnostics line (silent for relays).
+      if (injected && shouldLogInjectedSkip(session.id)) {
+        logJevDecision({
+          kind: 'ask',
+          question: text,
+          called: false,
+          configured: jevConfigured(cfg.trigger.jev),
+          decision: 'skipped',
+        })
+      }
+      return
+    }
+    // A genuine prompt starts a new turn: injected skips may log again.
+    resetInjectedSkipLog(session.id)
     const configured = jevConfigured(cfg.trigger.jev)
     if (mode === 'gated' && !shouldConsiderCrossSession(text)) {
       // Cheap stop before any I/O; still recorded so "no hint" is explainable.

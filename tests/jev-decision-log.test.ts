@@ -4,8 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { askStoreRoot, logJevDecision } from '../src/cross-session'
 import {
+  clearInjectedSkipLog,
   crossSessionHintForTurn,
+  isGenuineUserPrompt,
+  isInjectedContextText,
+  resetInjectedSkipLog,
   routeSessionsWithEngine,
+  shouldLogInjectedSkip,
+  userMessageTextOf,
   type RouteCandidate,
 } from '../src/session-router'
 import type { RosterSource } from '../src/session-roster'
@@ -60,6 +66,7 @@ describe('Jev decision log', () => {
     home = mkdtempSync(join(tmpdir(), 'advisor-group-jev-log-'))
     savedHome = process.env.DSH_HOME
     process.env.DSH_HOME = home
+    clearInjectedSkipLog()
   })
 
   afterEach(() => {
@@ -301,6 +308,103 @@ describe('Jev decision log', () => {
       expect(hint).toBeUndefined()
       const [line] = readLines()
       expect(line).toMatchObject({ decision: 'error', called: true, configured: true, error: 'Jev HTTP 500' })
+    })
+  })
+
+  describe('injected-context guard', () => {
+    const GENUINE_EVENT = {
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: '重启好了' }], source: { kind: 'user' } },
+    }
+    const RUNTIME_EVENT = {
+      type: 'user/message',
+      data: {
+        role: 'user',
+        content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n…' }],
+        source: { kind: 'runtime-context', form: 'snapshot', sections: [] },
+      },
+    }
+    const ASK_EVENT = {
+      type: 'user/message',
+      data: {
+        role: 'user',
+        content: [{ type: 'text', text: '那个会话的进度如何？' }],
+        source: {
+          kind: 'session-ask',
+          form: 'relay',
+          askId: 'ask-1',
+          senderSessionId: 'session-other',
+          senderName: '对方',
+          hop: 1,
+        },
+      },
+    }
+
+    it('matches every known injected-context prefix', () => {
+      for (const prefix of [
+        'Current runtime context',
+        'MNEM RUNTIME MEMORY SNAPSHOT',
+        'Time sampled while preparing turn',
+        'Browser time zone for this request',
+        'You are an AI agent powered by DeepSeek Harness',
+      ]) {
+        expect(isInjectedContextText(`${prefix}\nrest of the block`)).toBe(true)
+        expect(isInjectedContextText(`   ${prefix} 剩下的内容`)).toBe(true)
+      }
+      expect(isInjectedContextText('重启好了')).toBe(false)
+      expect(isInjectedContextText('   ')).toBe(false)
+      expect(isInjectedContextText(undefined as never)).toBe(false)
+    })
+
+    it('reads the text and the producer kind from one user message', () => {
+      expect(userMessageTextOf(GENUINE_EVENT)).toBe('重启好了')
+      expect(userMessageTextOf(RUNTIME_EVENT)).toContain('Current runtime context')
+      expect(userMessageTextOf({ type: 'assistant/message', data: {} })).toBeUndefined()
+      expect(userMessageTextOf({ type: 'user/message', data: { content: [] } })).toBeUndefined()
+      expect(isGenuineUserPrompt(GENUINE_EVENT)).toBe(true)
+      expect(isGenuineUserPrompt(RUNTIME_EVENT)).toBe(false)
+      // An inbound cross-session ask keeps its own kind: never a user prompt.
+      expect(isGenuineUserPrompt(ASK_EVENT)).toBe(false)
+      expect(isGenuineUserPrompt({ type: 'user/message', data: { content: [], source: {} } })).toBe(false)
+    })
+
+    it('never judges injected context, even in always mode', async () => {
+      let called = false
+      const hint = await crossSessionHintForTurn({
+        text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.',
+        mode: 'always',
+        candidates,
+        log: logJevDecision,
+        judge: async () => {
+          called = true
+          return { askConfidence: 0.9, pick: 'session-a', sensitiveConfidence: 0.1 }
+        },
+      })
+      expect(called).toBe(false)
+      expect(hint).toBeUndefined()
+      expect(readLines()[0]).toMatchObject({ kind: 'ask', decision: 'skipped', called: false })
+    })
+
+    it('still judges a genuine user message', async () => {
+      const hint = await crossSessionHintForTurn({
+        text: '重启好了',
+        mode: 'always',
+        candidates,
+        log: logJevDecision,
+        judge: async () => ({ askConfidence: 0.8, pick: 'session-a', sensitiveConfidence: 0.1 }),
+      })
+      expect(hint).toContain('极简遥控器新')
+    })
+
+    it('logs one skipped line per turn, not one per injected block', () => {
+      clearInjectedSkipLog()
+      expect(shouldLogInjectedSkip('session-1')).toBe(true)
+      expect(shouldLogInjectedSkip('session-1')).toBe(false)
+      // A genuine prompt starts a new turn.
+      resetInjectedSkipLog('session-1')
+      expect(shouldLogInjectedSkip('session-1')).toBe(true)
+      // A missing session id never suppresses a line.
+      expect(shouldLogInjectedSkip('')).toBe(true)
     })
   })
 })
