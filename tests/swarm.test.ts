@@ -232,15 +232,22 @@ describe('resolveAskDefaults', () => {
     ).toEqual({ waitMs: 5000, detach: false })
   })
 
-  it('fills only the omitted half of the pair', () => {
+  it('treats a wait ceiling as "wait" when detach is omitted', () => {
     expect(resolveAskDefaults({ detach: false }, { defaultMode: 'detach', defaultWaitMs: 60000 })).toEqual({
       waitMs: 60000,
       detach: false,
     })
+    // Passing waitMs alone asks to wait: defaultMode only wins when BOTH are omitted.
     expect(resolveAskDefaults({ waitMs: 9000 }, { defaultMode: 'detach', defaultWaitMs: 60000 })).toEqual({
       waitMs: 9000,
-      detach: true,
+      detach: false,
     })
+  })
+
+  it('lets an explicit detach win over a wait ceiling', () => {
+    expect(
+      resolveAskDefaults({ waitMs: 9000, detach: true }, { defaultMode: 'wait', defaultWaitMs: 60000 }),
+    ).toEqual({ waitMs: 9000, detach: true })
   })
 })
 

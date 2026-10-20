@@ -973,6 +973,15 @@ export function buildAnswerBackText(targetName: string, askId: string, answer: s
   return `【来自「${targetName}」 · askId=${askId}】\n${answer}`
 }
 
+/**
+ * Copy-back text used when the ask already rendered a card in the asking
+ * session: the full answer lives in that card and in the stored record, so the
+ * chat message points at it instead of printing the same text a second time.
+ */
+export function buildAnswerBackNotice(targetName: string, askId: string): string {
+  return `【来自「${targetName}」 · askId=${askId}】答复已就绪，并显示在跨会话卡片中。需要原文时调用 ask_result（askId=${askId}）。`
+}
+
 /** The merged batch copy-back: one message for every done answer. */
 export function buildBatchAnswerBackText(
   entries: readonly { readonly targetName: string; readonly askId: string; readonly answer: string }[],
@@ -1766,6 +1775,24 @@ async function runAsk(
         } catch (error) {
           console.warn('[dsh-advisor-group] 异步结果落盘失败：', error)
         }
+        // Close the cross-session card in detached mode too (2026-10-20): the
+        // synchronous path always settled it, so a detached ask used to stay on
+        // 「等待应答」 forever even after its answer had arrived.
+        if (input.onSettled) {
+          try {
+            input.onSettled({
+              askId,
+              question: input.question,
+              targetName: target.name,
+              answer: finalRecord.answer ?? '',
+              note:
+                finalRecord.note
+                ?? (finalRecord.error ? `等待/收集失败：${finalRecord.error}` : '等待结束。'),
+            })
+          } catch (error) {
+            console.warn('[dsh-advisor-group] 跨会话卡片（结束）回调失败：', error)
+          }
+        }
         // Auto copy-back: `done` only (a midnight "timeout" notice is noise), and
         // it must never block the settle path — every failure just leaves a note.
         if (finalRecord.state === 'done' && input.deliverBack !== false) {
@@ -1777,7 +1804,11 @@ async function runAsk(
               targetName: finalRecord.targetName,
               askId: finalRecord.askId,
             },
-            buildAnswerBackText(finalRecord.targetName, finalRecord.askId, finalRecord.answer ?? ''),
+            // With a card the answer is already rendered there; keep the chat
+            // message to a pointer so the same text is never shown twice.
+            input.onSettled
+              ? buildAnswerBackNotice(finalRecord.targetName, finalRecord.askId)
+              : buildAnswerBackText(finalRecord.targetName, finalRecord.askId, finalRecord.answer ?? ''),
           )
           finalRecord = outcome.ok
             ? { ...finalRecord, deliveredBack: true }

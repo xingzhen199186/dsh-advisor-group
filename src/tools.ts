@@ -400,7 +400,7 @@ export function registerAdvisorTools(
       detach: {
         type: 'boolean',
         description:
-          'Deliver without waiting: return immediately with an askId, then read the answer later with ask_result. Use it when the other session may take minutes, so this turn is not blocked. Ignored when waitMs is also given: pass only one.',
+          'Deliver without waiting: return immediately with an askId, then read the answer later with ask_result. Use it when the other session may take minutes, so this turn is not blocked. When detach is omitted, passing waitMs means wait; pass only one of them.',
       },
     },
     output: {
@@ -1141,10 +1141,14 @@ export function resolveAskDefaults(
   args: { readonly waitMs?: number; readonly detach?: boolean },
   swarm: Pick<Config['swarm'], 'defaultMode' | 'defaultWaitMs'>,
 ): { waitMs: number; detach: boolean } {
-  return {
-    waitMs: typeof args.waitMs === 'number' ? args.waitMs : swarm.defaultWaitMs,
-    detach: typeof args.detach === 'boolean' ? args.detach : swarm.defaultMode === 'detach',
-  }
+  const waitMs = typeof args.waitMs === 'number' ? args.waitMs : swarm.defaultWaitMs
+  // An explicit detach wins. Otherwise a wait ceiling means the caller wants to
+  // wait: `defaultMode` only applies when BOTH are omitted (see
+  // SwarmConfig.defaultMode). Treating waitMs as merely the detached timeout
+  // made a caller that asked to wait seven minutes get an instant askId.
+  if (typeof args.detach === 'boolean') return { waitMs, detach: args.detach }
+  if (typeof args.waitMs === 'number') return { waitMs, detach: false }
+  return { waitMs, detach: swarm.defaultMode === 'detach' }
 }
 
 /**

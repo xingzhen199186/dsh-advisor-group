@@ -867,6 +867,41 @@ describe('answer copy-back', () => {
     expect(sent.content[0].text).toBe(`【来自「目标会话」 · askId=${askId}】\n答复正文`)
   })
 
+  it('settles the card and sends only a pointer when a card exists', async () => {
+    const world = fakeWorld({
+      items: [titled(TARGET, '目标会话')],
+      watermarkEvents: () => [textEvent(1, 1000, '旧的正文')],
+      targetEvents: [textEvent(2, 2000, '答复正文')],
+    })
+    const settled: AskCardSettle[] = []
+    const { askId, read } = await detachRecord(world, {
+      onSettled: (info: AskCardSettle) => settled.push(info),
+    })
+    await until(() => read()?.state === 'done' && read()?.deliveredBack === true)
+    expect(settled).toHaveLength(1)
+    expect(settled[0].askId).toBe(askId)
+    expect(settled[0].targetName).toBe('目标会话')
+    expect(settled[0].answer).toBe('答复正文')
+    expect(settled[0].note).toContain('等待结束')
+    const sent = world.prompt.mock.calls[0][0] as { content: readonly { text: string }[] }
+    expect(sent.content[0].text).toContain(`askId=${askId}`)
+    expect(sent.content[0].text).toContain('ask_result')
+    // The card already holds the full text; the message must not repeat it.
+    expect(sent.content[0].text).not.toContain('答复正文')
+  })
+
+  it('settles the card on timeout as well', async () => {
+    const busy = titled(TARGET, '目标会话', { running: true })
+    const world = fakeWorld({ items: [busy], listItems: () => [busy] })
+    const settled: AskCardSettle[] = []
+    const { read } = await detachRecord(world, {
+      onSettled: (info: AskCardSettle) => settled.push(info),
+    })
+    await until(() => read()?.state === 'timeout' && settled.length > 0)
+    expect(settled[0].answer).toBe('')
+    expect(settled[0].note).toContain('上限')
+  })
+
   it('does not copy back a timeout', async () => {
     const busy = titled(TARGET, '目标会话', { running: true })
     const world = fakeWorld({ items: [busy], listItems: () => [busy] })
