@@ -4,10 +4,10 @@ import { Config, unwrapVolatileConfig, type Config as ConfigShape } from './conf
 import { AdvisorGroupService } from './service'
 import { registerAdvisorTools, visibleRosterSessions } from './tools'
 import { registerAdvisorSettingsAndRoutes } from './settings-api'
-import { cancelDetachedAsks, getSessionController, logJevDecision } from './cross-session'
+import { archivedSessionIds, cancelDetachedAsks, getSessionController, logJevDecision } from './cross-session'
 import { buildAdvisorPrompt } from './prompt'
 import { guardAdvisorPrompts, reportPromptGuardFindings } from './prompt-guard'
-import { withSessionLogSizes } from './session-roster'
+import { withSessionLogSizes, type RosterSource } from './session-roster'
 import { jevConfigured, judgeCrossSessionWithJev } from './providers/jev'
 import {
   appendCrossSessionHint,
@@ -21,6 +21,7 @@ import {
   shouldLogInjectedSkip,
   userMessageTextOf,
   type JevCrossSessionClient,
+  type RouteCandidate,
 } from './session-router'
 import './events'
 import './session-events-host'
@@ -29,6 +30,30 @@ export const name = 'dsh-advisor-group'
 export const inject = ['tools', 'llm', 'systemPrompt', 'sessions']
 
 export { Config }
+
+/**
+ * Recall candidates for the background hint, with workspace-archived sessions
+ * dropped: they stay in the raw session list while the sidebar hides them, and
+ * a hint must never point at one. An empty archived set changes nothing; a
+ * missing registry yields an empty set at the caller ({@link archivedSessionIds}).
+ * Pure except for the bounded log-size probe inside the router.
+ */
+export function recallHintCandidates(input: {
+  sessions: readonly RosterSource[]
+  archived: ReadonlySet<string>
+  text: string
+  topN?: number
+  currentSessionId: string
+  exclude?: readonly string[]
+}): RouteCandidate[] {
+  const live = input.sessions.filter((session) => !input.archived.has(session.sessionId))
+  return routeSessions(withSessionLogSizes(live), input.text, {
+    topN: input.topN,
+    currentSessionId: input.currentSessionId,
+    cache: false,
+    exclude: input.exclude ?? [],
+  })
+}
 
 /**
  * One background cross-session suggestion pass: recall the local candidates
@@ -49,11 +74,15 @@ async function suggestCrossSession(input: {
     const config = input.service.getConfig()
     const listed = await controller.list({}, input.signal)
     const roster = visibleRosterSessions(listed.items, config.swarm.rosterIncludeSubagents)
-    // Recall stays local (pure); Jev only judges the closed list.
-    const candidates = routeSessions(withSessionLogSizes(roster), input.text, {
+    // Recall stays local (pure); Jev only judges the closed list. Archived
+    // sessions are filtered out here so a hint cannot suggest a session the
+    // user archived (the sidebar no longer shows it).
+    const candidates = recallHintCandidates({
+      sessions: roster,
+      archived: archivedSessionIds(input.ctx),
+      text: input.text,
       topN: config.swarm.routingTopN,
       currentSessionId: input.sessionId,
-      cache: false,
       exclude: Array.isArray(config.swarm.routingExclude) ? config.swarm.routingExclude : [],
     })
     const judge: JevCrossSessionClient = async (turn) =>
