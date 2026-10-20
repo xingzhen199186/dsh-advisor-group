@@ -15,7 +15,6 @@ import {
   ASK_HOP_LIMIT,
   ASK_WAIT_DEFAULT_MS,
   ASK_WAIT_MAX_MS,
-  archivedSessionIds,
   askContentBytes,
   askSession,
   askStatus,
@@ -37,10 +36,12 @@ import {
   nextAskHop,
   normalizeWaitMs,
   parseAskReply,
+  registeredSessionIds,
   renderAskResult,
   renderCandidateBlock,
   resetPendingWaits,
   sessionDisplayName,
+  UNREGISTERED_SESSION_MESSAGE,
   waitForTargetIdle,
   type AskCardDelivery,
   type AskCardSettle,
@@ -494,34 +495,56 @@ describe('candidate display', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Workspace-archived sessions
+// Workspace registration (what the sidebar shows) and archived sessions
 // ---------------------------------------------------------------------------
 
-describe('workspace-archived sessions', () => {
-  it('reads the archived ids, and tolerates a missing or throwing service', () => {
-    expect([...archivedSessionIds({ workspaceRegistry: { archivedSessionIds: new Set(['a', 'b']) } })]).toEqual([
-      'a',
-      'b',
-    ])
-    expect(archivedSessionIds({})).toEqual(new Set())
-    expect(archivedSessionIds(undefined)).toEqual(new Set())
+/** One workspace registry whose workspaces list exactly `sessionIds`. */
+function registryCtx(sessionIds: readonly string[], archived: readonly string[] = []): Record<string, unknown> {
+  return {
+    workspaceRegistry: {
+      list: () => [{ sessionIds: [...sessionIds] }],
+      ...(archived.length === 0 ? {} : { archivedSessionIds: new Set(archived) }),
+    },
+  }
+}
+
+describe('workspace-registered sessions', () => {
+  it('reads the union of all workspaces, minus archived ids', () => {
+    const ctx = {
+      workspaceRegistry: {
+        list: () => [
+          { sessionIds: ['a', 'b'] },
+          { sessionIds: ['b', 'c'] },
+          { sessionIds: undefined },
+          null,
+        ],
+        archivedSessionIds: new Set(['b']),
+      },
+    }
+    expect([...(registeredSessionIds(ctx) ?? [])].sort()).toEqual(['a', 'c'])
+  })
+
+  it('returns undefined when the registry is missing, unusable or throwing', () => {
+    expect(registeredSessionIds({})).toBeUndefined()
+    expect(registeredSessionIds(undefined)).toBeUndefined()
+    expect(registeredSessionIds({ workspaceRegistry: {} })).toBeUndefined()
+    expect(registeredSessionIds({ workspaceRegistry: { list: 'nope' } })).toBeUndefined()
     expect(
-      archivedSessionIds({
+      registeredSessionIds({
         get workspaceRegistry(): never {
           throw new Error('no inject')
         },
       }),
-    ).toEqual(new Set())
+    ).toBeUndefined()
+    // An existing registry with no sessions is an EMPTY set, not undefined.
+    expect(registeredSessionIds({ workspaceRegistry: { list: () => [] } })).toEqual(new Set())
   })
 
-  it('never offers an archived session as a target-not-found candidate', async () => {
+  it('never offers an unregistered session as a target-not-found candidate', async () => {
     const world = fakeWorld({ items: [titled(TARGET, '构建会话'), titled('session-open', '正常会话')] })
     const { ctx, signal, input } = askInput(world, { target: '不存在的会话名' })
     const value = (await askSession(
-      {
-        ...(ctx as Record<string, unknown>),
-        workspaceRegistry: { archivedSessionIds: new Set([TARGET]) },
-      },
+      { ...(ctx as Record<string, unknown>), ...registryCtx(['session-open']) },
       signal,
       input,
     )) as Record<string, unknown>
@@ -531,20 +554,34 @@ describe('workspace-archived sessions', () => {
     expect(candidates.map((candidate) => candidate.sessionId)).toContain('session-open')
   })
 
-  it('refuses an explicit archived target without delivering', async () => {
+  it('refuses an explicitly named unregistered session without delivering', async () => {
     const world = fakeWorld({ items: [titled(TARGET, '构建会话')] })
     const { ctx, signal, input } = askInput(world)
     const value = (await askSession(
-      {
-        ...(ctx as Record<string, unknown>),
-        workspaceRegistry: { archivedSessionIds: new Set([TARGET]) },
-      },
+      { ...(ctx as Record<string, unknown>), ...registryCtx([]) },
+      signal,
+      input,
+    )) as Record<string, unknown>
+    expect(value).toMatchObject({
+      ok: false,
+      error: 'session-unregistered',
+      message: UNREGISTERED_SESSION_MESSAGE,
+    })
+    expect(world.followup).not.toHaveBeenCalled()
+    expect(world.prompt).not.toHaveBeenCalled()
+  })
+
+  it('keeps the archived refusal message distinct from the unregistered one', async () => {
+    const world = fakeWorld({ items: [titled(TARGET, '构建会话')] })
+    const { ctx, signal, input } = askInput(world)
+    const value = (await askSession(
+      { ...(ctx as Record<string, unknown>), ...registryCtx([TARGET], [TARGET]) },
       signal,
       input,
     )) as Record<string, unknown>
     expect(value).toMatchObject({ ok: false, error: 'session-archived', message: ARCHIVED_SESSION_MESSAGE })
+    expect(String(value.message)).not.toBe(UNREGISTERED_SESSION_MESSAGE)
     expect(world.followup).not.toHaveBeenCalled()
-    expect(world.prompt).not.toHaveBeenCalled()
   })
 
   it('does not filter when the host has no workspace registry', async () => {
@@ -1462,7 +1499,7 @@ describe('ask_sessions batch', () => {
     ])
   })
 
-  it('skips a workspace-archived target with the archived reason', async () => {
+  it('skips an archived target with the archived reason', async () => {
     const world = batchWorld([
       { id: 't1', title: '甲会话', answer: '甲的答复' },
       { id: 't2', title: '乙会话', answer: '乙的答复' },
@@ -1470,7 +1507,10 @@ describe('ask_sessions batch', () => {
     const value = await askSessions(
       {
         sessionController: world.controller,
-        workspaceRegistry: { archivedSessionIds: new Set(['t1']) },
+        workspaceRegistry: {
+          list: () => [{ sessionIds: ['t1', 't2'] }],
+          archivedSessionIds: new Set(['t1']),
+        },
       },
       new AbortController().signal,
       batchInput(['t1', 't2'], { waitMs: 20 }),
@@ -1478,6 +1518,25 @@ describe('ask_sessions batch', () => {
     expect(value.count).toBe(1)
     expect((value.results as unknown as unknown as Array<Record<string, unknown>>)[0].sessionId).toBe('t2')
     expect(value.skipped).toEqual([{ target: 't1', reason: ARCHIVED_SESSION_MESSAGE }])
+  })
+
+  it('skips an unregistered target with its own reason', async () => {
+    const world = batchWorld([
+      { id: 't1', title: '甲会话', answer: '甲的答复' },
+      { id: 't2', title: '乙会话', answer: '乙的答复' },
+    ])
+    const value = await askSessions(
+      {
+        sessionController: world.controller,
+        // Only t2 is registered; t1 still appears in the raw session list.
+        workspaceRegistry: { list: () => [{ sessionIds: ['t2'] }] },
+      },
+      new AbortController().signal,
+      batchInput(['t1', 't2'], { waitMs: 20 }),
+    )
+    expect(value.count).toBe(1)
+    expect((value.results as unknown as unknown as Array<Record<string, unknown>>)[0].sessionId).toBe('t2')
+    expect(value.skipped).toEqual([{ target: 't1', reason: UNREGISTERED_SESSION_MESSAGE }])
   })
 
   it('fails the whole call only when every target is skipped', async () => {

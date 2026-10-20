@@ -140,6 +140,7 @@ export type CrossSessionErrorCode =
   | 'delivery-rejected'
   | 'swarm-excluded'
   | 'session-archived'
+  | 'session-unregistered'
 
 export interface CrossSessionTarget {
   readonly sessionId: string
@@ -158,6 +159,10 @@ export interface CrossSessionCandidate {
 
 /** Refusal/skip reason for a session the user archived in the workspace. */
 export const ARCHIVED_SESSION_MESSAGE = '这个会话已归档，先在工作区里取消归档才能唤醒它'
+
+/** Refusal/skip reason for a session no workspace registers (the sidebar hides it). */
+export const UNREGISTERED_SESSION_MESSAGE =
+  '这个会话不在任何工作区里（可能已被移出工作区），先从工作区里找到它才能唤醒'
 
 export interface CrossSessionInterval {
   readonly from: string
@@ -1119,9 +1124,8 @@ export async function collectDeliveredAsk(
 
 /**
  * Archived session ids from the host workspace registry
- * (`workspaceRegistry.archivedSessionIds`, iterable). Archived sessions remain
- * in the raw session list while the sidebar hides them, so the roster, routing
- * candidates and batch targets must exclude them here.
+ * (`workspaceRegistry.archivedSessionIds`, iterable). Used for the explicit
+ * "this session is archived" refusal, and subtracted from the registered set.
  *
  * A missing service (older host) or a throwing accessor yields an empty set:
  * no filtering, no error.
@@ -1141,18 +1145,58 @@ export function archivedSessionIds(ctx: unknown): Set<string> {
 }
 
 /**
+ * The session ids the host's sidebar shows: the union of every workspace's
+ * `sessionIds` (`workspaceRegistry.list()`), minus the archived ones.
+ *
+ * This is the display universe: `sessionController.list()` also returns
+ * sessions that no workspace registers (e.g. sessions the user moved out of
+ * every workspace), and the sidebar hides those. Callers filter with this set.
+ *
+ * Returns `undefined` when the host has no workspace registry, its `list` is not
+ * a function, `list()` does not return an array, or anything throws — callers
+ * then skip the filter entirely (old-host behaviour), never fail.
+ */
+export function registeredSessionIds(ctx: unknown): Set<string> | undefined {
+  try {
+    const registry = (ctx as {
+      readonly workspaceRegistry?: { readonly list?: unknown }
+    } | undefined)?.workspaceRegistry
+    if (registry === null || registry === undefined) return undefined
+    const list = registry.list
+    if (typeof list !== 'function') return undefined
+    const workspaces = (list as () => unknown).call(registry)
+    if (!Array.isArray(workspaces)) return undefined
+    const ids = new Set<string>()
+    for (const workspace of workspaces) {
+      if (workspace === null || typeof workspace !== 'object') continue
+      const sessionIds = (workspace as { readonly sessionIds?: unknown }).sessionIds
+      if (sessionIds === null || sessionIds === undefined) continue
+      if (typeof (sessionIds as Iterable<unknown>)[Symbol.iterator] !== 'function') continue
+      for (const id of sessionIds as Iterable<unknown>) ids.add(String(id))
+    }
+    for (const archived of archivedSessionIds(ctx)) ids.delete(archived)
+    return ids
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * The listed sessions that may take part in an ask: `swarm.routingExclude`
- * matches and workspace-archived sessions are dropped. Shared by `ask_session`
- * and `ask_sessions`.
+ * matches are dropped, and so is every session the workspace registry does not
+ * register. A `undefined` registered set means "no registry": no filtering.
+ * Shared by `ask_session` and `ask_sessions`.
  */
 export function allowedAskSessions(
   sessions: readonly CrossSessionSummary[],
   exclude: unknown,
-  archived?: ReadonlySet<string>,
+  registered?: ReadonlySet<string>,
 ): CrossSessionSummary[] {
   const entries = exclusionEntries(exclude)
   return sessions.filter(
-    (session) => !summaryExcluded(entries, session) && !(archived?.has(session.sessionId) ?? false),
+    (session) =>
+      !summaryExcluded(entries, session) &&
+      (registered === undefined || registered.has(session.sessionId)),
   )
 }
 
@@ -1328,29 +1372,38 @@ export async function askSession(
   pendingWaits.add(input.currentSessionId)
   try {
     const sessions: CrossSessionSummary[] = []
-    // Only these are offered as candidates or delivered to; excluded and
-    // archived sessions are as-if absent, except that naming one explicitly
-    // gets its own refusal.
+    // Only these are offered as candidates or delivered to; excluded, archived
+    // and unregistered sessions are as-if absent, except that naming one
+    // explicitly gets its own refusal.
     const allowed: CrossSessionSummary[] = []
     const entries = exclusionEntries(input.exclude)
     const archived = archivedSessionIds(ctx)
+    // undefined = this host has no workspace registry → no registration filter.
+    const registered = registeredSessionIds(ctx)
     let match: TargetMatch = { kind: 'missing' }
     try {
       const listed = await controller.list({}, signal)
       sessions.push(...listed.items)
       for (const session of sessions) {
         if (summaryExcluded(entries, session)) continue
-        if (archived.has(session.sessionId)) continue
+        if (registered !== undefined && !registered.has(session.sessionId)) continue
         allowed.push(session)
       }
       const targetText = (input.target ?? '').trim()
       match = matchTargetSession(allowed, targetText)
       if (match.kind === 'missing' && targetText.length > 0) {
         const full = matchTargetSession(sessions, targetText)
-        // An archived session is refused explicitly: the host's archived-session
-        // gate would reject the delivery anyway, and the user must unarchive it.
-        if (full.kind === 'unique' && archived.has(full.target.sessionId)) {
-          return toToolError({ code: 'session-archived', message: ARCHIVED_SESSION_MESSAGE })
+        if (full.kind === 'unique') {
+          // An archived session is refused explicitly: the host's archived-session
+          // gate would reject the delivery anyway, and the user must unarchive it.
+          if (archived.has(full.target.sessionId)) {
+            return toToolError({ code: 'session-archived', message: ARCHIVED_SESSION_MESSAGE })
+          }
+          // A session no workspace registers is hidden from the sidebar; the
+          // user must find it through a workspace before it can be woken.
+          if (registered !== undefined && !registered.has(full.target.sessionId)) {
+            return toToolError({ code: 'session-unregistered', message: UNREGISTERED_SESSION_MESSAGE })
+          }
         }
         // A reference that matches nothing usable but DOES name an excluded
         // session is refused here, before any delivery path is touched.

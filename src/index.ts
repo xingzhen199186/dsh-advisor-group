@@ -4,7 +4,7 @@ import { Config, unwrapVolatileConfig, type Config as ConfigShape } from './conf
 import { AdvisorGroupService } from './service'
 import { registerAdvisorTools, visibleRosterSessions } from './tools'
 import { registerAdvisorSettingsAndRoutes } from './settings-api'
-import { archivedSessionIds, cancelDetachedAsks, getSessionController, logJevDecision } from './cross-session'
+import { cancelDetachedAsks, getSessionController, logJevDecision, registeredSessionIds } from './cross-session'
 import { buildAdvisorPrompt } from './prompt'
 import { guardAdvisorPrompts, reportPromptGuardFindings } from './prompt-guard'
 import { withSessionLogSizes, type RosterSource } from './session-roster'
@@ -32,21 +32,24 @@ export const inject = ['tools', 'llm', 'systemPrompt', 'sessions']
 export { Config }
 
 /**
- * Recall candidates for the background hint, with workspace-archived sessions
- * dropped: they stay in the raw session list while the sidebar hides them, and
- * a hint must never point at one. An empty archived set changes nothing; a
- * missing registry yields an empty set at the caller ({@link archivedSessionIds}).
- * Pure except for the bounded log-size probe inside the router.
+ * Recall candidates for the background hint, restricted to the sessions the
+ * host actually shows: the registered set (workspace `sessionIds` minus
+ * archived). `registered === undefined` means "this host has no workspace
+ * registry" and filters nothing; a session no workspace registers must never be
+ * suggested by a hint. Pure except for the bounded log-size probe inside the
+ * router.
  */
 export function recallHintCandidates(input: {
   sessions: readonly RosterSource[]
-  archived: ReadonlySet<string>
+  registered?: ReadonlySet<string>
   text: string
   topN?: number
   currentSessionId: string
   exclude?: readonly string[]
 }): RouteCandidate[] {
-  const live = input.sessions.filter((session) => !input.archived.has(session.sessionId))
+  const live = input.sessions.filter(
+    (session) => input.registered === undefined || input.registered.has(session.sessionId),
+  )
   return routeSessions(withSessionLogSizes(live), input.text, {
     topN: input.topN,
     currentSessionId: input.currentSessionId,
@@ -74,12 +77,12 @@ async function suggestCrossSession(input: {
     const config = input.service.getConfig()
     const listed = await controller.list({}, input.signal)
     const roster = visibleRosterSessions(listed.items, config.swarm.rosterIncludeSubagents)
-    // Recall stays local (pure); Jev only judges the closed list. Archived
-    // sessions are filtered out here so a hint cannot suggest a session the
-    // user archived (the sidebar no longer shows it).
+    // Recall stays local (pure); Jev only judges the closed list. Only the
+    // sessions the host's sidebar shows (workspace-registered, minus archived)
+    // may be recalled, so a hint cannot suggest an invisible session.
     const candidates = recallHintCandidates({
       sessions: roster,
-      archived: archivedSessionIds(input.ctx),
+      registered: registeredSessionIds(input.ctx),
       text: input.text,
       topN: config.swarm.routingTopN,
       currentSessionId: input.sessionId,

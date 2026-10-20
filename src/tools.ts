@@ -6,9 +6,9 @@ import { classifyWithJev, jevConfigured, routeWithJev, type JevClassificationRes
 import type { AdvisorGroupService } from './service'
 import { appendAdvisorStart, appendAskAnswer, appendAskStart } from './session-log'
 import {
-  archivedSessionIds,
   askSession,
   logJevDecision,
+  registeredSessionIds,
   sessionDisplayName,
   ASK_WAIT_DEFAULT_MS,
   ASK_WAIT_MAX_MS,
@@ -559,13 +559,13 @@ export function registerAdvisorTools(
       // auto-picked: choosing the session stays the user's act.
       const targetText = typeof args.target === 'string' ? args.target.trim() : ''
       if (targetText.length === 0 && swarm.routingEnabled !== false) {
-        // Excluded and workspace-archived sessions are dropped before recall, so
-        // they can never be a candidate and any alias pointing at one is dropped
-        // with the roster.
-        const archived = archivedSessionIds(ctx)
+        // Sessions no workspace registers (and swarm-excluded ones) are dropped
+        // before recall, so they can never be a candidate and any alias pointing
+        // at one is dropped with the roster.
+        const registered = registeredSessionIds(ctx)
         const roster = visibleRosterSessions(listedItems, swarm.rosterIncludeSubagents).filter(
           (row) =>
-            !archived.has(row.sessionId) &&
+            (registered === undefined || registered.has(row.sessionId)) &&
             !isSessionExcluded(hidden, { sessionId: row.sessionId, names: [sessionDisplayName(row)] }),
         )
         // Local scoring always runs (recall + safety net); the selected engine
@@ -882,11 +882,13 @@ export function registerAdvisorTools(
       }
       try {
         const listed = await controller.list({}, exec.signal)
-        // The roster the model sees must match the routing pool: excluded and
-        // workspace-archived sessions are hidden here as well.
-        const archived = archivedSessionIds(ctx)
+        // The roster the model sees must match the routing pool: only sessions
+        // some workspace registers (and not swarm-excluded) are shown.
+        const registered = registeredSessionIds(ctx)
         const visible = listed.items.filter(
-          (item) => !isHiddenSession(swarm, item) && !archived.has(item.sessionId),
+          (item) =>
+            !isHiddenSession(swarm, item) &&
+            (registered === undefined || registered.has(item.sessionId)),
         )
         const rows = buildSessionRoster(visible, {
           query: typeof args.query === 'string' ? args.query : '',

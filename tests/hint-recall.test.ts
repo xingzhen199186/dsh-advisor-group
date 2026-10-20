@@ -10,7 +10,7 @@ vi.mock('@deepseek-ai/dsh-tools', () => ({
 }))
 
 import { recallHintCandidates } from '../src/index'
-import { archivedSessionIds, askStoreRoot, logJevDecision } from '../src/cross-session'
+import { askStoreRoot, logJevDecision, registeredSessionIds } from '../src/cross-session'
 import { crossSessionHintForTurn } from '../src/session-router'
 import type { RosterSource } from '../src/session-roster'
 
@@ -58,11 +58,11 @@ describe('background hint recall', () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  it('drops workspace-archived sessions from the hint recall', () => {
-    const sessions = [row('archived', 'jev浏览器'), row('live', 'jev浏览器')]
+  it('drops sessions no workspace registers from the hint recall', () => {
+    const sessions = [row('unregistered', 'jev浏览器'), row('live', 'jev浏览器')]
     const candidates = recallHintCandidates({
       sessions,
-      archived: new Set(['archived']),
+      registered: new Set(['live']),
       text: 'jev浏览器 的进度',
       topN: 8,
       currentSessionId: 'self',
@@ -70,11 +70,11 @@ describe('background hint recall', () => {
     expect(candidates.map((candidate) => candidate.sessionId)).toEqual(['live'])
   })
 
-  it('produces no hint and logs one skipped line when every candidate is archived', async () => {
+  it('produces no hint and logs one skipped line when nothing is registered', async () => {
     const sessions = [row('a', 'jev浏览器'), row('b', 'jev浏览器')]
     const candidates = recallHintCandidates({
       sessions,
-      archived: new Set(['a', 'b']),
+      registered: new Set(),
       text: 'jev浏览器 的进度',
       topN: 8,
       currentSessionId: 'self',
@@ -98,23 +98,23 @@ describe('background hint recall', () => {
     ])
   })
 
-  it('never names an archived session in the hint', async () => {
-    const sessions = [row('archived', 'jev浏览器'), row('live', '另一个浏览器')]
+  it('never names an unregistered session in the hint', async () => {
+    const sessions = [row('unregistered', 'jev浏览器'), row('live', '另一个浏览器')]
     const candidates = recallHintCandidates({
       sessions,
-      archived: new Set(['archived']),
+      registered: new Set(['live']),
       text: '浏览器 的进度',
       topN: 8,
       currentSessionId: 'self',
     })
     expect(candidates.map((candidate) => candidate.sessionId)).toEqual(['live'])
-    // A Jev pick naming the archived id cannot resolve against the filtered
+    // A Jev pick naming the unregistered id cannot resolve against the filtered
     // list, so no hint is produced.
     const rejected = await crossSessionHintForTurn({
       text: '浏览器 的进度',
       mode: 'always',
       candidates,
-      judge: async () => ({ askConfidence: 0.9, pick: 'archived', sensitiveConfidence: 0.1 }),
+      judge: async () => ({ askConfidence: 0.9, pick: 'unregistered', sensitiveConfidence: 0.1 }),
     })
     expect(rejected).toBeUndefined()
     const accepted = await crossSessionHintForTurn({
@@ -128,11 +128,10 @@ describe('background hint recall', () => {
 
   it('does not filter when the host has no workspace registry', () => {
     const sessions = [row('a', 'jev浏览器'), row('b', 'jev浏览器')]
-    const archived = archivedSessionIds({})
-    expect([...archived]).toEqual([])
+    expect(registeredSessionIds({})).toBeUndefined()
     const candidates = recallHintCandidates({
       sessions,
-      archived,
+      registered: registeredSessionIds({}),
       text: 'jev浏览器 的进度',
       topN: 8,
       currentSessionId: 'self',

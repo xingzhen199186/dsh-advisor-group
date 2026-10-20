@@ -27,9 +27,11 @@ import {
   nextAskId,
   normalizeWaitMs,
   recentCandidates,
+  registeredSessionIds,
   renderCandidateBlock,
   sessionDisplayName,
   trackBackgroundController,
+  UNREGISTERED_SESSION_MESSAGE,
   type AskSessionRejection,
   type CrossSessionController,
   type CrossSessionLogEvent,
@@ -326,7 +328,9 @@ export async function askSessions(
     return skippedOnly(skipped)
   }
   const archived = archivedSessionIds(ctx)
-  const allowed = allowedAskSessions(full, input.exclude, archived)
+  // undefined = no workspace registry on this host → no registration filter.
+  const registered = registeredSessionIds(ctx)
+  const allowed = allowedAskSessions(full, input.exclude, registered)
   const own = full.find((session) => session.sessionId === input.currentSessionId)
   const senderName = own === undefined ? '未命名会话' : sessionDisplayName(own)
   const hop = nextAskHop(input.currentEvents)
@@ -350,6 +354,12 @@ export async function askSessions(
       const fullMatch = matchTargetSession(full, target)
       if (fullMatch.kind === 'unique' && archived.has(fullMatch.target.sessionId)) {
         skipped.push({ target, reason: ARCHIVED_SESSION_MESSAGE })
+      } else if (
+        fullMatch.kind === 'unique' &&
+        registered !== undefined &&
+        !registered.has(fullMatch.target.sessionId)
+      ) {
+        skipped.push({ target, reason: UNREGISTERED_SESSION_MESSAGE })
       } else if (
         fullMatch.kind === 'unique' &&
         !allowed.some((session) => session.sessionId === fullMatch.target.sessionId)
