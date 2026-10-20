@@ -585,6 +585,18 @@ export function logJevDecision(entry: JevDecisionLogEntry): void {
 /** Background loops started by `detach: true`; cancelled when the plugin unloads. */
 const detachedControllers = new Set<AbortController>()
 
+/**
+ * Track one background AbortController so plugin dispose ({@link
+ * cancelDetachedAsks}) aborts it. Returns a disposer that stops tracking it.
+ * The batch fan-out uses it so every in-flight target is cancelled on unload.
+ */
+export function trackBackgroundController(controller: AbortController): () => void {
+  detachedControllers.add(controller)
+  return () => {
+    detachedControllers.delete(controller)
+  }
+}
+
 /** Cancel every detached wait (plugin dispose). Safe to call repeatedly. */
 export function cancelDetachedAsks(): void {
   for (const controller of detachedControllers) controller.abort()
@@ -932,6 +944,90 @@ export async function collectTargetAnswer(
   } catch (error) {
     return { pieces: [], readError: describeHostError(error) }
   }
+}
+
+/** Inputs for the wait/collect half of one already-delivered ask. */
+export interface AskCollectionInput {
+  readonly target: CrossSessionTarget
+  readonly waitMs: number
+  /** ISO time of delivery (`interval.from`). */
+  readonly from: string
+  readonly targetWasRunning: boolean
+  /** Delivery floor: only events past it count as the answer. */
+  readonly fromSeq: number
+  /** The delivery receipt note, kept in the interval explanation. */
+  readonly deliveryNote: string
+  readonly log: (message: string) => void
+}
+
+/** One delivered ask's collected outcome. */
+export interface AskCollection {
+  readonly interval: CrossSessionInterval
+  /** Exactly what the target said inside the interval (recorded verbatim). */
+  readonly rawAnswer: string
+  readonly reply?: AskReply
+  readonly status: 'ok' | 'partial' | 'failed'
+  /** Interval explanation, for the caller/model. */
+  readonly note: string
+  /** Model-facing answer text (the collected text as-is). */
+  readonly answer: string
+}
+
+/**
+ * Wait for the target's next whole-session idle, then collect what it said in
+ * the interval. Shared by `ask_session` and the `ask_sessions` fan-out, so the
+ * wait/collect/classify semantics have exactly one implementation.
+ *
+ * All failure paths are already converted into outcome notes by
+ * {@link waitForTargetIdle} / {@link collectTargetAnswer}; this helper only
+ * throws if the caller's own abort mechanism throws.
+ */
+export async function collectDeliveredAsk(
+  controller: CrossSessionController,
+  signal: AbortSignal,
+  input: AskCollectionInput,
+): Promise<AskCollection> {
+  const outcome = await waitForTargetIdle(controller, signal, {
+    sessionId: input.target.sessionId,
+    targetWasRunning: input.targetWasRunning,
+    waitMs: input.waitMs,
+    log: input.log,
+    fromSeq: input.fromSeq,
+  })
+  const collected = await collectTargetAnswer(controller, input.target.sessionId, input.fromSeq)
+  const rawAnswer = joinAnswerPieces(collected.pieces)
+  const reply = parseAskReply(rawAnswer)
+  const status = askStatus({ endedBecause: outcome.endedBecause, answer: rawAnswer })
+  const to = outcome.endedBecause === 'idle' ? new Date().toISOString() : null
+  const notes = [
+    '区间语义：从投递回执到对方会话下一次整体空闲，这两个时刻之间对方产出的文字都算在内——这是「这个区间里对方说的话」，不是逐条对应的回答。',
+    input.deliveryNote,
+    outcome.note,
+    input.targetWasRunning
+      ? '投递时对方正在忙，问题已排队，会在它当前回合结束后进入新回合。'
+      : '投递时对方不忙，宿主已唤醒它开一个新回合。',
+    collected.readError === undefined ? '' : `读取对方会话日志时出错，answer 可能不完整：${collected.readError}`,
+  ].filter((line) => line.length > 0)
+  return {
+    interval: { from: input.from, to, endedBecause: outcome.endedBecause },
+    rawAnswer,
+    ...(reply === undefined ? {} : { reply }),
+    status,
+    note: notes.join('\n'),
+    answer: rawAnswer,
+  }
+}
+
+/**
+ * The listed sessions that may take part in an ask: `swarm.routingExclude`
+ * matches are dropped. Shared by `ask_session` and `ask_sessions`.
+ */
+export function allowedAskSessions(
+  sessions: readonly CrossSessionSummary[],
+  exclude: unknown,
+): CrossSessionSummary[] {
+  const entries = exclusionEntries(exclude)
+  return sessions.filter((session) => !summaryExcluded(entries, session))
 }
 
 /** Fixed guard values for one call; separated so tests can drive them directly. */
@@ -1292,52 +1388,34 @@ async function runAsk(
   // on abort, list/watermark/collect convert failures into outcome notes), so
   // every path — idle, timeout, cancelled, host error — falls through to the
   // settle call; the card can never be left open by a throwing wait.
-  const outcome = await waitForTargetIdle(controller, signal, {
-    sessionId: target.sessionId,
-    targetWasRunning: delivery.receipt.targetWasRunning,
+  const collected = await collectDeliveredAsk(controller, signal, {
+    target,
     waitMs,
-    log: listed.log,
+    from,
+    targetWasRunning: delivery.receipt.targetWasRunning,
     fromSeq: delivery.receipt.fromSeq,
+    deliveryNote: delivery.receipt.note,
+    log: listed.log,
   })
-  const collected = await collectTargetAnswer(
-    controller,
-    target.sessionId,
-    delivery.receipt.fromSeq,
-  )
-  const rawAnswer = joinAnswerPieces(collected.pieces)
-  const answer = rawAnswer
-  const reply = parseAskReply(rawAnswer)
-  const status = askStatus({ endedBecause: outcome.endedBecause, answer })
-  const to = outcome.endedBecause === 'idle' ? new Date().toISOString() : null
-  const notes = [
-    '区间语义：从投递回执到对方会话下一次整体空闲，这两个时刻之间对方产出的文字都算在内——这是「这个区间里对方说的话」，不是逐条对应的回答。',
-    delivery.receipt.note,
-    outcome.note,
-    delivery.receipt.targetWasRunning
-      ? '投递时对方正在忙，问题已排队，会在它当前回合结束后进入新回合。'
-      : '投递时对方不忙，宿主已唤醒它开一个新回合。',
-    collected.readError === undefined ? '' : `读取对方会话日志时出错，answer 可能不完整：${collected.readError}`,
-  ].filter((line) => line.length > 0)
-  const note = notes.join('\n')
   // Settle the card BEFORE returning so the closed state is in the log by
   // the time the tool result reaches the model.
   input.onSettled?.({
     askId,
     question: input.question,
     targetName: target.name,
-    answer: rawAnswer,
-    note,
+    answer: collected.rawAnswer,
+    note: collected.note,
   })
   return {
     ok: true,
     target: { sessionId: target.sessionId, name: target.name },
     delivered: delivery.receipt.delivered,
     askId,
-    interval: { from, to, endedBecause: outcome.endedBecause },
-    answer,
-    ...(reply === undefined ? {} : { reply }),
-    status,
-    note,
+    interval: collected.interval,
+    answer: collected.answer,
+    ...(collected.reply === undefined ? {} : { reply: collected.reply }),
+    status: collected.status,
+    note: collected.note,
   }
 }
 

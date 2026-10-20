@@ -26,6 +26,7 @@ import {
   getSessionController,
   inboundAskId,
   isSubagentDeliveryRejection,
+  isWaiting,
   joinAnswerPieces,
   logWatermark,
   matchTargetSession,
@@ -44,8 +45,9 @@ import {
   type CrossSessionSummary,
   type SessionAskMessageSource,
 } from '../src/cross-session'
-import { askStoreDir, readAskRecord } from '../src/ask-store'
+import { askStoreDir, listAskRecords, readAskRecord } from '../src/ask-store'
 import { registerAdvisorTools } from '../src/tools'
+import { askSessions, type AskSessionsInput } from '../src/multi-ask'
 import type { AdvisorGroupService } from '../src/service'
 
 const SELF = 'session-self'
@@ -994,6 +996,7 @@ describe('ask_session tool contract', () => {
       'ask_advisors',
       'toggle_advisor_group',
       'ask_session',
+      'ask_sessions',
       'list_sessions',
       'ask_result',
     ])
@@ -1108,5 +1111,314 @@ describe('structured reply protocol', () => {
       }
     ).text
     expect(text).toContain('一段自由发挥的话')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Batch ask (ask_sessions)
+// ---------------------------------------------------------------------------
+
+interface BatchTargetSpec {
+  readonly id: string
+  readonly title: string
+  readonly origin?: 'subagent'
+  /** Reports running forever: the wait hits its ceiling. */
+  readonly busy?: boolean
+  /** Assistant text before delivery (sets the delivery watermark). */
+  readonly before?: string
+  /** Assistant text after delivery: what the batch collects. */
+  readonly answer?: string
+  /** Makes both delivery channels fail. */
+  readonly deliverThrows?: unknown
+}
+
+/**
+ * Minimal multi-target host: every spec is a session whose log shows `before`
+ * until a delivery happened and `before + answer` afterwards. `busy` specs stay
+ * running so the per-target ceiling has something to hit.
+ */
+function batchWorld(specs: readonly BatchTargetSpec[], extra: readonly CrossSessionSummary[] = []) {
+  const deliveries = new Map<string, number>()
+  const followups: Array<{ sessionId: string; source: SessionAskMessageSource }> = []
+  const controller: CrossSessionController = {
+    list: async () => ({
+      items: [
+        ...specs.map((spec) =>
+          summary({
+            sessionId: spec.id,
+            running: spec.busy === true,
+            ...(spec.origin === undefined ? {} : { origin: spec.origin }),
+            projections: { values: { title: spec.title } },
+          }),
+        ),
+        ...extra,
+      ],
+    }),
+    resolveAgent: async (sessionId: string) => {
+      const spec = specs.find((candidate) => candidate.id === sessionId)
+      if (spec === undefined) return { error: { code: 'session/not-found' } }
+      if (spec.deliverThrows !== undefined) throw spec.deliverThrows
+      const delivered = (deliveries.get(sessionId) ?? 0) > 0
+      const events: CrossSessionLogEvent[] = [
+        ...(spec.before === undefined ? [] : [textEvent(1, 1000, spec.before)]),
+        ...(delivered && spec.answer !== undefined ? [textEvent(3, 2000, spec.answer)] : []),
+      ]
+      return {
+        agent: {
+          session: { id: sessionId, header: { cwd: 'C:\\work' }, snapshotEvents: () => events },
+          followup: (message: unknown) => {
+            deliveries.set(sessionId, (deliveries.get(sessionId) ?? 0) + 1)
+            followups.push({ sessionId, source: (message as { source: SessionAskMessageSource }).source })
+          },
+        },
+      }
+    },
+    prompt: async () => {
+      throw new Error('batch tests must not need the prompt fallback')
+    },
+  }
+  return { controller, followups }
+}
+
+function batchInput(targets: readonly string[], overrides: Partial<AskSessionsInput> = {}): AskSessionsInput {
+  return {
+    currentSessionId: SELF,
+    currentEvents: [],
+    targets,
+    question: '大家都看一下这个报错',
+    defaultWaitMs: 60,
+    swarmEnabled: true,
+    log: () => {},
+    ...overrides,
+  }
+}
+
+/** Poll a predicate (background records settle on their own schedule). */
+async function until(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
+describe('ask_sessions batch', () => {
+  let home: string
+  let savedHome: string | undefined
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'advisor-group-batch-'))
+    savedHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    resetPendingWaits()
+  })
+
+  afterEach(() => {
+    cancelDetachedAsks()
+    resetPendingWaits()
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  const recordDir = (): string => askStoreDir(join(home, 'storages', 'advisor-group'))
+
+  it('delivers to three targets and returns three results in order', async () => {
+    const world = batchWorld([
+      { id: 't1', title: '甲会话', answer: '甲的答复' },
+      { id: 't2', title: '乙会话', answer: '乙的答复' },
+      { id: 't3', title: '丙会话', answer: '丙的答复' },
+    ])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      batchInput(['t1', 't2', 't3'], { waitMs: 20 }),
+    )
+    expect(value.ok).toBe(true)
+    expect(value.count).toBe(3)
+    const results = value.results as unknown as Array<Record<string, unknown>>
+    expect(results.map((row) => row.sessionId)).toEqual(['t1', 't2', 't3'])
+    expect(results.map((row) => row.state)).toEqual(['done', 'done', 'done'])
+    expect(results.map((row) => row.answer)).toEqual(['甲的答复', '乙的答复', '丙的答复'])
+    expect(value.skipped).toEqual([])
+    // Each delivered target got its own record, readable by ask_result later.
+    for (const row of results) {
+      const record = readAskRecord(recordDir(), String(row.askId))
+      expect(record).toMatchObject({ state: 'done', answer: row.answer })
+    }
+    expect(listAskRecords(recordDir(), { sessionId: SELF })).toHaveLength(3)
+    // The batch never touches the single-ask latch.
+    expect(isWaiting(SELF)).toBe(false)
+  })
+
+  it('records parentAskId on every delivered batch record', async () => {
+    const world = batchWorld([{ id: 't1', title: '甲会话', answer: '甲的答复' }])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      batchInput(['t1'], { waitMs: 20, currentEvents: [userEvent(1, 1, askSource(1))] }),
+    )
+    const results = value.results as unknown as Array<Record<string, unknown>>
+    expect(readAskRecord(recordDir(), String(results[0].askId))?.parentAskId).toBe('a1')
+  })
+
+  it('reports a slow target timing out while the others finish (mode all)', async () => {
+    const world = batchWorld([
+      { id: 't1', title: '甲会话', answer: '甲的答复' },
+      { id: 't2', title: '乙会话', busy: true },
+      { id: 't3', title: '丙会话', answer: '丙的答复' },
+    ])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      batchInput(['t1', 't2', 't3'], { waitMs: 20 }),
+    )
+    const results = value.results as unknown as Array<Record<string, unknown>>
+    expect(results.map((row) => row.state)).toEqual(['done', 'timeout', 'done'])
+    expect(results.map((row) => row.answer)).toEqual(['甲的答复', '', '丙的答复'])
+    expect(readAskRecord(recordDir(), String(results[1].askId))?.state).toBe('timeout')
+  })
+
+  it('mode any returns the first settled target while the rest still settle', async () => {
+    const world = batchWorld([
+      // Its delivery fails at once, so it is deterministically the first to settle.
+      { id: 't1', title: '甲会话', deliverThrows: { code: 'session/writer-held' } },
+      { id: 't2', title: '乙会话', answer: '乙的答复' },
+    ])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      batchInput(['t1', 't2'], { waitMs: 20, mode: 'any' }),
+    )
+    expect(value.ok).toBe(true)
+    expect(value.count).toBe(1)
+    const results = value.results as unknown as Array<Record<string, unknown>>
+    expect(results[0]).toMatchObject({ sessionId: 't1', state: 'error' })
+    // The loser keeps running after the call returns; its record settles later.
+    await until(() =>
+      listAskRecords(recordDir(), { sessionId: SELF }).some((record) => record.state !== 'waiting'),
+    )
+    const records = listAskRecords(recordDir(), { sessionId: SELF })
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({ targetSessionId: 't2', state: 'done', answer: '乙的答复' })
+  })
+
+  it('skips excluded, unresolvable and duplicate targets with reasons', async () => {
+    const world = batchWorld([
+      { id: 't1', title: '甲会话', answer: '甲的答复' },
+      { id: 'excluded', title: '被排除的会话' },
+    ])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      // 't1' and '甲会话' resolve to the same session: the duplicate collapses.
+      batchInput(['t1', '甲会话', '不存在', '被排除的会话', ''], {
+        waitMs: 20,
+        exclude: ['被排除的会话'],
+      }),
+    )
+    expect(value.ok).toBe(true)
+    expect(value.count).toBe(1)
+    expect((value.results as unknown as unknown as Array<Record<string, unknown>>)[0].sessionId).toBe('t1')
+    expect(value.skipped).toEqual([
+      { target: '不存在', reason: '没有找到匹配的会话' },
+      { target: '被排除的会话', reason: '这个会话被设置为不参与蜂群' },
+      { target: '', reason: '没点名' },
+    ])
+  })
+
+  it('fails the whole call only when every target is skipped', async () => {
+    const world = batchWorld([])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      batchInput(['', '不存在'], { waitMs: 20 }),
+    )
+    expect(value).toEqual({
+      ok: false,
+      count: 0,
+      results: [],
+      skipped: [
+        { target: '', reason: '没点名' },
+        { target: '不存在', reason: '没有找到匹配的会话' },
+      ],
+    })
+  })
+
+  it('applies self and subagent guards per target', async () => {
+    const world = batchWorld([
+      { id: SELF, title: '本会话' },
+      { id: 'sub', title: '子会话', origin: 'subagent' },
+      { id: 't3', title: '丙会话', answer: '丙的答复' },
+    ])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      batchInput([SELF, 'sub', 't3'], { waitMs: 20 }),
+    )
+    expect(value.count).toBe(1)
+    expect((value.results as unknown as unknown as Array<Record<string, unknown>>)[0].sessionId).toBe('t3')
+    expect(value.skipped).toEqual([
+      { target: SELF, reason: '目标是当前会话自己' },
+      { target: 'sub', reason: '目标会话是子代理（subagent）会话' },
+    ])
+  })
+
+  it('applies the hop guard per target', async () => {
+    const world = batchWorld([{ id: 't1', title: '甲会话', answer: '甲的答复' }])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      batchInput(['t1'], { waitMs: 20, currentEvents: [userEvent(1, 1, askSource(2))] }),
+    )
+    expect(value.ok).toBe(false)
+    expect(value.skipped).toEqual([{ target: 't1', reason: '本次提问会超过 2 跳转发上限' }])
+  })
+
+  it('skips every target with the swarm-disabled reason when the swarm is off', async () => {
+    const world = batchWorld([{ id: 't1', title: '甲会话', answer: '甲的答复' }])
+    const value = await askSessions(
+      { sessionController: world.controller },
+      new AbortController().signal,
+      batchInput(['t1'], { waitMs: 20, swarmEnabled: false }),
+    )
+    expect(value.ok).toBe(false)
+    expect(value.count).toBe(0)
+    expect(value.skipped).toEqual([
+      { target: 't1', reason: '蜂群模式已在设置里关闭（设置 → 插件 → 顾问群 → 全局蜂群）。' },
+    ])
+  })
+})
+
+describe('ask_sessions tool contract', () => {
+  it('declares the batch parameter and result shape', () => {
+    const tools = registerAdvisorTools({} as AdvisorGroupService)
+    const tool = tools.find((candidate) => candidate.name === 'ask_sessions')
+    expect(tool).toBeDefined()
+    const params = tool?.parameters as Record<string, { required?: boolean; type?: string }>
+    expect(params.targets?.required).toBe(true)
+    expect(params.question?.required).toBe(true)
+    expect(params.mode?.type).toBe('string')
+    const properties = (
+      tool?.output as { schema: { properties: Record<string, unknown> } }
+    ).schema.properties
+    expect(Object.keys(properties).sort()).toEqual(['count', 'ok', 'results', 'skipped'])
+    const results = properties.results as {
+      items: { properties: Record<string, unknown> }
+    }
+    expect(Object.keys(results.items.properties).sort()).toEqual([
+      'answer',
+      'askId',
+      'error',
+      'name',
+      'note',
+      'sessionId',
+      'state',
+      'status',
+    ])
+    const skipped = properties.skipped as {
+      items: { properties: Record<string, unknown> }
+    }
+    expect(Object.keys(skipped.items.properties).sort()).toEqual(['reason', 'target'])
   })
 })

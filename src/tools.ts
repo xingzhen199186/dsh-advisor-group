@@ -32,6 +32,7 @@ import type { ConsultSession, ConsultSummary } from './types'
 import type { Config } from './config'
 import { buildSessionRoster, renderRoster, shortSessionName, withSessionLogSizes, type RosterRow, type RosterSource } from './session-roster'
 import { listAskRecords, pruneAskRecords, readAskRecord, type AskRecord } from './ask-store'
+import { askSessions } from './multi-ask'
 import type { Session } from '@deepseek-ai/dsh-session'
 
 export function registerAdvisorTools(
@@ -663,6 +664,124 @@ export function registerAdvisorTools(
   })
 
   /**
+   * Batch fan-out: one question to 1–8 sessions in one call. Each target gets
+   * its own askId and AskRecord (ask_result keeps working); unnamed, ambiguous,
+   * excluded or guard-rejected targets are skipped with a reason, never guessed.
+   */
+  const askSessionsTool = defineTool({
+    name: 'ask_sessions',
+    description:
+      'Ask ONE question to 1–8 existing sessions in a single call and collect the results. targets uses the same spelling as ask_session (exact sessionId, exact title, or a natural partial name). mode "all" (default) waits until every target settles or its own ceiling passes; mode "any" returns as soon as the first target settles while the others keep running in the background (their ask_result records still settle). There is NO routing here: an unnamed or ambiguous target is skipped with a reason instead of being guessed. Every delivered target gets its own askId; read a later result with ask_result.',
+    parameters: {
+      targets: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'The sessions to ask, 1–8 entries, same spelling as ask_session (exact id, exact title, or a natural partial name). Duplicates collapse into one; unresolvable or excluded targets are skipped with a reason.',
+        required: true,
+      },
+      question: {
+        type: 'string',
+        description:
+          'The question to hand to every target. It is permanently recorded in each target session log, so write it self-contained.',
+        required: true,
+      },
+      context: {
+        type: 'string',
+        description:
+          'Optional background every target needs. Default: none. Anything sent here stays in every target session log forever, so send only what is necessary.',
+      },
+      mode: {
+        type: 'string',
+        enum: ['all', 'any'],
+        description:
+          'all (default): wait for every target. any: return at the first settled target; the rest keep running in the background.',
+      },
+      waitMs: {
+        type: 'number',
+        description: `Per-target wait ceiling in milliseconds (default ${ASK_WAIT_DEFAULT_MS}, max ${ASK_WAIT_MAX_MS}). A ceiling stops only this call's wait; the target turn is never cancelled.`,
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          count: { type: 'number', required: true },
+          results: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                sessionId: { type: 'string', required: true },
+                name: { type: 'string', required: true },
+                askId: { type: 'string', required: true },
+                state: { type: 'string', enum: ['done', 'timeout', 'error'], required: true },
+                answer: { type: 'string', required: true },
+                status: { type: 'string', enum: ['ok', 'partial', 'failed'] },
+                note: { type: 'string' },
+                error: { type: 'string' },
+              },
+            },
+          },
+          skipped: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                target: { type: 'string', required: true },
+                reason: { type: 'string', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const results = Array.isArray(value.results) ? (value.results as Array<Record<string, unknown>>) : []
+        const skipped = Array.isArray(value.skipped) ? (value.skipped as Array<Record<string, unknown>>) : []
+        const stateLabel: Record<string, string> = { done: '已完成', timeout: '超时', error: '出错' }
+        const blocks = results.map((row) => {
+          const head = `- ${String(row.name ?? '')} · ${stateLabel[String(row.state ?? '')] ?? String(row.state ?? '')}`
+          const answer = String(row.answer ?? '').trim()
+          const note = String(row.note ?? '').trim()
+          const error = String(row.error ?? '').trim()
+          const body = answer.length > 0 ? answer : error.length > 0 ? `错误：${error}` : note
+          return `${head}\n  ${body}`.trimEnd()
+        })
+        if (skipped.length > 0) {
+          blocks.push('跳过：', ...skipped.map((row) => `- ${String(row.target ?? '')}：${String(row.reason ?? '')}`))
+        }
+        return [{ type: 'text', text: blocks.length > 0 ? blocks.join('\n') : '没有投递任何会话。' }]
+      },
+    },
+    async execute(args, exec) {
+      const swarm = service.getConfig().swarm
+      const session = exec.agent?.session ?? getCurrentSessionFrom(exec)
+      const sessionId = session?.id
+      return await askSessions(ctx, exec.signal, {
+        currentSessionId: typeof sessionId === 'string' ? sessionId : '',
+        currentEvents: readCurrentEvents(session),
+        targets: Array.isArray(args.targets)
+          ? args.targets.map((target) => (typeof target === 'string' ? target : ''))
+          : [],
+        question: typeof args.question === 'string' ? args.question : '',
+        context: typeof args.context === 'string' ? args.context : undefined,
+        mode: args.mode === 'any' ? 'any' : 'all',
+        waitMs: typeof args.waitMs === 'number' ? args.waitMs : undefined,
+        defaultWaitMs: swarm.defaultWaitMs,
+        exclude: exclusionEntries(swarm),
+        swarmEnabled: swarm.enabled !== false,
+        log: (message) => console.log(`[dsh-advisor-group] ask_sessions: ${message}`),
+      })
+    },
+  })
+
+  /**
    * Session roster: the read-only map the model needs before it can hand work
    * to a peer. Titles come from the host's `title` projection (the name the
    * session list shows), so no session-id hunting is required.
@@ -892,7 +1011,7 @@ export function registerAdvisorTools(
     },
   })
 
-  return [askAdvisors, toggleAdvisorGroup, askSessionTool, listSessionsTool, askResultTool]
+  return [askAdvisors, toggleAdvisorGroup, askSessionTool, askSessionsTool, listSessionsTool, askResultTool]
 }
 
 /** One compact block per detached ask result, for the model to read. */
