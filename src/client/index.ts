@@ -1635,6 +1635,16 @@ const settingsFoldBodyStyle: CSSProperties = {
   borderTop: '0.5px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
 }
 
+const settingsSectionActionsStyle: CSSProperties = {
+  display: 'flex',
+  justifyContent: 'flex-end',
+  alignItems: 'center',
+  gap: 10,
+  marginTop: 14,
+  paddingTop: 12,
+  borderTop: '0.5px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+}
+
 /** Every settings section starts folded: the page opens as a compact index. */
 const SETTINGS_FOLD_KEYS = [
   'basics',
@@ -1981,6 +1991,40 @@ function AdvisorGroupSettingsTab(): ReactNode {
     })
   }
 
+  /** One save row per section. It still saves the whole config. */
+  const sectionActions = (): ReactNode =>
+    createElement(
+      'div',
+      { style: settingsSectionActionsStyle },
+      createElement(
+        'span',
+        {
+          style: {
+            fontSize: 12,
+            color: dirty
+              ? 'var(--dsw-alias-state-warning-primary, #b45309)'
+              : 'var(--dsh-color-muted, #8b90a0)',
+          },
+        },
+        dirty ? '有未保存的更改' : '已保存',
+      ),
+      createElement(
+        'button',
+        {
+          type: 'button',
+          disabled: !dirty || saving,
+          onClick: () => void save(),
+          title: '保存整页设置，包括其他板块的未保存修改',
+          style: {
+            ...settingsFooterButtonStyle,
+            background: 'var(--dsw-alias-label-primary, #e6e9f0)',
+            color: 'var(--dsw-alias-bg-layer-3, #151821)',
+          },
+        },
+        saving ? '保存中…' : '保存整页设置',
+      ),
+    )
+
   /** One collapsible settings block; native buttons provide Enter/Space support. */
   const fold = (key: string, title: string, description: string, ...children: ReactNode[]): ReactNode => {
     const contentId = `advisor-group-settings-${key}`
@@ -2018,6 +2062,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
               style: settingsFoldBodyStyle,
             },
             children,
+            sectionActions(),
           ),
     )
   }
@@ -3221,9 +3266,10 @@ function AdvisorGroupSettingsTab(): ReactNode {
             sections.trigger,
             sections.swarm,
             sections.advanced,
-          createElement(
-            'div',
-            { style: settingsCardFooterStyle },
+          msg || error || dirty
+            ? createElement(
+                'div',
+                { style: settingsCardFooterStyle },
             msg
               ? createElement(
                   'span',
@@ -3262,21 +3308,8 @@ function AdvisorGroupSettingsTab(): ReactNode {
               },
               '放弃更改',
             ),
-            createElement(
-              'button',
-              {
-                type: 'button',
-                disabled: !dirty || saving,
-                onClick: () => void save(),
-                style: {
-                  ...settingsFooterButtonStyle,
-                  background: 'var(--dsw-alias-label-primary, #e6e9f0)',
-                  color: 'var(--dsw-alias-bg-layer-3, #151821)',
-                },
-              },
-              saving ? '保存中…' : '保存设置',
-            ),
-          ),
+          )
+          : null,
           ),
         )
       : null,
