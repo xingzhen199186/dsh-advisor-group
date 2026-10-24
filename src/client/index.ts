@@ -3186,6 +3186,7 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
   const [generating, setGenerating] = useState(false)
   const [batchSaving, setBatchSaving] = useState(false)
   const [batchProgress, setBatchProgress] = useState('')
+  const [copiedId, setCopiedId] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
 
@@ -3396,6 +3397,49 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
     }
   }
 
+  const copyName = async (sessionId: string, name: string): Promise<void> => {
+    const text = name.trim()
+    if (text.length === 0) return
+    const nav = (
+      globalThis as {
+        navigator?: { clipboard?: { writeText?: (value: string) => Promise<void> } }
+      }
+    ).navigator
+    try {
+      if (nav?.clipboard?.writeText === undefined) {
+        setError('当前环境不支持自动复制，请手动选中姓名复制。')
+        return
+      }
+      await nav.clipboard.writeText(text)
+      setCopiedId(sessionId)
+      setTimeout(() => {
+        setCopiedId((current) => (current === sessionId ? '' : current))
+      }, 1500)
+    } catch {
+      setError('复制失败，请手动选中姓名复制。')
+    }
+  }
+
+  const copyButton = (sessionId: string, name: string): ReactNode =>
+    createElement(
+      'button',
+      {
+        type: 'button',
+        disabled: name.trim().length === 0,
+        onClick: () => void copyName(sessionId, name),
+        title: '复制姓名到剪贴板',
+        style: {
+          ...corpsButtonStyle,
+          marginLeft: 'auto',
+          height: 24,
+          padding: '1px 8px',
+          fontSize: 11,
+          opacity: name.trim().length === 0 ? 0.45 : 1,
+        },
+      },
+      copiedId === sessionId ? '已复制' : '复制姓名',
+    )
+
   const fields = (
     sessionId: string,
     draft: { name: string; duty: string },
@@ -3559,6 +3603,7 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
                 { style: corpsBadgeStyle(assigned ? '#3b82f6' : '#8b90a0') },
                 assigned ? `顾问团 · ${row.card?.name}` : '未分配',
               ),
+              copyButton(row.sessionId, draft.name),
             ),
             createElement(
               'div',
@@ -3595,6 +3640,7 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
                 { style: corpsRowHeadStyle },
                 createElement('span', { style: corpsNameStyle }, row.name),
                 createElement('span', { style: corpsBadgeStyle('#f59e0b') }, '未挂接'),
+                copyButton(row.sessionId, draft.name),
               ),
               createElement('div', { style: corpsMetaStyle }, row.sessionId),
               fields(
