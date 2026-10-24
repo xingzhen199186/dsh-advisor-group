@@ -1545,6 +1545,43 @@ const settingsSectionStyle: CSSProperties = {
   background: 'transparent',
 }
 
+const settingsFoldStyle: CSSProperties = {
+  ...settingsSectionStyle,
+  padding: 0,
+  overflow: 'hidden',
+}
+
+const settingsFoldHeaderStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  boxSizing: 'border-box',
+  padding: '10px 12px',
+  border: 'none',
+  background: 'transparent',
+  color: 'inherit',
+  font: 'inherit',
+  textAlign: 'left',
+  cursor: 'pointer',
+}
+
+const settingsFoldCaretStyle: CSSProperties = {
+  width: 12,
+  flex: 'none',
+  color: 'var(--dsh-color-muted, #8b90a0)',
+  fontSize: 12,
+}
+
+const settingsFoldTitleStyle: CSSProperties = {
+  fontSize: 13,
+  fontWeight: 600,
+}
+
+const settingsFoldBodyStyle: CSSProperties = {
+  padding: '0 12px 12px',
+}
+
 const settingsLabelStyle: CSSProperties = {
   display: 'block',
   fontSize: 12,
@@ -1616,6 +1653,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
   const [open, setOpen] = useState(false)
+  const [folded, setFolded] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
   const [dailyGuard, setDailyGuard] = useState<{ used: number; enabled: boolean; limit: number; remaining: number } | null>(null)
   const savedJsonRef = useRef('')
@@ -1828,6 +1866,34 @@ function AdvisorGroupSettingsTab(): ReactNode {
   const label = (text: string): ReactNode =>
     createElement('label', { style: settingsLabelStyle }, text)
 
+  const toggleFold = (key: string): void => {
+    setFolded((previous) => {
+      const next = new Set(previous)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  /** One collapsible settings block; folding is presentation-only. */
+  const fold = (key: string, title: string, ...children: ReactNode[]): ReactNode =>
+    createElement(
+      'section',
+      { key, style: settingsFoldStyle },
+      createElement(
+        'button',
+        {
+          type: 'button',
+          'aria-expanded': !folded.has(key),
+          onClick: () => toggleFold(key),
+          style: settingsFoldHeaderStyle,
+        },
+        createElement('span', { style: settingsFoldCaretStyle }, folded.has(key) ? '▸' : '▾'),
+        createElement('span', { style: settingsFoldTitleStyle }, title),
+      ),
+      folded.has(key) ? null : createElement('div', { style: settingsFoldBodyStyle }, children),
+    )
+
   return createElement(
     'li',
     { style: settingsCardStyle(open) },
@@ -1839,9 +1905,9 @@ function AdvisorGroupSettingsTab(): ReactNode {
           createElement(
             'div',
             { style: settingsRootStyle },
-            createElement(
-              'div',
-              { style: settingsSectionStyle },
+            fold(
+              'basics',
+              '基础开关与每日配额',
               createElement(
                 'div',
                 { style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -1908,10 +1974,9 @@ function AdvisorGroupSettingsTab(): ReactNode {
           )
         : null,
     ),
-    createElement(
-      'div',
-      { style: settingsSectionStyle },
-      createElement('strong', null, '全局蜂群'),
+    fold(
+      'swarm',
+      '全局蜂群',
       createElement(
         'div',
         { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '4px 0 8px' } },
@@ -2153,9 +2218,9 @@ function AdvisorGroupSettingsTab(): ReactNode {
         ),
       ),
     ),
-    createElement(
-      'div',
-      { style: settingsSectionStyle },
+    fold(
+      'discussion',
+      '会诊参数与会诊阈值',
       createElement(
         'div',
         { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 } },
@@ -2262,10 +2327,9 @@ function AdvisorGroupSettingsTab(): ReactNode {
         }),
       ),
     ),
-    createElement(
-      'div',
-      { style: settingsSectionStyle },
-      createElement('strong', null, 'Jev 前置分类'),
+    fold(
+      'jev',
+      'Jev 前置分类',
       createElement(
         'div',
         { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '4px 0 8px' } },
@@ -2438,9 +2502,9 @@ function AdvisorGroupSettingsTab(): ReactNode {
         '开启后，主模型提供的英文概要（questionEn）会作为 Jev 的判定输入；展示问句、会话记录与重复检测仍用中文。默认关闭。',
       ),
     ),
-    createElement(
-      'div',
-      { style: settingsSectionStyle },
+    fold(
+      'advanced',
+      '深挖与分类器',
       createElement(
         'div',
         { style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -2475,13 +2539,12 @@ function AdvisorGroupSettingsTab(): ReactNode {
         label('分类器建议时允许返回联网搜索提示'),
       ),
     ),
-    createElement(
-      'div',
-      { style: settingsSectionStyle },
+    fold(
+      'advisors',
+      `顾问列表（${config.advisors.length}）`,
       createElement(
         'div',
-        { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 } },
-        createElement('strong', null, `顾问列表（${config.advisors.length}）`),
+        { style: { display: 'flex', justifyContent: 'flex-end', marginBottom: 8 } },
         createElement(
           'button',
           {
