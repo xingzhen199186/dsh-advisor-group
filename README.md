@@ -16,8 +16,6 @@
 
 > **版本边界**：本页对应当前 `main`。npm `0.1.4` 尚未包含顾问团角色卡、批量提问 `ask_sessions`、答案自动回送及相关的等待状态改进；使用这些新能力请按[源码安装](#从源码安装-main)构建。各发布版本的说明见 [Releases](https://github.com/xingzhen199186/dsh-advisor-group/releases) 与 [CHANGELOG](CHANGELOG.md)。
 
-<img width="865" height="983" alt="顾问群会诊卡片：按行动、思考、工具调用和正文逐步展示顾问回答" src="https://github.com/user-attachments/assets/5660ce94-70f0-42ed-84e4-9f926d1e2c64" />
-
 ## 兼容性与安装
 
 | 项目 | 说明 |
@@ -71,6 +69,10 @@ dsh plugin --profile web add ./dsh-advisor-group-0.1.4.tgz
 
 `@顾问群` 会强制发起会诊。普通专业问题也可以由主模型按规则升级；同一问题连续三次未解决，或主模型给出的置信度低于阈值，也会触发会诊。
 
+<img width="720" alt="顾问群设置页：按使用路径分为启用与每日配额、顾问列表、会诊行为、触发与分类、全局蜂群和高级，默认全部折叠" src="https://raw.githubusercontent.com/xingzhen199186/dsh-advisor-group/main/docs/images/advisor-group-settings.png" />
+
+设置页按使用路径分区，默认全部折叠；展开哪一节，就在那一节底部保存。
+
 ### 路径二：按名字询问另一个会话
 
 1. 打开任意会话里的 **「顾问团」**标签页；标签栏空间不足时，它可能位于「…」菜单中。
@@ -102,6 +104,8 @@ dsh plugin --profile web add ./dsh-advisor-group-0.1.4.tgz
   → 驱动模型生成综合结论
 ```
 
+<img width="865" height="983" alt="顾问群会诊卡片：按行动、思考、工具调用和正文逐步展示顾问回答" src="https://github.com/user-attachments/assets/5660ce94-70f0-42ed-84e4-9f926d1e2c64" />
+
 - **讨论轮数可控**：`maxRounds` 为 1–5，默认 2。关闭 `autoDeepen` 后，后续轮次重复使用原问题，综合结论仍会生成。
 - **驱动模型复用当前会话线路**：负责深挖追问与综合结论，不需要另配一套模型；无法读取当前线路时使用 `discussion.driverModel` 兜底。
 - **顾问可以使用会话工具**：默认只允许只读工具，调用过程进入卡片；最多 4 轮工具交互后必须用文字作答。工具范围可全局设置，也可按顾问覆盖。
@@ -113,6 +117,8 @@ dsh plugin --profile web add ./dsh-advisor-group-0.1.4.tgz
 ### 顾问团：给会话一个稳定身份
 
 会话标题适合描述窗口，却不一定适合长期称呼。顾问团把「姓名 + 职责」绑定到会话 id，并保存在本机 `$DSH_HOME/storages/advisor-group/corps.json`；它不会改写会话标题。
+
+<img width="760" alt="顾问团面板：每个可见会话一行，显示角色姓名、职责、复制姓名和保存按钮" src="https://raw.githubusercontent.com/xingzhen199186/dsh-advisor-group/main/docs/images/advisor-corps-panel.png" />
 
 - 姓名全局唯一，不区分大小写；最长 40 个字符。职责最长 200 个字符。
 - 「用主模型生成」使用**当前打开会话的模型**，每次最多为 12 个未分配会话生成建议，只填草稿，不自动保存。

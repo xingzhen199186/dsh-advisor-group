@@ -16,8 +16,6 @@
 
 > **Version boundary**: this page tracks the current `main`. npm `0.1.4` does not yet include Advisor Corps role cards, batch asks through `ask_sessions`, automatic answer copy-back, or the related wait-state improvements. [Install from source](#install-from-source-main) to use those additions. See [Releases](https://github.com/xingzhen199186/dsh-advisor-group/releases) and [CHANGELOG](CHANGELOG.md) for the documentation attached to each published version.
 
-<img width="865" height="983" alt="An Advisor Group consultation card showing actions, thinking, tool calls, and the final response in step order" src="https://github.com/user-attachments/assets/dad2f2be-acf6-41d7-b61a-c11596e48408" />
-
 ## Compatibility and installation
 
 | Item | Details |
@@ -71,6 +69,10 @@ For a source-built desktop installation, enter the `.tgz` file's absolute path u
 
 `@顾问群` forces a consultation. The main model can also escalate ordinary professional questions under its routing rules, including when the same unresolved question appears three times or its reported confidence falls below the threshold.
 
+<img width="720" alt="Advisor Group settings page: sections for enable and daily quota, advisors, consultation behavior, triggers and classification, global swarm, and advanced settings, all collapsed by default" src="https://raw.githubusercontent.com/xingzhen199186/dsh-advisor-group/main/docs/images/advisor-group-settings.png" />
+
+The settings page follows the setup path, with every section folded by default; each open section has its own save row.
+
 ### Path 2: ask another session by role name
 
 1. Open the **顾问团 (Advisor Corps)** tab in any conversation. If the tab bar runs out of space, it may appear under the **…** menu.
@@ -102,6 +104,8 @@ Original question
   → A synthesis from the driver model
 ```
 
+<img width="865" height="983" alt="An Advisor Group consultation card showing actions, thinking, tool calls, and the final response in step order" src="https://github.com/user-attachments/assets/dad2f2be-acf6-41d7-b61a-c11596e48408" />
+
 - **Controlled rounds**: `maxRounds` ranges from 1 to 5 and defaults to 2. With `autoDeepen` disabled, later rounds repeat the original question; the final synthesis is still generated.
 - **No separate driver route to configure**: the driver writes follow-ups and the synthesis through the current session's provider and model. It falls back to `discussion.driverModel` when that route cannot be read.
 - **Advisors can use session tools**: the default scope is read-only. Calls appear in the card, and after at most four tool rounds the advisor must answer in text. Set the scope globally or override it per advisor.
@@ -113,6 +117,8 @@ Original question
 ### Advisor Corps: give each session a durable identity
 
 A session title describes a window, but it may not be a durable way to address that session. Advisor Corps binds a **name and duty** to the session id and stores it locally in `$DSH_HOME/storages/advisor-group/corps.json`; it never renames the session.
+
+<img width="760" alt="Advisor Corps panel: one row per visible session, showing its role name, duty, copy-name action, and save controls" src="https://raw.githubusercontent.com/xingzhen199186/dsh-advisor-group/main/docs/images/advisor-corps-panel.png" />
 
 - Names are globally unique and case-insensitive, with a 40-character limit. Duties can contain up to 200 characters.
 - **Generate with main model** uses the model of the **currently open conversation**. Each pass proposes cards for at most 12 unassigned sessions, fills drafts only, and never saves automatically.
