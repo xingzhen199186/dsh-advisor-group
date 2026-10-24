@@ -1378,11 +1378,32 @@ function AdvisorGroupNodeView(props: ChatNodeViewProps<'advisor-group'>): ReactN
 
 /* ------------------------- Settings tab ------------------------- */
 
+const SETTINGS_ACCESSIBILITY_CSS = `
+.dsh-advisor-group-settings button:focus-visible,
+.dsh-advisor-group-settings input:focus-visible,
+.dsh-advisor-group-settings select:focus-visible,
+.dsh-advisor-group-settings textarea:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #3f8cff);
+  outline-offset: 2px;
+}
+.dsh-advisor-group-settings button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+.dsh-advisor-group-settings__fold-header:hover {
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, .08));
+}
+`
+
 const settingsRootStyle: CSSProperties = {
+  width: '100%',
+  maxWidth: 840,
+  margin: '0 auto',
+  paddingTop: 12,
+  color: 'inherit',
   fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
   fontSize: 13,
-  maxWidth: 720,
-  color: 'inherit',
+  lineHeight: 1.5,
 }
 
 /*
@@ -1466,13 +1487,19 @@ const settingsCardLoadingStyle: CSSProperties = {
 }
 
 const settingsCardFooterStyle: CSSProperties = {
-  borderTop: '0.5px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  position: 'sticky',
+  bottom: 12,
+  zIndex: 20,
+  display: 'flex',
+  flexWrap: 'wrap',
   justifyContent: 'flex-end',
   alignItems: 'center',
   gap: 8,
-  padding: '12px 0 4px',
-  display: 'flex',
-  flexWrap: 'wrap',
+  marginTop: 12,
+  padding: 12,
+  border: '0.5px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  borderRadius: 12,
+  background: 'var(--dsw-alias-bg-layer-2, #191d26)',
 }
 
 const settingsFooterButtonStyle: CSSProperties = {
@@ -1484,6 +1511,19 @@ const settingsFooterButtonStyle: CSSProperties = {
   padding: '5px 14px',
   fontSize: 13,
   lineHeight: 1.5,
+}
+
+const settingsSecondaryButtonStyle: CSSProperties = {
+  ...settingsFooterButtonStyle,
+  border: '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  background: 'transparent',
+  color: 'inherit',
+  whiteSpace: 'nowrap',
+}
+
+const settingsDangerButtonStyle: CSSProperties = {
+  ...settingsSecondaryButtonStyle,
+  color: 'var(--dsw-alias-state-error-primary, #e11d48)',
 }
 
 /** Collapsible header shared by the loading and settled card states. */
@@ -1508,7 +1548,7 @@ function settingsCardHeader(
       createElement(
         'span',
         { style: settingsCardDescriptionStyle },
-        '多顾问模型咨询：触发条件、讨论轮次与顾问列表。',
+        '配置外部模型会诊，以及会话之间的提问与协作。',
       ),
     ),
     dirty ? createElement('span', { style: settingsCardPendingStyle }, '未保存') : null,
@@ -1537,77 +1577,132 @@ function settingsCardHeader(
   )
 }
 
-const settingsSectionStyle: CSSProperties = {
-  border: '1px solid var(--dsh-color-border, #3a3f4b)',
-  borderRadius: 8,
-  padding: '10px 12px',
-  marginBottom: 10,
-  background: 'transparent',
-}
-
 const settingsFoldStyle: CSSProperties = {
-  ...settingsSectionStyle,
-  padding: 0,
+  marginBottom: 12,
   overflow: 'hidden',
+  border: '0.5px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  borderRadius: 12,
+  background: 'transparent',
 }
 
 const settingsFoldHeaderStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  gap: 8,
+  gap: 12,
   width: '100%',
+  minHeight: 54,
   boxSizing: 'border-box',
-  padding: '10px 12px',
+  padding: '12px 14px',
   border: 'none',
   background: 'transparent',
   color: 'inherit',
   font: 'inherit',
   textAlign: 'left',
   cursor: 'pointer',
+  transition: 'background .16s',
+}
+
+const settingsFoldHeaderTextStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  display: 'grid',
+  gap: 3,
 }
 
 const settingsFoldCaretStyle: CSSProperties = {
-  width: 12,
+  width: 16,
   flex: 'none',
-  color: 'var(--dsh-color-muted, #8b90a0)',
-  fontSize: 12,
+  color: 'var(--dsw-alias-label-tertiary, var(--dsh-color-muted, #8b90a0))',
+  fontSize: 14,
+  textAlign: 'center',
 }
 
 const settingsFoldTitleStyle: CSSProperties = {
-  fontSize: 13,
+  color: 'var(--dsw-alias-label-primary, #e6e9f0)',
+  fontSize: 14,
   fontWeight: 600,
+  lineHeight: 1.4,
+}
+
+const settingsFoldDescriptionStyle: CSSProperties = {
+  color: 'var(--dsw-alias-label-tertiary, var(--dsh-color-muted, #8b90a0))',
+  fontSize: 12,
+  lineHeight: 1.5,
 }
 
 const settingsFoldBodyStyle: CSSProperties = {
-  padding: '0 12px 12px',
+  padding: '14px 16px 16px',
+  borderTop: '0.5px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+}
+
+const settingsGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))',
+  gap: 12,
+  alignItems: 'start',
 }
 
 const settingsLabelStyle: CSSProperties = {
   display: 'block',
+  marginBottom: 5,
+  color: 'var(--dsw-alias-label-secondary, var(--dsh-color-muted, #8b90a0))',
   fontSize: 12,
-  marginBottom: 4,
-  color: 'var(--dsh-color-muted, #8b90a0)',
+  fontWeight: 500,
+}
+
+const settingsHelpStyle: CSSProperties = {
+  color: 'var(--dsw-alias-label-tertiary, var(--dsh-color-muted, #8b90a0))',
+  fontSize: 12,
+  lineHeight: 1.55,
+}
+
+const settingsSubheadingStyle: CSSProperties = {
+  margin: '2px 0 8px',
+  color: 'var(--dsw-alias-label-secondary, #aab2c5)',
+  fontSize: 12,
+  fontWeight: 600,
 }
 
 const settingsInputStyle: CSSProperties = {
   width: '100%',
+  minHeight: 32,
   boxSizing: 'border-box',
-  padding: '4px 6px',
-  borderRadius: 4,
-  border: '1px solid var(--dsh-color-border, #3a3f4b)',
-  background: 'transparent',
+  padding: '5px 8px',
+  borderRadius: 6,
+  border: '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  background: 'var(--dsw-alias-bg-base, transparent)',
   color: 'inherit',
   fontSize: 13,
   caretColor: 'inherit',
 }
 
-const advisorCardStyle: CSSProperties = {
-  border: '1px solid var(--dsh-color-border, #3a3f4b)',
-  borderRadius: 6,
-  padding: 8,
-  marginBottom: 8,
+const settingsUsageStyle: CSSProperties = {
   display: 'grid',
-  gap: 6,
+  gap: 4,
+  alignContent: 'start',
+  padding: '12px 14px',
+  border: '0.5px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  borderRadius: 10,
+  background: 'var(--dsw-alias-bg-layer-1, transparent)',
+}
+
+const settingsUsageValueStyle = (exhausted: boolean): CSSProperties => ({
+  color: exhausted
+    ? 'var(--dsw-alias-state-error-primary, #e11d48)'
+    : 'var(--dsw-alias-label-primary, #e6e9f0)',
+  fontSize: 22,
+  fontWeight: 650,
+  lineHeight: 1.25,
+})
+
+const advisorCardStyle: CSSProperties = {
+  display: 'grid',
+  gap: 8,
+  marginBottom: 12,
+  padding: 12,
+  border: '0.5px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  borderRadius: 12,
+  background: 'var(--dsw-alias-bg-layer-1, transparent)',
 }
 
 const AVATAR_OPTIONS = [
@@ -1709,7 +1804,8 @@ function AdvisorGroupSettingsTab(): ReactNode {
   if (!config) {
     return createElement(
       'li',
-      { style: settingsCardStyle(true) },
+      { className: 'dsh-advisor-group-settings', style: settingsCardStyle(true) },
+      createElement('style', null, SETTINGS_ACCESSIBILITY_CSS),
       settingsCardHeader(true, false, () => setOpen((value) => !value)),
       createElement(
         'div',
@@ -1875,113 +1971,139 @@ function AdvisorGroupSettingsTab(): ReactNode {
     })
   }
 
-  /** One collapsible settings block; folding is presentation-only. */
-  const fold = (key: string, title: string, ...children: ReactNode[]): ReactNode =>
-    createElement(
+  /** One collapsible settings block; native buttons provide Enter/Space support. */
+  const fold = (key: string, title: string, description: string, ...children: ReactNode[]): ReactNode => {
+    const contentId = `advisor-group-settings-${key}`
+    const headerId = `${contentId}-header`
+    return createElement(
       'section',
       { key, style: settingsFoldStyle },
       createElement(
         'button',
         {
+          id: headerId,
+          className: 'dsh-advisor-group-settings__fold-header',
           type: 'button',
           'aria-expanded': !folded.has(key),
+          'aria-controls': contentId,
           onClick: () => toggleFold(key),
           style: settingsFoldHeaderStyle,
         },
-        createElement('span', { style: settingsFoldCaretStyle }, folded.has(key) ? '▸' : '▾'),
-        createElement('span', { style: settingsFoldTitleStyle }, title),
+        createElement(
+          'span',
+          { style: settingsFoldHeaderTextStyle },
+          createElement('span', { style: settingsFoldTitleStyle }, title),
+          createElement('span', { style: settingsFoldDescriptionStyle }, description),
+        ),
+        createElement('span', { style: settingsFoldCaretStyle, 'aria-hidden': true }, folded.has(key) ? '▸' : '▾'),
       ),
-      folded.has(key) ? null : createElement('div', { style: settingsFoldBodyStyle }, children),
-    )
-
-  return createElement(
-    'li',
-    { style: settingsCardStyle(open) },
-    settingsCardHeader(open, dirty, () => setOpen((value) => !value)),
-    open
-      ? createElement(
-          'div',
-          { style: settingsCardBodyStyle },
-          createElement(
-            'div',
-            { style: settingsRootStyle },
-            fold(
-              'basics',
-              '基础开关与每日配额',
-              createElement(
-                'div',
-                { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-        createElement('input', {
-          type: 'checkbox',
-          checked: config.enabled,
-          onChange: (e: { target: { checked: boolean } }) =>
-            setConfig({ ...config, enabled: e.target.checked }),
-        }),
-        label('启用顾问群'),
-      ),
-      createElement(
-        'div',
-        {
-          style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 },
-        },
-        createElement('input', {
-          type: 'checkbox',
-          checked: config.quota.enabled,
-          onChange: (e: { target: { checked: boolean } }) =>
-            setConfig({ ...config, quota: { ...config.quota, enabled: e.target.checked } }),
-        }),
-        label('启用每日咨询上限（成本安全阀）'),
-      ),
-      createElement(
-        'div',
-        { style: { marginTop: 6 } },
-        label(`每日上限次数（${config.quota.enabled ? '生效中' : '已关闭，不拦截'}）`),
-        createElement('input', {
-          type: 'number',
-          min: 1,
-          max: 100000,
-          value: String(config.quota.maxPerDay),
-          disabled: !config.quota.enabled,
-          onChange: (e: { target: { value: string } }) =>
-            setConfig({
-              ...config,
-              quota: { ...config.quota, maxPerDay: Math.max(1, Number(e.target.value)) },
-            }),
-          style: { ...settingsInputStyle, width: 120, marginTop: 4 },
-        }),
-      ),
-    ),
-    createElement(
-      'div',
-      { style: settingsSectionStyle },
-      dailyGuard
-        ? createElement(
+      folded.has(key)
+        ? null
+        : createElement(
             'div',
             {
-              style: {
-                fontSize: 12,
-                color:
-                  !dailyGuard.enabled || dailyGuard.remaining > 0
-                    ? 'var(--dsh-color-muted, #8b90a0)'
-                    : '#e11d48',
-              },
+              id: contentId,
+              role: 'region',
+              'aria-labelledby': headerId,
+              style: settingsFoldBodyStyle,
             },
-            dailyGuard.enabled
-              ? dailyGuard.remaining > 0
-                ? `今日剩余咨询次数：${dailyGuard.remaining} / ${dailyGuard.limit}（UTC 日切）`
-                : `今日咨询次数已用尽（${dailyGuard.used} / ${dailyGuard.limit}），将于 UTC 日切后恢复。`
-              : `今日已咨询 ${dailyGuard.used} 次（每日上限已关闭）。`,
-          )
-        : null,
-    ),
-    fold(
-      'swarm',
-      '全局蜂群',
+            children,
+          ),
+    )
+  }
+
+  const sections = {
+    basics: fold(
+      'basics',
+      '启用与每日配额',
+      '开启外部模型会诊，并控制每天的新咨询次数。',
       createElement(
         'div',
-        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '4px 0 8px' } },
-        '跨会话提问的开关与默认应答方式。',
+        { style: settingsGridStyle },
+        createElement(
+          'div',
+          null,
+          createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            createElement('input', {
+              type: 'checkbox',
+              checked: config.enabled,
+              onChange: (e: { target: { checked: boolean } }) =>
+                setConfig({ ...config, enabled: e.target.checked }),
+            }),
+            label('启用顾问群'),
+          ),
+          createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 } },
+            createElement('input', {
+              type: 'checkbox',
+              checked: config.quota.enabled,
+              onChange: (e: { target: { checked: boolean } }) =>
+                setConfig({ ...config, quota: { ...config.quota, enabled: e.target.checked } }),
+            }),
+            label('启用每日咨询上限'),
+          ),
+          createElement(
+            'div',
+            { style: { marginTop: 12 } },
+            label('每日新会诊上限（次）'),
+            createElement('input', {
+              type: 'number',
+              min: 1,
+              max: 100000,
+              value: String(config.quota.maxPerDay),
+              disabled: !config.quota.enabled,
+              onChange: (e: { target: { value: string } }) =>
+                setConfig({
+                  ...config,
+                  quota: { ...config.quota, maxPerDay: Math.max(1, Number(e.target.value)) },
+                }),
+              style: { ...settingsInputStyle, maxWidth: 160 },
+            }),
+            createElement(
+              'div',
+              { style: { ...settingsHelpStyle, marginTop: 6 } },
+              '续跑、后续追问和跨会话提问不占这项配额。',
+            ),
+          ),
+        ),
+        createElement(
+          'div',
+          { style: settingsUsageStyle },
+          createElement('strong', { style: { ...settingsSubheadingStyle, margin: 0 } }, '今日用量'),
+          createElement(
+            'div',
+            {
+              style: settingsUsageValueStyle(
+                dailyGuard?.enabled === true && dailyGuard.remaining === 0,
+              ),
+            },
+            dailyGuard
+              ? dailyGuard.enabled
+                ? `${dailyGuard.remaining} / ${dailyGuard.limit}`
+                : `${dailyGuard.used}`
+              : '—',
+          ),
+          createElement(
+            'div',
+            { style: settingsHelpStyle },
+            dailyGuard
+              ? dailyGuard.enabled
+                ? dailyGuard.remaining > 0
+                  ? '今日剩余新会诊次数 · UTC 日切'
+                  : `今日已用 ${dailyGuard.used} 次，UTC 日切后恢复。`
+                : '今日已发起的新会诊次数 · 上限已关闭'
+              : '正在读取今日用量…',
+          ),
+        ),
       ),
+    ),
+    swarm: fold(
+      'swarm',
+      '全局蜂群（跨会话）',
+      '让已有会话互相提问；与外部模型会诊分开配置。',
       createElement(
         'div',
         { style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -1991,20 +2113,20 @@ function AdvisorGroupSettingsTab(): ReactNode {
           onChange: (e: { target: { checked: boolean } }) =>
             setConfig({ ...config, swarm: { ...config.swarm, enabled: e.target.checked } }),
         }),
-        label('总开关'),
+        label('启用跨会话提问'),
       ),
       createElement(
         'div',
-        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
-        '关闭后本插件不再跨会话提问，三个工具会明确拒绝',
+        { style: { ...settingsHelpStyle, margin: '2px 0 8px' } },
+        '关闭后，四个跨会话工具会明确拒绝调用。',
       ),
       createElement(
         'div',
-        { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 } },
+        { style: settingsGridStyle },
         createElement(
           'div',
           null,
-          label('默认应答方式'),
+          label('单人提问的默认等待方式'),
           createElement(
             'select',
             {
@@ -2044,8 +2166,8 @@ function AdvisorGroupSettingsTab(): ReactNode {
           }),
           createElement(
             'div',
-            { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', marginTop: 4 } },
-            '可填 1–10 分钟',
+            { style: { ...settingsHelpStyle, marginTop: 4 } },
+            '1–10 分钟；超时不打断目标会话。',
           ),
         ),
         createElement(
@@ -2081,7 +2203,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
               swarm: { ...config.swarm, rosterIncludeSubagents: e.target.checked },
             }),
         }),
-        label('名录列出子代理会话'),
+        label('在会话名录中显示子代理'),
       ),
       createElement(
         'div',
@@ -2095,12 +2217,12 @@ function AdvisorGroupSettingsTab(): ReactNode {
               swarm: { ...config.swarm, routingEnabled: e.target.checked },
             }),
         }),
-        label('按问题找会话'),
+        label('未点名时推荐候选会话'),
       ),
       createElement(
         'div',
-        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
-        '没有点名会话时，先按问题关键词列出候选，交给用户挑一个，不自动投递',
+        { style: { ...settingsHelpStyle, margin: '2px 0 8px' } },
+        '只列出候选，不自动投递。',
       ),
       createElement(
         'div',
@@ -2126,7 +2248,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
       createElement(
         'div',
         { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
-        label('路由方式'),
+        label('候选排序方式'),
         createElement(
           'select',
           {
@@ -2148,13 +2270,13 @@ function AdvisorGroupSettingsTab(): ReactNode {
       ),
       createElement(
         'div',
-        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
-        'Jev 判断需要单独配置在「触发判定」里的 Jev 凭据；任何失败都会静默回退到本地排序',
+        { style: { ...settingsHelpStyle, margin: '2px 0 8px' } },
+        '使用「触发与分类」中的 Jev 凭据；失败时回退到本地排序。',
       ),
       createElement(
         'div',
         { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
-        label('是否该问别的会话'),
+        label('跨会话提问建议'),
         createElement(
           'select',
           {
@@ -2186,13 +2308,13 @@ function AdvisorGroupSettingsTab(): ReactNode {
       ),
       createElement(
         'div',
-        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '2px 0 8px' } },
-        '中间档只在消息看起来涉及别的会话时才问 Jev，几乎不花钱；最后一档每轮都会多一次 Jev 调用',
+        { style: { ...settingsHelpStyle, margin: '2px 0 8px' } },
+        '只向主模型提供建议，不自动投递；“每轮都问”会增加 Jev 调用。',
       ),
       createElement(
         'div',
         { style: { marginTop: 8 } },
-        label('不参与路由的会话'),
+        label('排除的会话'),
         createElement('textarea', {
           'aria-label': 'routingExclude',
           placeholder: '每行一个：会话标题关键词或完整 sessionId',
@@ -2213,24 +2335,26 @@ function AdvisorGroupSettingsTab(): ReactNode {
         }),
         createElement(
           'div',
-          { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', marginTop: 4 } },
-          '填会话标题里的关键词或完整 sessionId；这些会话不会出现在路由候选和会话名录里，被点名时也会拒绝投递',
+          { style: { ...settingsHelpStyle, marginTop: 4 } },
+          '每行一个标题关键词或完整 sessionId；排除后不进入名录或候选，点名也会拒绝。',
         ),
       ),
     ),
-    fold(
+    discussion: fold(
       'discussion',
-      '会诊参数与会诊阈值',
+      '会诊行为',
+      '设置讨论轮数、顾问人数、超时与默认工具范围。',
       createElement(
         'div',
-        { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 } },
+        { style: settingsGridStyle },
         createElement(
           'div',
           null,
-          label('讨论轮数上限'),
+          label('会诊轮数（1–5）'),
           createElement('input', {
             type: 'number',
-            min: 0,
+            min: 1,
+            max: 5,
             value: String(config.discussion.maxRounds),
             onChange: (e: { target: { value: string } }) =>
               setConfig({
@@ -2246,10 +2370,11 @@ function AdvisorGroupSettingsTab(): ReactNode {
         createElement(
           'div',
           null,
-          label('单次最多顾问数'),
+          label('单次最多顾问数（1–10）'),
           createElement('input', {
             type: 'number',
             min: 1,
+            max: 10,
             value: String(config.discussion.maxAdvisorsPerCall ?? 3),
             onChange: (e: { target: { value: string } }) =>
               setConfig({
@@ -2307,8 +2432,41 @@ function AdvisorGroupSettingsTab(): ReactNode {
       ),
       createElement(
         'div',
-        { style: { marginTop: 8 } },
-        label('置信度阈值（0-1，低于此值升级顾问群）'),
+        { style: { marginTop: 12 } },
+        label('默认顾问工具范围'),
+        createElement(
+          'select',
+          {
+            value: config.discussion.advisorTools ?? 'readonly',
+            onChange: (e: { target: { value: string } }) =>
+              setConfig({
+                ...config,
+                discussion: {
+                  ...config.discussion,
+                  advisorTools: e.target.value as 'readonly' | 'all' | 'off',
+                },
+              }),
+            style: { ...settingsInputStyle, maxWidth: 320 },
+          },
+          createElement('option', { value: 'readonly' }, '只读工具（推荐）'),
+          createElement('option', { value: 'all' }, '全部会话工具（含写入与命令，慎用）'),
+          createElement('option', { value: 'off' }, '关闭工具调用'),
+        ),
+        createElement(
+          'div',
+          { style: { ...settingsHelpStyle, marginTop: 6 } },
+          '可在顾问列表中单独覆盖；只有直连的 OpenAI / Anthropic 通道支持顾问工具调用。',
+        ),
+      ),
+    ),
+    trigger: fold(
+      'trigger',
+      '触发与分类',
+      '决定何时召集顾问群，以及是否使用 Jev 判断。',
+      createElement(
+        'div',
+        { style: { marginBottom: 12 } },
+        createElement('div', { style: settingsSubheadingStyle }, '主模型置信度'),
         createElement('input', {
           type: 'number',
           min: 0,
@@ -2323,17 +2481,19 @@ function AdvisorGroupSettingsTab(): ReactNode {
                 confidenceThreshold: Number(e.target.value),
               },
             }),
-          style: settingsInputStyle,
+          style: { ...settingsInputStyle, maxWidth: 320 },
         }),
+        createElement(
+          'div',
+          { style: { ...settingsHelpStyle, marginTop: 6 } },
+          '低于此值时升级会诊；@顾问群和同一问题重复三次会强制发起。',
+        ),
       ),
-    ),
-    fold(
-      'jev',
-      'Jev 前置分类',
+      createElement('div', { style: settingsSubheadingStyle }, 'Jev 前置分类'),
       createElement(
         'div',
-        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '4px 0 8px' } },
-        '启用后由 Jev 判断是否需要顾问群；未配置或调用失败时自动使用本地分类器。',
+        { style: { ...settingsHelpStyle, marginBottom: 10 } },
+        '按问题判断是否召集顾问群；未配置或调用失败时使用本地分类器。',
       ),
       createElement(
         'div',
@@ -2354,7 +2514,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
       ),
       createElement(
         'div',
-        { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 } },
+        { style: settingsGridStyle },
         createElement(
           'div',
           null,
@@ -2458,7 +2618,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
       ),
       createElement(
         'div',
-        { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginTop: 8 } },
+        { style: { ...settingsGridStyle, marginTop: 12 } },
         createElement(
           'div',
           null,
@@ -2494,17 +2654,18 @@ function AdvisorGroupSettingsTab(): ReactNode {
           onChange: (e: { target: { checked: boolean } }) =>
             setConfig({ ...config, trigger: { ...config.trigger, jev: { ...(config.trigger.jev ?? defaultJevConfig()), useEnglishState: e.target.checked } } }),
         }),
-        label('Jev 英文判定（questionEn 概要）'),
+        label('使用英文概要辅助判定'),
       ),
       createElement(
         'div',
-        { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', margin: '4px 0 0' } },
-        '开启后，主模型提供的英文概要（questionEn）会作为 Jev 的判定输入；展示问句、会话记录与重复检测仍用中文。默认关闭。',
+        { style: { ...settingsHelpStyle, margin: '4px 0 0' } },
+        '开启后，Jev 读取主模型提供的 questionEn；界面和会话记录仍保留原始问题。默认关闭。',
       ),
     ),
-    fold(
+    advanced: fold(
       'advanced',
-      '深挖与分类器',
+      '高级',
+      '自动深挖、前置分类器与联网提示等低频选项。',
       createElement(
         'div',
         { style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -2514,7 +2675,12 @@ function AdvisorGroupSettingsTab(): ReactNode {
           onChange: (e: { target: { checked: boolean } }) =>
             setConfig({ ...config, discussion: { ...config.discussion, autoDeepen: e.target.checked } }),
         }),
-        label('自动多轮深挖（每轮后驱动模型生成深入追问，顾问按 A→B→C 顺序接力，直到轮数上限）'),
+        label('轮间自动生成更深追问'),
+      ),
+      createElement(
+        'div',
+        { style: { ...settingsHelpStyle, margin: '4px 0 10px' } },
+        '关闭后仍按轮数上限重复原问题，综合结论照常生成。',
       ),
       createElement(
         'div',
@@ -2525,7 +2691,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
           onChange: (e: { target: { checked: boolean } }) =>
             setConfig({ ...config, trigger: { ...config.trigger, requireClassifier: e.target.checked } }),
         }),
-        label('启用前置分类器'),
+        label('会诊前运行分类器'),
       ),
       createElement(
         'div',
@@ -2536,12 +2702,13 @@ function AdvisorGroupSettingsTab(): ReactNode {
           onChange: (e: { target: { checked: boolean } }) =>
             setConfig({ ...config, trigger: { ...config.trigger, allowWebFallback: e.target.checked } }),
         }),
-        label('分类器建议时允许返回联网搜索提示'),
+        label('更适合联网时返回搜索提示'),
       ),
     ),
-    fold(
+    advisors: fold(
       'advisors',
       `顾问列表（${config.advisors.length}）`,
+      '配置参与会诊的模型、凭据与连接测试。',
       createElement(
         'div',
         { style: { display: 'flex', justifyContent: 'flex-end', marginBottom: 8 } },
@@ -2550,7 +2717,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
           {
             type: 'button',
             onClick: addAdvisor,
-            style: { cursor: 'pointer' },
+            style: settingsSecondaryButtonStyle,
           },
           '＋ 添加顾问',
         ),
@@ -2568,12 +2735,13 @@ function AdvisorGroupSettingsTab(): ReactNode {
               {
                 type: 'button',
                 onClick: () => removeAdvisor(index),
-                style: { cursor: 'pointer', color: '#e11d48' },
+                style: settingsDangerButtonStyle,
               },
               '删除',
             ),
           ),
-          label(`ID · ${advisor.id}`),
+          createElement('div', { style: settingsHelpStyle }, `ID · ${advisor.id}`),
+          label('顾问名称'),
           createElement('input', {
             value: advisor.name,
             onChange: (e: { target: { value: string } }) => updateAdvisor(index, { name: e.target.value }),
@@ -2593,8 +2761,8 @@ function AdvisorGroupSettingsTab(): ReactNode {
                   fontSize: 12,
                   padding: '2px 6px',
                   border: advisor.avatar === undefined || advisor.avatar === ''
-                    ? '2px solid #4ade80'
-                    : '1px solid var(--dsh-color-border, #333)',
+                    ? '2px solid var(--dsw-alias-brand-primary, #4ade80)'
+                    : '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
                   background: 'transparent',
                 },
               },
@@ -2612,9 +2780,9 @@ function AdvisorGroupSettingsTab(): ReactNode {
                     fontSize: 18,
                     padding: '2px 6px',
                     border: advisor.avatar === emoji
-                      ? '2px solid #4ade80'
-                      : '1px solid var(--dsh-color-border, #333)',
-                    background: advisor.avatar === emoji ? 'rgba(74,222,128,.15)' : 'transparent',
+                      ? '2px solid var(--dsw-alias-brand-primary, #4ade80)'
+                      : '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+                    background: advisor.avatar === emoji ? 'var(--dsw-alias-bg-layer-2, transparent)' : 'transparent',
                   },
                 },
                 emoji,
@@ -2696,7 +2864,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
           label('模型'),
           createElement(
             'div',
-            { style: { display: 'flex', gap: 4 } },
+            { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 } },
             createElement('input', {
               'aria-label': '模型',
               list: `advisor-models-${index}`,
@@ -2705,10 +2873,10 @@ function AdvisorGroupSettingsTab(): ReactNode {
               onChange: (e: { target: { value: string } }) => updateAdvisor(index, { model: e.target.value }),
               style: {
                 ...settingsInputStyle,
-                marginTop: 4,
+                flex: '1 1 220px',
                 border: advisor.model && advisor.model.trim()
                   ? undefined
-                  : '1px solid #e11d48',
+                  : '1px solid var(--dsw-alias-state-error-primary, #e11d48)',
               },
             }),
             createElement(
@@ -2717,7 +2885,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
                 type: 'button',
                 onClick: () => void loadModels(index),
                 disabled: !!fetchingModels[advisor.id],
-                style: { cursor: 'pointer', marginTop: 4, whiteSpace: 'nowrap' },
+                style: settingsSecondaryButtonStyle,
               },
               fetchingModels[advisor.id] ? '获取中…' : '获取模型列表',
             ),
@@ -2727,7 +2895,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
                 type: 'button',
                 onClick: () => void testConnection(index),
                 disabled: !!testingConnection[advisor.id],
-                style: { cursor: 'pointer', marginTop: 4, whiteSpace: 'nowrap' },
+                style: settingsSecondaryButtonStyle,
               },
               testingConnection[advisor.id] ? '测试中…' : '测试连接',
             ),
@@ -2735,8 +2903,8 @@ function AdvisorGroupSettingsTab(): ReactNode {
           !advisor.model?.trim()
             ? createElement(
                 'div',
-                { style: { color: '#e11d48', fontSize: 12, marginTop: 2 } },
-                '⚠️ 模型未配置，ask_advisors 将跳过整轮咨询。',
+                { style: { color: 'var(--dsw-alias-state-error-primary, #e11d48)', fontSize: 12, marginTop: 2 } },
+                '⚠️ 未配置模型时，无法发起会诊。',
               )
             : null,
           createElement('datalist', { id: `advisor-models-${index}` }, [
@@ -2755,7 +2923,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
                   style: {
                     maxHeight: 150,
                     overflowY: 'auto',
-                    border: '1px solid var(--dsh-color-border, #333)',
+                    border: '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
                     borderRadius: 4,
                     marginTop: 4,
                   },
@@ -2788,8 +2956,8 @@ function AdvisorGroupSettingsTab(): ReactNode {
             ? [
                 createElement(
                   'div',
-                  { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', marginTop: 4 } },
-                  '✅ DSH 内置 Provider：复用 DSH 已配置凭据，无需填写 API 地址/Key。',
+                  { style: { ...settingsHelpStyle, marginTop: 4 } },
+                  'DSH 内置线路：复用已配置凭据；如需顾问工具，可另配直连地址和 Key。',
                 ),
               ]
             : (() => {
@@ -2826,10 +2994,10 @@ function AdvisorGroupSettingsTab(): ReactNode {
                               fontSize: 11,
                               padding: '1px 8px',
                               borderRadius: 999,
-                              background: keyConfigured
-                                ? 'rgba(22,163,74,.15)'
-                                : 'var(--dsh-color-muted, #8b90a0)',
-                              color: keyConfigured ? '#16a34a' : 'inherit',
+                              background: 'var(--dsw-alias-bg-layer-2, transparent)',
+                              color: keyConfigured
+                                ? 'var(--dsw-alias-state-success-primary, #16a34a)'
+                                : 'var(--dsw-alias-label-tertiary, #8b90a0)',
                             },
                           },
                           keyConfigured ? `已配置 ••••${keyMeta?.last4 ?? ''}` : '未配置',
@@ -2852,16 +3020,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
                             type: 'button',
                             disabled: saving,
                             onClick: () => updateAdvisor(index, { apiKey: '', clearApiKey: true }),
-                            style: {
-                              cursor: 'pointer',
-                              border: '1px solid var(--dsh-color-border, #3a3f4b)',
-                              background: 'transparent',
-                              color: 'inherit',
-                              borderRadius: 4,
-                              padding: '4px 10px',
-                              fontSize: 12,
-                              whiteSpace: 'nowrap',
-                            },
+                            style: settingsSecondaryButtonStyle,
                           },
                           '清除',
                         )
@@ -2869,10 +3028,10 @@ function AdvisorGroupSettingsTab(): ReactNode {
                   ),
                   createElement(
                     'div',
-                    { style: { fontSize: 12, color: 'var(--dsh-color-muted, #8b90a0)', marginTop: 2 } },
+                    { style: { ...settingsHelpStyle, marginTop: 4 } },
                     keyConfigured
-                      ? '已保存该供应商的 API Key（仅显示末 4 位）；留空保存保持原 Key，输入新 Key 覆盖。'
-                      : '直接填入 API Key，保存到本地配置。',
+                      ? '仅显示末 4 位；留空保留原 Key，输入新 Key 覆盖。'
+                      : '输入 API Key，保存到本机配置。',
                   ),
                   label('协议'),
                   createElement(
@@ -2889,9 +3048,10 @@ function AdvisorGroupSettingsTab(): ReactNode {
                     createElement('option', { value: 'gemini' }, 'Gemini'),
                   ),
                 ]})()),
+          label('顾问系统提示词'),
           createElement('textarea', {
             'aria-label': 'systemPrompt',
-            placeholder: 'systemPrompt',
+            placeholder: '说明这位顾问的专业角色与回答要求',
             rows: 2,
             value: advisor.systemPrompt,
             onChange: (e: { target: { value: string } }) => updateAdvisor(index, { systemPrompt: e.target.value }),
@@ -2912,12 +3072,11 @@ function AdvisorGroupSettingsTab(): ReactNode {
             }
             // Mirrors the server-side ADVISOR_TOOL_GUIDANCE (runtime injection,
             // never persisted into advisor.systemPrompt).
-            const toolPromptNote =
-              '工具启用时，系统提示词会自动追加：『对于你不了解、不熟悉的内容，尤其是项目背景、代码细节、仓库状态等不在知识范围内的情况，请优先使用联网工具（如 web_search、web_fetch）搜索核实后再作答，不要编造未核实的事实。』'
+            const toolPromptNote = '启用工具后，系统会提醒顾问优先核实未知信息，不要编造。'
             if (supportsTools) {
               return [
                 label(
-                  `顾问工具调用范围（未单独设置时跟随全局默认：${modeLabel[globalDefault] ?? globalDefault}）`,
+                  `工具范围（默认跟随会诊行为：${modeLabel[globalDefault] ?? globalDefault}）`,
                 ),
                 createElement(
                   'select',
@@ -2938,12 +3097,11 @@ function AdvisorGroupSettingsTab(): ReactNode {
                       'div',
                       {
                         style: {
-                          fontSize: 12,
-                          color: 'var(--dsh-color-muted, #8b90a0)',
-                          border: '1px dashed var(--dsh-color-border, #3a3f4b)',
-                          borderRadius: 4,
-                          padding: '4px 6px',
-                          marginTop: 4,
+                          ...settingsHelpStyle,
+                          border: '1px dashed var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+                          borderRadius: 6,
+                          padding: '6px 8px',
+                          marginTop: 6,
                         },
                       },
                       toolPromptNote,
@@ -2956,18 +3114,17 @@ function AdvisorGroupSettingsTab(): ReactNode {
                 'div',
                 {
                   style: {
-                    fontSize: 12,
-                    color: 'var(--dsh-color-muted, #8b90a0)',
-                    border: '1px solid var(--dsh-color-border, #3a3f4b)',
-                    borderRadius: 4,
-                    padding: '4px 6px',
+                    ...settingsHelpStyle,
+                    border: '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+                    borderRadius: 6,
+                    padding: '6px 8px',
                   },
                 },
-                '❌ 当前为 DSH 内置通道（复用 DSH 凭据），不支持工具调用；为其配置 API 地址 / Key / 环境变量以走直连通道后即可启用（工具指引提示词也会随之生效）。',
+                '当前内置通道不支持顾问工具；配置 API 地址、Key 或环境变量后可改用直连。',
               ),
             ]
           })(),
-          label('思考模式 / 思考强度（未设置 = 跟随模型与供应商默认）'),
+          label('思考模式与强度（未设置时跟随模型或供应商默认）'),
           createElement(
             'div',
             { style: { display: 'flex', gap: 8, marginTop: 4 } },
@@ -3006,68 +3163,110 @@ function AdvisorGroupSettingsTab(): ReactNode {
               createElement('option', { value: 'max' }, 'max（最大）'),
             ),
           ),
+          label('采样参数（可选）'),
           createElement(
             'div',
-            { style: { display: 'flex', gap: 8, marginTop: 4 } },
+            { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 } },
             createElement('input', {
               type: 'number',
-              placeholder: 'temperature',
+              min: 0,
+              max: 2,
+              step: 0.1,
+              placeholder: 'temperature（0–2）',
               value: advisor.temperature ?? '',
               onChange: (e: { target: { value: string } }) =>
                 updateAdvisor(index, { temperature: e.target.value === '' ? undefined : Number(e.target.value) }),
-              style: { ...settingsInputStyle, width: 90 },
+              style: { ...settingsInputStyle, flex: '1 1 140px' },
             }),
             createElement('input', {
               type: 'number',
-              placeholder: 'maxTokens',
+              min: 1,
+              placeholder: 'maxTokens（输出上限）',
               value: advisor.maxTokens ?? '',
               onChange: (e: { target: { value: string } }) =>
                 updateAdvisor(index, { maxTokens: e.target.value === '' ? undefined : Number(e.target.value) }),
-              style: { ...settingsInputStyle, width: 120 },
+              style: { ...settingsInputStyle, flex: '1 1 160px' },
             }),
           ),
         ),
       ),
     ),
-    createElement(
-      'div',
-      { style: settingsCardFooterStyle },
-      msg
-        ? createElement('span', { style: { flex: 1, minWidth: 0, color: '#16a34a', fontSize: 12 } }, msg)
-        : null,
-      error
-        ? createElement('span', { style: { flex: 1, minWidth: 0, color: '#e11d48', fontSize: 12 } }, error)
-        : null,
-      createElement(
-        'button',
-        {
-          type: 'button',
-          disabled: !dirty || saving,
-          onClick: () => void reload(),
-          style: {
-            ...settingsFooterButtonStyle,
-            border: '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
-            background: 'transparent',
-            color: 'inherit',
-          },
-        },
-        '放弃更改',
-      ),
-      createElement(
-        'button',
-        {
-          type: 'button',
-          disabled: !dirty || saving,
-          onClick: () => void save(),
-          style: {
-            ...settingsFooterButtonStyle,
-            background: 'var(--dsw-alias-label-primary, #e6e9f0)',
-            color: 'var(--dsw-alias-bg-layer-3, #151821)',
-          },
-        },
-        saving ? '保存中…' : '保存设置',
-      ),
-    ),
+  }
+
+  return createElement(
+    'li',
+    { className: 'dsh-advisor-group-settings', style: settingsCardStyle(open) },
+    createElement('style', null, SETTINGS_ACCESSIBILITY_CSS),
+    settingsCardHeader(open, dirty, () => setOpen((value) => !value)),
+    open
+      ? createElement(
+          'div',
+          { style: settingsCardBodyStyle },
+          createElement(
+            'div',
+            { style: settingsRootStyle },
+            sections.basics,
+            sections.advisors,
+            sections.discussion,
+            sections.trigger,
+            sections.swarm,
+            sections.advanced,
+          createElement(
+            'div',
+            { style: settingsCardFooterStyle },
+            msg
+              ? createElement(
+                  'span',
+                  {
+                    style: {
+                      flex: 1,
+                      minWidth: 0,
+                      color: 'var(--dsw-alias-state-success-primary, #16a34a)',
+                      fontSize: 12,
+                    },
+                  },
+                  msg,
+                )
+              : null,
+            error
+              ? createElement(
+                  'span',
+                  {
+                    style: {
+                      flex: 1,
+                      minWidth: 0,
+                      color: 'var(--dsw-alias-state-error-primary, #e11d48)',
+                      fontSize: 12,
+                    },
+                  },
+                  error,
+                )
+              : null,
+            createElement(
+              'button',
+              {
+                type: 'button',
+                disabled: !dirty || saving,
+                onClick: () => void reload(),
+                style: settingsSecondaryButtonStyle,
+              },
+              '放弃更改',
+            ),
+            createElement(
+              'button',
+              {
+                type: 'button',
+                disabled: !dirty || saving,
+                onClick: () => void save(),
+                style: {
+                  ...settingsFooterButtonStyle,
+                  background: 'var(--dsw-alias-label-primary, #e6e9f0)',
+                  color: 'var(--dsw-alias-bg-layer-3, #151821)',
+                },
+              },
+              saving ? '保存中…' : '保存设置',
+            ),
+          ),
           ),
         )
       : null,
