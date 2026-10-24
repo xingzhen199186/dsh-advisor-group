@@ -1635,6 +1635,16 @@ const settingsFoldBodyStyle: CSSProperties = {
   borderTop: '0.5px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
 }
 
+/** Every settings section starts folded: the page opens as a compact index. */
+const SETTINGS_FOLD_KEYS = [
+  'basics',
+  'advisors',
+  'discussion',
+  'trigger',
+  'swarm',
+  'advanced',
+] as const
+
 const settingsGridStyle: CSSProperties = {
   display: 'grid',
   gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))',
@@ -1748,7 +1758,7 @@ function AdvisorGroupSettingsTab(): ReactNode {
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
   const [open, setOpen] = useState(false)
-  const [folded, setFolded] = useState<Set<string>>(new Set())
+  const [folded, setFolded] = useState<Set<string>>(() => new Set(SETTINGS_FOLD_KEYS))
   const [saving, setSaving] = useState(false)
   const [dailyGuard, setDailyGuard] = useState<{ used: number; enabled: boolean; limit: number; remaining: number } | null>(null)
   const savedJsonRef = useRef('')
