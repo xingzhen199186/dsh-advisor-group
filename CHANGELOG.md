@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.5] - 2026-10-24
+
+### Added
+
+- **Advisor Corps role cards (`顾问团`)**: a conversation view tab assigns a name and duty to each visible session (stored by session id under `$DSH_HOME/storages/advisor-group/corps.json`). Names are globally unique and case-insensitive; each row can copy its name, and unassigned sessions can be filled by the current conversation's main model (at most 12 per pass, drafts only). `ask_session` / `ask_sessions` accept an exact role name as an additional target; session titles, working-directory names and ids remain valid.
+- **Batch asks via `ask_sessions`**: 1–8 explicit targets, `all`/`any` settlement, one record per target, completed answers merged into one copy-back, and skipped targets reported with a reason. It performs no routing.
+- **Automatic answer copy-back (`swarm.deliverBack`)**: completed (`done`) answers return to the asking session; when a cross-session card exists the message is a pointer to that card, otherwise it carries the full text. Timeouts and errors are not copied back.
+- **`interrupted` ask state**: a host restart during a wait is recorded as `interrupted` instead of leaving the card waiting forever.
+
+### Changed
+
+- **Advisor Group settings page**: six sections ordered by the setup path, all folded by default; each open section ends with a 「保存整页设置」 row, while the bottom bar keeps discard and status messages. The layout uses DSH design tokens, switches between two columns and one on narrow screens, keeps fold headers keyboard-operable, and simplifies copy that distinguishes 「顾问群」 from 「顾问团」.
+- **README**: rewritten in Chinese and English for the Advisor Corps and cross-session workflow, with the consultation card, settings page and corps panel screenshots placed next to the features they illustrate. The compatibility baseline is DSH `0.2.1-rc.3`.
+- **Cross-session tool descriptions**: `ask_session` now documents role-name targets, and the tool list covers four cross-session tools instead of three.
+
+### Fixed
+
+- **Detached asks and stale waits**: detached asks now settle their card and record; a record left `waiting` by a previous boot is reconciled to `interrupted` on read.
+- **`waitMs` precedence**: an explicit `waitMs` without `detach` now means "wait"; `defaultMode` applies only when both are omitted.
+- **`ask_result` output**: store bookkeeping fields (`bootId`, `fromSeq`) no longer leak into the tool's structured output.
+- **Roster degradation**: `list_sessions` now says when the workspace registry is unavailable and the list could not be filtered to the sidebar's visible sessions.
+
 ## [0.1.4] - 2026-10-20
 
 ### Added

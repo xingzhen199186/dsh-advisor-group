@@ -14,7 +14,7 @@
 | **Cross-session collaboration (global swarm)** | Ask another existing session and reuse the code it read, the investigation it completed, and the decisions it settled instead of starting over. |
 | **Advisor Corps role cards** | Assign a name and duty to a session. You can then say “ask 小明” without remembering its title or sessionId. |
 
-> **Version boundary**: this page tracks the current `main`. npm `0.1.4` does not yet include Advisor Corps role cards, batch asks through `ask_sessions`, automatic answer copy-back, or the related wait-state improvements. [Install from source](#install-from-source-main) to use those additions. See [Releases](https://github.com/xingzhen199186/dsh-advisor-group/releases) and [CHANGELOG](CHANGELOG.md) for the documentation attached to each published version.
+> **Version note**: this page tracks the current `main` and npm `0.1.5`; Advisor Corps role cards, batch asks through `ask_sessions`, automatic answer copy-back, and the related wait-state improvements are all included. See [Releases](https://github.com/xingzhen199186/dsh-advisor-group/releases) and [CHANGELOG](CHANGELOG.md) for published versions.
 
 ## Compatibility and installation
 
@@ -48,8 +48,8 @@ npm run build
 npm pack
 
 # Use the actual filename printed by npm pack.
-# The current package.json version is 0.1.4, producing:
-dsh plugin --profile web add ./dsh-advisor-group-0.1.4.tgz
+# The current package.json version is 0.1.5, producing:
+dsh plugin --profile web add ./dsh-advisor-group-0.1.5.tgz
 ```
 
 For a source-built desktop installation, enter the `.tgz` file's absolute path under **Plugins → Add plugin**. Restart the corresponding DSH application after installation.

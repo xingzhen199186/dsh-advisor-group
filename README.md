@@ -46,8 +46,8 @@ npm run build
 npm pack
 
 # 以 npm pack 实际生成的文件名为准
-# 当前 package.json 版本为 0.1.4，因此文件名如下：
-dsh plugin --profile web add ./dsh-advisor-group-0.1.4.tgz
+# 当前 package.json 版本为 0.1.5，因此文件名如下：
+dsh plugin --profile web add ./dsh-advisor-group-0.1.5.tgz
 ```
 
 桌面端安装源码包时，在 **Plugins → Add plugin** 中填写这个 `.tgz` 文件的绝对路径。安装后重启相应的 DSH 端。
