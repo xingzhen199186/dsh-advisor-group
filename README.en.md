@@ -32,11 +32,11 @@
 
 | Surface | Status |
 |---|---|
-| Harness | **`0.2.1-rc.2` — the version this release was gated against**; the declared peer range is `>=0.1.7-rc.2 <0.3.0` |
+| Harness | **`0.2.1-rc.3` — the version this release was gated against**; the declared peer range is `>=0.1.7-rc.2 <0.3.0` |
 | Node | `^22.19.0 \|\| >=24.0.0` |
 | Platforms | DSH Web and the desktop app (same client bundle) + headless host logic |
 
-> On the lower bound: `0.1.7-rc.2` remains inside the declared peer range, but was not re-verified during this round. Type checks, tests, and build were all completed against `0.2.1-rc.2`. If an older 0.1.x host fails to load the plugin, the issue stems from interface changes rather than bugs in this release.
+> On the lower bound: `0.1.7-rc.2` remains inside the declared peer range, but was not re-verified during this round. Type checks, tests, and build were all completed against `0.2.1-rc.3`. If an older 0.1.x host fails to load the plugin, the issue stems from interface changes rather than bugs in this release.
 
 ## 📦 Installation
 
