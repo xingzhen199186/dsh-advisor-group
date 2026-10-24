@@ -1,207 +1,272 @@
 # dsh-advisor-group
 
-> [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件：让一个会话**既能向其他模型借智慧，也能向其他会话借记忆**。
->
-> 遇到专业、长尾世界知识、高风险或不确定的问题，主模型召集多位**专家顾问模型**，在复古 CRT 聊天组卡片中进行会诊；遇到别的会话已经知道的事，跨会话去问，复用已有上下文，无需从头再查。
->
+> 让 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的一个会话，既能**向其他模型借智慧**，也能**向其他会话借记忆**。
 
-[![dsh-plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
+[English](README.en.md) · [安装](#兼容性与安装) · [快速开始](#快速开始) · [核心功能](#核心功能) · [配置参考](#配置参考) · [开发](#开发)
 
-[English: README.en.md](README.en.md)
+[![npm version](https://img.shields.io/npm/v/dsh-advisor-group.svg)](https://www.npmjs.com/package/dsh-advisor-group)
+[![DSH plugin](https://img.shields.io/badge/DSH%20plugin-dsh--plugin-3f8cff)](https://github.com/topics/dsh-plugin)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
----
+| 能力 | 它帮你做什么 |
+| --- | --- |
+| **多模型会诊（顾问群）** | 面对专业、高风险或没有把握的问题，让多位专家模型接力回答，再由驱动模型汇总结论。 |
+| **跨会话协作（全局蜂群）** | 直接询问另一个已有会话，复用它读过的代码、做过的排查和定下的约定，不必从零再来。 |
+| **顾问团角色卡** | 给会话分配姓名和职责。之后直接说“去问小明”，不必记会话标题或 sessionId。 |
 
-<img width="865" height="983" alt="1788679983177" src="https://github.com/user-attachments/assets/5660ce94-70f0-42ed-84e4-9f926d1e2c64" />
+> **版本边界**：本页对应当前 `main`。npm `0.1.4` 尚未包含顾问团角色卡、批量提问 `ask_sessions`、答案自动回送及相关的等待状态改进；使用这些新能力请按[源码安装](#从源码安装-main)构建。各发布版本的说明见 [Releases](https://github.com/xingzhen199186/dsh-advisor-group/releases) 与 [CHANGELOG](CHANGELOG.md)。
 
-## ✨ 功能特性
+<img width="865" height="983" alt="顾问群会诊卡片：按行动、思考、工具调用和正文逐步展示顾问回答" src="https://github.com/user-attachments/assets/5660ce94-70f0-42ed-84e4-9f926d1e2c64" />
 
-- **自动深挖咨询流水线**：一次 `ask_advisors` 跑满 `maxRounds` 轮（1–5，默认 2）。首轮直接用原问题，后续各轮先由驱动模型生成更深入的追问（`autoDeepen` 关闭时改用原问题）。顾问按 A → B（见 A）→ C（见 A+B）接力应答，最后由驱动模型生成综合结论（总会生成，不受 `autoDeepen` 影响）。
-- **顾问可调用会话工具（2026-09-05）**：顾问回答前可调用当前会话工具，默认仅放行只读白名单（read/grep/glob/web_search/web_fetch 等）。调用走官方 `ctx.tools` 完整管线，最多 4 轮后强制用文字作答。每次调用在卡片展示 `⛭ 工具名 · 调用中 / 调用完成 / ⚠ 失败`，展开可看输入输出。可在设置中切换为「全部会话工具」或「关闭」。
-- **停止后可继续**：人工停止或 DSH 重启后，卡片「⏹ 停止」按钮变成「▶ 继续聊天」。点击调用 `POST /advisor-group/resume` 从断点续跑：未答顾问补答，已答顾问不重问，剩余轮次与最终综合结论照常生成。会话快照持久化保存在 `storages/advisor-group/sessions/<id>.json`（仅存顾问 id、消息和状态，不含凭据），重启后自动恢复。
-- **驱动模型零配置复用**：驱动模型负责生成深挖追问，直接复用当前会话的 provider 和 model。你不需要额外配置密钥或模型；会话头信息不可读时，自动回退到 `discussion.driverModel`。
-- **三种触发方式**：在提问中带 `@顾问群`（强制启动）；同一问题重复提问 3 次未解决；主模型自评置信度低于预设阈值。
-- **Jev 语义前置分类（可选，默认关闭）**：开启 `trigger.jev.enabled` 后，未强制启动的咨询先由配置的 Jev 模型做语义判断（是否该找顾问、是否高风险、是否适合联网，阈值见 `trigger.jev.*`）。Jev 不可用时，由本地规则分类器接管。开启 `trigger.jev.useEnglishState` 后，Jev 改读主模型给出的英文概要（`questionEn`），卡片展示与会话记录仍保持中文。
-- **复古 CRT 聊天组卡片**：提供绿、琥珀、蓝三种主题，带扫描线和 LIVE/DONE 状态标。💭 思考面板默认展开并随流式内容滚动。正文采用轻量 Markdown 渲染，设有限制协议白名单，支持标题、列表、代码、引用、链接与表格。
-- **全局蜂群（跨会话提问）**：`ask_session` 把问题交给另一个活着的会话并唤醒它，`list_sessions` 查看名录，`ask_result` 获取异步结果。拿回的不是逐条问答，详情见「🐝 全局蜂群」。
-- **供应商预设（12 平台 · 28 预设）**：DeepSeek、月之暗面 Kimi、Kimi Code、阿里云百炼、智谱 AI、OpenAI、Claude、Gemini、硅基流动、AIHubMix、OpenRouter、**OpenCode Go**（含 OpenAI 与 Anthropic 兼容变体）。
-- **注重安全**：API Key 遵循官方 `SecretField` 语义，浏览器永不回显，供应商密钥档案 `apiKeysByProvider` 仅保存在服务端。诊断端点经过 SSRF 加固（仅限 https 与 loopback，拒绝 IP 字面量和重定向）。`/advisor-group/*` 路由在启动期生成 token 进行鉴权。支持每日新咨询上限（见「🧮 每日配额」）。
-- **运行时开关**：调用 `toggle_advisor_group` 启停插件，状态自动持久化到设置。
+## 兼容性与安装
 
-## ✅ 兼容性
+| 项目 | 说明 |
+| --- | --- |
+| DSH | 当前开发基线为 `0.2.1-rc.3`；声明可安装的版本范围（peer）为 `>=0.1.7-rc.2 <0.3.0` |
+| Node.js | 从源码构建时需要 `^22.19.0 || >=24.0.0` |
+| 使用端 | DSH Web 与桌面端，共用同一份客户端代码包 |
 
-| 项目 | 状态 |
-|---|---|
-| Harness | **`0.2.1-rc.3`（实测运行版本，本版门禁即对着它跑）**；声明的 peer 区间为 `>=0.1.7-rc.2 <0.3.0` |
-| Node | `^22.19.0 \|\| >=24.0.0` |
-| 平台 | DSH Web 与桌面端（共用同一份客户端 bundle）+ headless 宿主逻辑 |
+声明范围内的更早版本没有逐一实装验证。跨会话功能还需要宿主提供会话控制服务 `sessionController`；缺少该服务时，相关工具会明确报错，多模型会诊不受影响。
 
-> 关于下限：`0.1.7-rc.2` 仍在声明的 peer 区间内，但本轮没有重新实装验证。类型检查、测试与构建均对着 `0.2.1-rc.3` 完成。如果在更早的 0.1.x 宿主上遇到加载失败，多半是因接口变动，而非当前版本代码缺陷。
+### 安装 npm 发布版
 
-## 📦 安装
+DSH Web：
 
 ```sh
-# 1. 安装插件（一个包全都有）
 dsh plugin --profile web add dsh-advisor-group
-
-# 2. 重启 dsh web
-npx @deepseek-ai/dsh web
 ```
 
-> **第 2 步提醒**：`npx @deepseek-ai/dsh web` 拉取的是当时的最新版 DSH，可能跨出本插件的 peer 区间（`>=0.1.7-rc.2 <0.3.0`），宿主会因此拒绝加载插件。按你平时的方式重启即可（已有的启动脚本、桌面端都可以），不必非用这条命令。
+安装后按你原来的方式重启 DSH Web，并硬刷新浏览器（`Ctrl+Shift+R`）。
 
-> **从源码开发安装**
-> ```sh
-> npm install --legacy-peer-deps --no-audit --no-fund
-> npm run build
-> dsh plugin --profile web add ./dsh-advisor-group-<版本>.tgz   # 先 npm pack（版本号见 package.json）
-> ```
+**桌面端**：在应用内打开 **Plugins → Add plugin**，输入 `dsh-advisor-group`。桌面端的配置清单由应用管理，`dsh plugin --profile desktop …` 会被官方拒绝，这不是权限不足。
 
-> **桌面端**：桌面端应用的配置清单由应用自己管理，命令行 `dsh plugin --profile desktop …` 会被拒绝（这是官方设计，不是权限问题）。请在桌面端里安装：侧栏 **Plugins** → **Add plugin**，填入包名或本地 tarball 的绝对路径。
+### 从源码安装 main
 
-## 🚀 快速开始
+```sh
+git clone https://github.com/xingzhen199186/dsh-advisor-group.git
+cd dsh-advisor-group
+npm install --legacy-peer-deps --no-audit --no-fund
+npm run build
+npm pack
 
-<img width="791" height="797" alt="2026_09_06_15_35_31" src="https://github.com/user-attachments/assets/52a5b9fe-1ee9-4980-9b97-73bf616f36eb" />
+# 以 npm pack 实际生成的文件名为准
+# 当前 package.json 版本为 0.1.4，因此文件名如下：
+dsh plugin --profile web add ./dsh-advisor-group-0.1.4.tgz
+```
 
+桌面端安装源码包时，在 **Plugins → Add plugin** 中填写这个 `.tgz` 文件的绝对路径。安装后重启相应的 DSH 端。
 
-1. 重启 dsh web 并硬刷新浏览器（`Ctrl+Shift+R`）。
-2. 打开 **设置 → 插件 → 顾问群**：配置顾问（提供商路由 + 模型，用「获取模型列表」拉取权威清单），按需调整 `maxRounds`、阈值与 UI 主题。
-3. 直接开聊：
-   - 提问时带 `@顾问群` 强制发起咨询，或
-   - 直接提专业/不确定的问题——插件会按需自动升级。
+## 快速开始
 
-模型可用工具：`ask_advisors`、`toggle_advisor_group`、`ask_session`、`list_sessions`、`ask_result`。
+### 路径一：让多位模型一起会诊
 
-## 🐝 全局蜂群：让会话互相提问
+1. 打开 **设置 → 插件 → 顾问群**。
+2. 至少添加一位顾问，选择供应商路由和模型；可用「获取模型列表」读取该线路的模型清单。
+3. 在问题前加上 `@顾问群`，并交代必要背景。例如：
 
-### 一个会话，就是一个有记忆的专家
+   ```text
+   @顾问群 请评审这个插件的跨会话协作方案。
+   背景：DSH Web 与桌面端共用一份代码，要求不自动投递、不猜测目标会话。
+   ```
 
-DSH 里每个会话都在积累上下文：读过的代码、走过的弯路、定下的约定、否掉的方案。它们不是一次性的聊天窗口，而是**带着记忆的节点**——同一个问题在别处早已查清，从零再问一遍既慢又贵。
+`@顾问群` 会强制发起会诊。普通专业问题也可以由主模型按规则升级；同一问题连续三次未解决，或主模型给出的置信度低于阈值，也会触发会诊。
 
-所以这个插件做两件事：**向外借智慧**——召集专家顾问模型；**向旁边借记忆**——问那个已经知道的会话。
+### 路径二：按名字询问另一个会话
 
-### 四条原则
+1. 打开任意会话里的 **「顾问团」**标签页；标签栏空间不足时，它可能位于「…」菜单中。
+2. 给目标会话填写「身份姓名」和「主要负责」，再点「加入顾问团」或「保存」。也可以点「用主模型生成」，检查建议后逐条保存，或用「保存全部更改」一次提交。
+3. 回到对话，直接说：
 
-1. **复用，而不是重造。** 让知道答案的会话来回答，比让新会话从头查更准、也更快——它的上下文与缓存前缀都是热的。
-2. **对等，没有根节点。** 会话之间平级互相提问，不存在"总控 Agent"派发一切。没有中心，就没有单点瓶颈，也不需要一个知道全部事情的会话。
-3. **只提候选，绝不代发。** 路由（自动挑选候选会话）只给候选与理由，投递必须由你或主模型点名。宁可多问一句，也不猜错打扰。
-4. **任务导向，不为通信而通信。** 跳数（一次提问最多经几个会话中转）上限、同一时刻每会话只等一个、长任务走异步不阻塞、失败一律静默降级。**节点多不等于聪明，路由质量才是。**
+   ```text
+   去问一下小明：顾问团角色卡今天完成了哪些改动？
+   ```
 
-### 三个工具
+   也可以一次问多位成员：
 
-| 工具 | 作用 |
-|---|---|
-| `list_sessions` | 会话名录：标题、工作目录、活跃度、是否运行中。只读，不唤醒任何人 |
-| `ask_session` | 把问题交给另一个会话并唤醒它；可同步等，也可 `detach` 异步投递，投递即返回 `askId` |
-| `ask_result` | 取异步结果（等待中 / 已完成 / 超时 / 出错）；记录里带 `parentAskId`，可顺着链条往上追 |
+   ```text
+   同时问小明和阿龙：分别检查这个方案在桌面端和 Web 端有没有遗漏，并汇总两边结论。
+   ```
 
-### 怎么找到"该问的那一个"
+自动生成的内容只会填入草稿；**保存后才生效，已有卡不会被覆盖**。原来的会话标题、目录名和 sessionId 仍然可用。
 
-没点名时，插件按**标题 + 工作目录**给会话打分。中文按两字组切分。随后用硬规则收敛：消息里出现某会话名称、标题命中关键词，或目录命中项目名。排序时依次比较：综合分数 → 标题命中优先于目录命中 → 是否运行中 → 上下文是否足够（日志体积达到 160,380 字节门槛）→ 活跃时段（热/温/冷）→ 同项目上下文更大 → 最近活跃时间 → 标题长度（越短越前）。
+## 核心功能
 
-可选再叠加一层 Jev 判断（设置 → 插件 → 顾问群 → 全局蜂群 → 路由方式）。把候选作为闭合选项交给 Jev，若置信度不足则保持本地排序。
+### 多模型会诊：自动深挖，而不是只问一遍
 
-它还能判断当前轮次是否需要向其他会话提问，分为三档：关、本地预过滤 + Jev（默认）、每轮都问。默认档先做零成本规则初筛：只有当用户消息暗示需要外援且未指定目标时，才会发起 Jev 调用。即便判定为真，也只在下轮系统提示中注入一行建议，最终仍由主模型自主决定是否发问。
+一次 `ask_advisors` 会完成整场讨论：
 
-### 边界与诚实
+```text
+原问题
+  → 第 1 轮：顾问 A → 顾问 B（看过 A）→ 顾问 C（看过 A、B）
+  → 后续轮：驱动模型提出更深追问 → 顾问按同样顺序接力
+  → 驱动模型生成综合结论
+```
 
-- **区间语义**：获取的内容是「从投递回执到目标会话下一次空闲」之间的全部发言，并非逐条问答。结果附带 `status`（`ok` / `partial` / `failed`）标明可靠性。
-- **成本护栏**：限制中转跳数 ≤ 2，禁止向自身或子会话发问，同一会话同一时刻只等一个请求，载荷上限 32 KB。异步结果超时自动清理。可在「不参与路由的会话」中排除特定会话。插件永不强行中断对方的回合。
-- **失败即沉默**：遇到 Jev 超时、响应异常或候选超出名录时，静默退回本地规则判定，不打扰用户、不误投递、不乱报错。
-- **可追溯**：每次 Jev 判定都会在 `storages/advisor-group/asks/routing-jev.log` 写入一行日志，方便事后审计。
+- **讨论轮数可控**：`maxRounds` 为 1–5，默认 2。关闭 `autoDeepen` 后，后续轮次重复使用原问题，综合结论仍会生成。
+- **驱动模型复用当前会话线路**：负责深挖追问与综合结论，不需要另配一套模型；无法读取当前线路时使用 `discussion.driverModel` 兜底。
+- **顾问可以使用会话工具**：默认只允许只读工具，调用过程进入卡片；最多 4 轮工具交互后必须用文字作答。工具范围可全局设置，也可按顾问覆盖。
+- **流式卡片保留过程**：绿色 CRT 卡片按 `📋 行动 → 💭 思考 → ⛭ 工具 → 📄 正文`展示。思考和工具详情默认折叠，正文默认展开。
+- **停止后可以从断点继续**：人工停止或宿主重启后，「▶ 继续聊天」只补未完成的顾问和轮次，不重新询问已经完成的顾问。
+- **可选 Jev 前置判断**：默认关闭。开启后可判断是否该找顾问、是否高风险、是否更适合联网；Jev 不可用时回退到本地规则分类器。
+- **12 个平台、28 个供应商预设**：DeepSeek、月之暗面 Kimi、Kimi Code、阿里云百炼、智谱 AI、OpenAI、Claude、Gemini、硅基流动、AIHubMix、OpenRouter、OpenCode Go。
 
-### 实操细节
+### 顾问团：给会话一个稳定身份
 
-- **怎么指定目标**：支持完整会话 ID、精准标题或自然简称。通常输入工作目录名即可（例如目录为 `I:\极简遥控器\…` 的会话，直接说「极简遥控器」）。唯一匹配直接投递；命中多个时列出候选供你挑选；匹配不确定时绝不盲猜。
-- **界面上看到什么**：提问侧弹出聊天组卡片。先显示「已投递，等待对方回应…」，随后呈现对方回答气泡与「📌 投递说明」（标明通道与截止时间）。若目标定位失败则不弹卡片，仅在工具调用行输出报错。
-- **不想等怎么办**：默认同步等待（180 秒，可配置）。超时仅返回已收到的部分内容，不打断对方执行。需要并行处理时传入 `detach`，投递后立即返回 `askId`，后续通过 `ask_result` 查询。
-- **成本**：详见「💸 用量与成本」。
+会话标题适合描述窗口，却不一定适合长期称呼。顾问团把「姓名 + 职责」绑定到会话 id，并保存在本机 `$DSH_HOME/storages/advisor-group/corps.json`；它不会改写会话标题。
 
-一句话用法：直接说「问一下极简遥控器那个会话：进度到哪了」。
+- 姓名全局唯一，不区分大小写；最长 40 个字符。职责最长 200 个字符。
+- 「用主模型生成」使用**当前打开会话的模型**，每次最多为 12 个未分配会话生成建议，只填草稿，不自动保存。
+- 可逐条修改、复制姓名、批量保存或移除。已归档、被排除、离开工作区或已不存在的会话，其角色卡会归入「未挂接」，可保留或删除。
+- `list_sessions` 会显示角色姓名和职责；`ask_session`、`ask_sessions` 可以直接使用这个角色名，精确角色名优先于同名会话标题。
 
-## ⚙️ 配置项
+### 跨会话协作：问一个，也可以问一组
 
-| 键 | 类型 | 默认 | 说明 |
-|---|---|---|---|
-| `enabled` | boolean | `true` | 启用顾问群 |
-| `discussion.maxRounds` | number | `2` | 自动深挖流水线总轮数（1–5；每轮 = 全体顾问接力，第 2 轮起先由驱动模型追问） |
-| `discussion.maxAdvisorsPerCall` | number | `3` | 单次咨询最大顾问数（1–10） |
-| `discussion.autoDeepen` | boolean | `true` | 是否在轮与轮之间生成更深追问；不影响轮数——关掉后仍按 `maxRounds` 重复提问，综合结论照常生成 |
-| `discussion.driverModel` | object | – | 兜底驱动模型 `{provider, model}`（会话头信息不可读时） |
-| `discussion.advisorTimeoutMs` | number | `600000` | 单顾问调用超时（毫秒，1000–600000），双通道均生效 |
-| `discussion.driverTimeoutMs` | number | `600000` | 驱动模型生成超时（深挖追问/综合结论；毫秒，1000–1200000） |
-| `discussion.advisorTools` | string | `'readonly'` | 全局默认顾问工具调用范围（未单独设置时）：`readonly`（只读白名单 read/grep/glob/web_search/web_fetch…）｜`all`（全部会话可见工具，含可写，慎用）｜`off`（关闭）。仅直连通道（OpenAI/Anthropic）支持工具调用（要求见「🔒 安全与隐私」）。 |
-| `quota.enabled` | boolean | `true` | 启用每日咨询上限（成本安全阀） |
-| `quota.maxPerDay` | number | `50` | 每日 UTC 日周期内最多新咨询次数（1–100000）；`quota.enabled=false` 时不生效 |
-| `trigger.requireClassifier` | boolean | `true` | 发起前先跑前置分类器 |
-| `trigger.allowWebFallback` | boolean | `true` | 分类器建议联网搜索时返回该提示 |
-| `trigger.confidenceThreshold` | number | `0.6` | 主模型置信度低于该值时升级 |
-| `trigger.jev.enabled` | boolean | `false` | 用外部 Jev 模型对非强制咨询做语义前置分类；Jev 不可用时回退本地规则分类器 |
-| `trigger.jev.provider` / `trigger.jev.model` | string | `'typesafe'` / `'jev-latest'` | Jev 路由（`typesafe` 或 `openrouter`）与模型；密钥用 `trigger.jev.apiKey`（secret）或 `trigger.jev.apiKeyEnv`；可选 `baseURL`、`timeoutMs`（默认 `10000`） |
-| `trigger.jev.confidenceThreshold` | number | `0.6` | Jev 判「该找顾问」为是（或 0–1 分数达到该值）时升级 |
-| `trigger.jev.highRiskThreshold` | number | 跟随 `jev.confidenceThreshold` | Jev 判「高风险」为是（或 0–1 分数达到该值）时标记高风险；未设置则跟随 `trigger.jev.confidenceThreshold` |
-| `trigger.jev.useEnglishState` | boolean | `false` | 判定改用主模型附带的英文概要（`questionEn`）而非中文原问；展示与会话记录仍为中文 |
-| `swarm.enabled` | boolean | `true` | 跨会话功能总开关；关闭后 `ask_session` / `list_sessions` / `ask_result` 明确拒绝，不静默失效 |
-| `swarm.defaultMode` | string | `'wait'` | 默认应答方式：`wait` 同步等待｜`detach` 异步投递（显式传参永远优先） |
-| `swarm.defaultWaitMs` | number | `180000` | 默认等待上限（毫秒，1000–600000） |
-| `swarm.resultTtlHours` | number | `24` | 异步结果保留时长（小时，1–720；取结果时顺带清理过期记录） |
-| `swarm.rosterIncludeSubagents` | boolean | `false` | 会话名录是否列出子代理会话 |
-| `swarm.routingEnabled` | boolean | `true` | 没点名目标时，按问题匹配候选（只提候选，绝不自动投递） |
-| `swarm.routingTopN` | number | `3` | 返回的候选个数（1–8） |
-| `swarm.routingEngine` | string | `'local'` | 路由方式：`local` 本地打分｜`jev` 交 Jev 排序（闭合选项，失败自动回落本地） |
-| `swarm.routingAsk` | string | `'gated'` | 是否该问别的会话：`off`｜`gated` 本地预过滤 + Jev（默认）｜`always` 每轮都问 |
-| `swarm.routingExclude` | string[] | `[]` | 不参与路由的会话（标题关键词或完整 sessionId，一行一个）；被点名时拒绝投递 |
-| `ui.theme` | string | `retro-green` | 卡片主题（retro-green / retro-amber / retro-blue） |
-| `ui.showTimestamps` | boolean | `true` | 显示时间戳 |
-| `ui.autoExpand` | boolean | `true` | 自动展开卡片 |
-| `advisors[].tools` | string | – | 每个顾问的**单独**工具调用范围覆盖（`readonly`/`all`/`off`；未设置时跟随全局默认）；设置卡片上：可直连的顾问显示下拉，DSH 内置通道的顾问会提示「当前为 DSH 内置通道（复用 DSH 凭据），不支持工具调用」——为其配置 `baseURL`/`apiKey`/`apiKeyEnv` 走直连通道后即可启用。 |
-| `advisors[].thinking` | string | – | 单顾问思考模式：`enabled` / `disabled`；未设置为供应商默认，`disabled` 强制不带思考块（内置通道映射为 `reasoningEffort: 'off'`） |
-| `advisors[].reasoningEffort` | string | – | 单顾问思考强度：`off` / `low` / `high` / `max`；未设置为供应商/模型默认，`off` 在每次请求中关闭思考 |
-| `advisors[].temperature` | number | – | 采样温度（0–2）；未设置为供应商默认 |
-| `advisors[].maxTokens` | number | – | 单次回答的 token 上限（≥1）；未设置为供应商默认 |
-| `advisors[].authMode` | string | – | Anthropic 直连通道的鉴权头风格：`x-api-key` / `bearer` |
-| `advisors[].avatar` | string | – | 卡片上的短头像（emoji 或 ASCII） |
-| `advisors` | array | `[]` | 顾问列表（provider/model/baseURL/apiKey/apiKeyEnv/protocol…，key 均标 `role('secret')`） |
+- **单人会话提问**：`ask_session` 默认同步等待，也可用 `detach: true` 立即返回 `askId`，稍后通过 `ask_result` 读取。
+- **批量提问**：`ask_sessions` 一次向 1–8 个明确目标发送同一个问题。`mode: 'all'` 等全部目标结束；`mode: 'any'` 在首个目标结束后返回，其余目标继续完成并写入各自记录。
+- **答案自动回送**：`swarm.deliverBack` 默认开启。完成（`done`）的答案会回送到提问会话；超时和出错不会自动回送。批量提问把完成答案合并为一条回送消息。
+- **结果可追查**：每个被投递的目标都有独立 `askId`。异步记录可能是 `waiting`、`done`、`timeout`、`error` 或 `interrupted`；最后一个状态表示宿主重启使等待未能完成。
+- **不猜目标**：`ask_session` 未点名时，路由只返回候选，不自动投递。`ask_sessions` 不做路由；无法解析、同名歧义或被排除的目标会列出跳过原因。
+- **有明确的协作护栏**：最多 2 跳中转；不能问自己或子代理会话；同一提问会话同时只等待一个 `ask_session` 请求；问题和背景合计上限 32,000 字节；等待超时不会取消目标会话的回合。
 
-> `discussion.parallel` 与 `discussion.stopOnConsensus` 为弃用遗留项，仅保留以兼容已存配置。
+> **返回内容的准确含义**：工具取得的是目标会话从「投递回执」到「下一次整体空闲」之间说过的全部内容，不保证是逐条对应你那个问题的一段答案。结果中的 `status`（`ok` / `partial` / `failed`）用于说明这次收集的可靠性。
 
-## 🧮 每日配额
+## 模型工具参考
 
-插件内置成本安全阀。它按 UTC 日历日统计新咨询次数，默认上限为 50 次，支持在设置页调整或直接关闭。配额仅限制新发起的咨询，通过「▶ 继续聊天」续跑及后续追问均不计入。
+这些工具由主模型在会话中调用，**不是斜杠命令，也不需要你手写工具参数**。跨会话工具只应在你明确要求询问其他会话或窗口时使用。
 
-判断与自增在同一同步块内完成，避免并发穿透。计数结果原子落盘于 `$DSH_HOME/storages/advisor-group/daily-guard.json`，重启不丢失，并在 UTC 零点自动重置。额度耗尽时，`ask_advisors` 会拒绝启动并返回说明。设置页实时显示「今日剩余咨询次数 X / Y」；关闭上限开关后仅统计数据，不执行拦截。
+| 工具 | 用途 |
+| --- | --- |
+| `ask_advisors` | 发起多模型会诊，或用 `sessionId + followUp` 追加一轮讨论 |
+| `ask_session` | 询问一个已有会话；支持同步等待、异步投递和候选路由 |
+| `ask_sessions` | 向 1–8 个明确目标批量提问；支持 `all` / `any` 两种收集方式 |
+| `list_sessions` | 只读列出会话标题、目录、活跃状态及顾问团姓名和职责；不唤醒会话 |
+| `ask_result` | 按 `askId` 读取异步结果，或查看当前会话最近发起的提问 |
+| `toggle_advisor_group` | 启停多模型会诊功能，并持久化开关状态 |
 
-## 💸 用量与成本
+## 配置参考
 
-一次咨询由一连串模型调用组成。在默认配置（`maxRounds = 2`、最多 3 位顾问）下，发起一次新咨询共包含 **8 次**模型调用：第 1 轮 3 位顾问各调用 1 次；第 2 轮驱动模型追问 1 次，随后 3 位顾问各调用 1 次；最后由驱动模型生成综合结论 1 次。若顾问启用了工具调用，每轮工具往返会额外增加调用（单顾问上限 4 轮工具交互，外加 1 次最终文字作答），实际消耗会高于 8 次。
+日常使用时，通常只需要调整以下几项：
 
-费用按渠道独立结算：顾问按各自配置的渠道与模型计费，驱动模型按当前会话的模型计费。若需控制成本，可调低 `maxRounds`、减少顾问人数、将顾问工具设为 `tools: 'off'`，并在「🧮 每日配额」中设定合理的每日上限。咨询中断后，点击「▶ 继续聊天」仅为未完成的顾问补答，无需重跑整场流程，成本显著低于新建咨询。
+| 配置键 | 默认值 | 什么时候调整 |
+| --- | --- | --- |
+| `discussion.maxRounds` | `2` | 想减少成本时调低；想讨论更深时调高，最高 5 |
+| `discussion.maxAdvisorsPerCall` | `3` | 控制每次参与会诊的顾问人数，范围 1–10 |
+| `discussion.advisorTools` | `'readonly'` | 改为 `'off'` 禁止顾问用工具；`'all'` 仅用于充分信任的场景 |
+| `quota.enabled` / `quota.maxPerDay` | `true` / `50` | 设置每日新会诊上限；关闭上限后仍统计次数 |
+| `swarm.defaultMode` | `'wait'` | 改为 `'detach'`，让跨会话提问默认异步投递 |
+| `swarm.defaultWaitMs` | `180000` | 调整默认等待上限，范围 1000–600000 毫秒 |
+| `swarm.deliverBack` | `true` | 关闭后，完成答案只通过 `ask_result` 读取，不自动回送 |
 
-`ask_session` 不占用咨询配额。它仅唤醒目标会话并触发一次常规应答，费用记入目标会话自身模型，不视作新发起的顾问咨询。
+<details>
+<summary><strong>展开完整配置键参考</strong></summary>
 
-## 🔒 安全与隐私
+### 讨论与顾问
 
-- 直连 API Key 存于 DSH `settings.yaml`（标注为 secret 字段，官方 `describe` 不向前端回传）。若不希望密钥落盘，可使用 `apiKeyEnv` 环境变量模式。
-- `/advisor-group/*` 路由采用单机共享 token 机制，面向本地单用户场景。若需暴露到局域网或公网，必须在外层前置反向代理鉴权。
-- 诊断端点在服务端解出真实密钥后请求服务商，并对目标 URL 执行 https-only 与 loopback 的 SSRF 校验。DNS rebinding 属于已知的架构边界。
-- 每日咨询上限的计数机制、持久化文件与重置规则详见「🧮 每日配额」。
-- 分类器影子模式：开启 `trigger.requireClassifier` 时，所有判定样本均会记录到只读端点 `/advisor-group/shadow`（包含 `@顾问群` 与重复 3 次等跳过分类器的场景，标记为 `provider: 'bypass'`），仅用于阈值调优，不影响运行逻辑。
-- **`advisorTools: 'all'` 属于高风险作用域**：该模式会将当前会话所有可见工具（包括 `pwsh`/`bash`/`write` 等写操作与命令执行类）暴露给顾问模型，并由官方守卫管线执行。建议仅对受信任的本地模型开启。工具调用仅支持直连通道（OpenAI/Anthropic）；DSH 内置通道复用宿主凭据，不支持工具调用，如需使用请为顾问配置 `baseURL`/`apiKey`/`apiKeyEnv` 直连。所有非只读工具调用均输出 `console.warn` 留存审计日志。日常建议配置为 `readonly` 或 `off`（只读白名单见「✨ 功能特性」）。
+| 配置键 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | 启用多模型会诊 |
+| `discussion.maxRounds` | number | `2` | 会诊总轮数，1–5 |
+| `discussion.maxAdvisorsPerCall` | number | `3` | 单次会诊最大顾问数，1–10 |
+| `discussion.autoDeepen` | boolean | `true` | 后续轮次是否由驱动模型生成更深追问；关闭后重复原问题，结论仍生成 |
+| `discussion.driverModel` | object | – | 当前会话线路不可读时使用的 `{ provider, model }` |
+| `discussion.advisorTimeoutMs` | number | `600000` | 单顾问超时，1000–600000 毫秒 |
+| `discussion.driverTimeoutMs` | number | `600000` | 深挖追问或综合结论的超时，1000–1200000 毫秒 |
+| `discussion.advisorTools` | string | `'readonly'` | 顾问工具默认范围：`readonly` / `all` / `off` |
+| `advisors` | array | `[]` | 顾问列表；包含 `provider`、`model`、`systemPrompt`，以及可选的 `baseURL`、`apiKey`、`apiKeyEnv`、`protocol` 等 |
+| `advisors[].tools` | string | – | 单顾问工具范围，覆盖全局默认；未设置时跟随 `discussion.advisorTools` |
+| `advisors[].thinking` | string | – | `enabled` / `disabled`；未设置时跟随供应商默认 |
+| `advisors[].reasoningEffort` | string | – | `off` / `low` / `high` / `max`；未设置时跟随供应商或模型默认 |
+| `advisors[].temperature` | number | – | 采样温度，0–2 |
+| `advisors[].maxTokens` | number | – | 单次回答的 token 上限，至少 1 |
+| `advisors[].authMode` | string | – | Anthropic 直连的鉴权头：`x-api-key` / `bearer` |
+| `advisors[].avatar` | string | – | 卡片上的短头像，可使用 emoji 或 ASCII |
 
-## ⚠️ 已知限制
+顾问工具调用仅直连的 OpenAI / Anthropic 通道支持。DSH 内置通道可复用宿主凭据进行普通回答，但不支持这里的顾问工具循环。
 
-- DSH 宿主进程崩溃时，未刷新的卡片可能仍保持 **LIVE** 标识（目前前端已加入断线提示）。页面刷新后会按会话持久化日志恢复真实状态。
-- 风险提示基于客观运行事实生成，包括超时/网络中断引起的截断，以及手动停止导致的取消。提示会展示在已停止或已完成的卡片中，并随 `ask_advisors` 返回主模型。插件不扫描顾问回复的关键词；早期版本那套"凭字眼猜立场"的启发式已在 0.1.1 移除，原因是它连「没有任何风险」这样的否定句也会当成风险提示——盲测里 4 条纯否定句全部误报。
-- 跨会话提问（`ask_session`）目前未提供针对单会话隐藏工具的独立开关。`swarm.enabled` 作为全局总开关，开启后三个工具在所有会话中均可见，依靠提示词约束仅在明确要求时调用。暂不支持检测两个会话循环互相等待的死锁情况。
+### 触发判断与 Jev
 
-## 🛠️ 开发
+| 配置键 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `trigger.requireClassifier` | boolean | `true` | 非强制会诊发起前先进行前置分类 |
+| `trigger.allowWebFallback` | boolean | `true` | 分类器认为更适合联网时，返回不启动会诊的提示 |
+| `trigger.confidenceThreshold` | number | `0.6` | 主模型置信度低于此值时允许升级，范围 0–1 |
+| `trigger.jev.enabled` | boolean | `false` | 使用 Jev 做语义前置分类；失败时回退本地规则 |
+| `trigger.jev.provider` / `trigger.jev.model` | string | `'typesafe'` / `'jev-latest'` | Jev 线路与模型；线路也可设为 `openrouter` |
+| `trigger.jev.baseURL` | string | – | 可选自定义 Jev 地址 |
+| `trigger.jev.apiKey` / `trigger.jev.apiKeyEnv` | string | – | Jev 密钥或保存密钥的环境变量名；密钥字段按 secret 处理 |
+| `trigger.jev.timeoutMs` | number | `10000` | Jev 请求超时，1000–60000 毫秒 |
+| `trigger.jev.confidenceThreshold` | number | `0.6` | 判定需要顾问的阈值 |
+| `trigger.jev.highRiskThreshold` | number | 跟随上一项 | 高风险判定阈值；未设置时跟随 `trigger.jev.confidenceThreshold` |
+| `trigger.jev.useEnglishState` | boolean | `false` | 开启后，Jev 使用调用方提供的英文概要 `questionEn`；卡片和会话记录仍保留原始问题 |
+
+### 全局蜂群
+
+| 配置键 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `swarm.enabled` | boolean | `true` | 跨会话总开关；关闭后四个跨会话工具会明确拒绝调用 |
+| `swarm.defaultMode` | string | `'wait'` | `ask_session` 默认同步等待或异步投递：`wait` / `detach` |
+| `swarm.defaultWaitMs` | number | `180000` | 默认等待上限，1000–600000 毫秒 |
+| `swarm.resultTtlHours` | number | `24` | 异步结果保留时间，1–720 小时 |
+| `swarm.deliverBack` | boolean | `true` | 自动回送 `done` 答案；`timeout` / `error` 不自动回送 |
+| `swarm.rosterIncludeSubagents` | boolean | `false` | 名录是否显示子代理；这不改变投递工具禁止以子代理为目标的规则 |
+| `swarm.routingEnabled` | boolean | `true` | `ask_session` 未点名时是否按问题给出候选；只给候选，不自动投递 |
+| `swarm.routingTopN` | number | `3` | 候选数量，1–8 |
+| `swarm.routingEngine` | string | `'local'` | `local` 本地排序，或 `jev` 重排闭合候选；Jev 失败时回退本地 |
+| `swarm.routingAsk` | string | `'gated'` | 是否建议跨会话提问：`off` / `gated` / `always`；建议不等于投递 |
+| `swarm.routingExclude` | string[] | `[]` | 不参与蜂群的会话；不出现在名录或候选中，被点名也会拒绝 |
+
+### 历史兼容项
+
+`discussion.parallel` 与 `discussion.stopOnConsensus` 已弃用，只为读取旧配置保留。
+
+`ui.theme`、`ui.showTimestamps`、`ui.autoExpand` 同样是历史配置字段；当前客户端没有读取它们，修改这些值不会改变卡片外观或展开行为。当前卡片为绿色 CRT 样式，思考与工具详情默认折叠。
+
+</details>
+
+## 用量、配额与成本
+
+完成 `R` 轮讨论、每轮有 `N` 位顾问且没有工具调用时，一场会诊通常包含 **`R × (N + 1)` 次模型调用**：`R × N` 次顾问回答、`R - 1` 次深挖追问，以及 1 次综合结论。按默认轮数 `R = 2`、每场实际有 3 位顾问参与计算时为 8 次。
+
+实际费用还取决于以下行为：
+
+- 顾问的工具往返会增加模型调用；驱动模型与各位顾问按各自线路分别计费。
+- 「用主模型生成」角色卡会对当前会话模型发起调用；Jev 分类或路由开启后也按相应线路计费。
+- 跨会话提问不占用顾问会诊配额，但会唤醒目标会话，消耗目标会话自己的模型额度。批量提问按各个目标分别计算。
+
+每日配额按 **UTC 日历日**统计新发起的会诊，默认 50 次。续跑、后续追问和跨会话提问不占用这项配额。计数保存在 `$DSH_HOME/storages/advisor-group/daily-guard.json`；关闭上限后仍计数，但不拦截。需要控制成本时，可减少轮数或顾问人数、关闭顾问工具，并设置每日上限。
+
+## 安全与隐私
+
+- **密钥不回显**：直连 API Key 保存在本机 DSH 配置中，按 `SecretField` 语义处理，不返回浏览器。不希望密钥写入配置时，可使用 `apiKeyEnv`。
+- **本地路由有令牌**：`/advisor-group/*` 使用每次启动生成的共享 token，面向本地单用户场景。需要暴露到局域网或公网时，必须在外层增加反向代理鉴权。
+- **诊断请求有限制**：模型列表和连接测试在服务端请求供应商，并校验目标 URL、协议和重定向。DNS rebinding 仍是已知的架构边界。
+- **谨慎使用 `advisorTools: 'all'`**：它会把当前会话所有可见工具交给顾问，包括写文件和执行命令；调用仍经过 DSH 的工具管线与权限守卫。日常使用建议保持 `readonly` 或 `off`，非只读工具调用会写入警告日志。
+- **跨会话内容会留痕**：问题和背景会永久写入目标会话日志，因此只发送必要信息。角色卡生成会把会话标题、工作目录和活跃提示交给当前主模型；角色卡本身保存在本机，不包含 API Key。
+- **本地状态集中保存**：会诊快照、异步提问记录、角色卡和配额数据位于 `$DSH_HOME/storages/advisor-group/`。分类器影子日志仅用于阈值调优，不参与运行决策。
+
+## 已知限制
+
+- DSH 宿主突然崩溃时，未刷新的卡片可能仍显示 **LIVE**；页面刷新后会根据持久化日志恢复真实状态。前端已有断线提示。
+- 风险提示只根据客观状态生成：超时或网络中断造成的截断，以及人工停止造成的取消。插件不再通过扫描顾问正文里的“风险”“不确定”等词来猜测风险。
+- 跨会话工具目前没有按单个会话独立隐藏的开关。`swarm.enabled` 开启时四个工具对会话可见，关闭后调用会明确拒绝；两个会话互相等待的死锁目前也不会被专门检测。
+- 角色卡面板最多显示 50 个可见会话；自动生成每次最多处理 12 个未分配会话，可以再次生成以继续补齐。
+
+## 开发
 
 ```sh
 npm install --legacy-peer-deps --no-audit --no-fund
 npm run typecheck
-npm test        # vitest 单测（含本地假 LLM 服务器上的供应商流式契约）
-npm run build   # tsdown；客户端 bundle 禁用 minify: true
+npm test
+npm run build
+npm pack --dry-run
 ```
 
-## 📄 许可证
+测试使用 Vitest，包含供应商流式协议、跨会话投递与等待、角色卡、设置脱敏和恢复边界。构建使用 tsdown；客户端 bundle **不能使用 `minify: true`**，否则会破坏启动守卫所依赖的插件 id 形式。
+
+- [更新记录](CHANGELOG.md)
+- [问题反馈](https://github.com/xingzhen199186/dsh-advisor-group/issues)
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+
+## 许可证
 
 [Apache License 2.0](LICENSE) © 2026 dsh-advisor-group contributors.
