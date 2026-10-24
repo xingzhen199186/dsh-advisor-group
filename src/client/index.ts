@@ -3178,10 +3178,12 @@ const corpsNoticeStyle: CSSProperties = {
  * identity and duty. The role name is what `ask_session` can target later; the
  * panel never changes a session's own title.
  */
-function AdvisorCorpsView(): ReactNode {
+function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
+  const currentSessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
   const [data, setData] = useState<CorpsPayload | null>(null)
   const [drafts, setDrafts] = useState<Record<string, { name: string; duty: string }>>({})
   const [saving, setSaving] = useState('')
+  const [generating, setGenerating] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
 
@@ -3216,6 +3218,52 @@ function AdvisorCorpsView(): ReactNode {
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const generate = async (): Promise<void> => {
+    if (currentSessionId.length === 0) {
+      setError('当前会话 id 不可用，无法调用主模型。')
+      return
+    }
+    setGenerating(true)
+    setError('')
+    setMessage('')
+    try {
+      const res = await authedFetch('/advisor-group/corps/generate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: currentSessionId }),
+      })
+      const body = (await res.json()) as {
+        ok?: boolean
+        proposals?: Array<{ sessionId: string; name: string; duty: string }>
+        note?: string
+        error?: string
+      }
+      if (body.ok !== true) {
+        setError(body.error ?? '生成失败。')
+        return
+      }
+      const proposals = Array.isArray(body.proposals) ? body.proposals : []
+      if (proposals.length === 0) {
+        setMessage(body.note ?? '没有需要生成的会话。')
+        return
+      }
+      setDrafts((prev) => {
+        const next = { ...prev }
+        for (const proposal of proposals) {
+          next[proposal.sessionId] = { name: proposal.name, duty: proposal.duty }
+        }
+        return next
+      })
+      setMessage(
+        body.note ?? `已生成 ${proposals.length} 张角色卡，确认后逐条点「分配」保存。`,
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setGenerating(false)
+    }
+  }
 
   const persist = async (sessionId: string, name: string, duty: string): Promise<void> => {
     setSaving(sessionId)
@@ -3346,13 +3394,30 @@ function AdvisorCorpsView(): ReactNode {
         createElement(
           'p',
           { style: corpsDescStyle },
-          '给每个可跨会话对话的会话分配一个身份姓名和职责。之后 ask_session 可以直接用姓名找它；原来的会话标题、目录名和 sessionId 仍然可用。',
+          '角色卡对整个 DSH 全局生效。给每个可跨会话对话的会话分配一个身份姓名和职责；之后 ask_session 可以直接用姓名找它，原来的会话标题、目录名和 sessionId 仍然可用。生成时使用当前打开会话的主模型，只补还没有卡的会话，已有卡不会被覆盖。',
         ),
       ),
       createElement(
-        'button',
-        { type: 'button', onClick: () => void load(), style: corpsButtonStyle },
-        '刷新',
+        'div',
+        { style: { display: 'flex', gap: 8, flexShrink: 0 } },
+        createElement(
+          'button',
+          {
+            type: 'button',
+            disabled: generating,
+            onClick: () => void generate(),
+            style: {
+              ...corpsButtonStyle,
+              borderColor: 'var(--dsw-alias-label-primary, #e6e9f0)',
+            },
+          },
+          generating ? '生成中…' : '用主模型生成',
+        ),
+        createElement(
+          'button',
+          { type: 'button', onClick: () => void load(), style: corpsButtonStyle },
+          '刷新',
+        ),
       ),
     ),
     error.length > 0

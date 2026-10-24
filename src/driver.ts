@@ -91,7 +91,7 @@ function transcriptOf(session: ConsultSession): string {
     .slice(-24_000)
 }
 
-async function generateWith(
+export async function generateWith(
   ctx: Context,
   source: DriverSource,
   sessionId: string,

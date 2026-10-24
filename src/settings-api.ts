@@ -26,8 +26,17 @@ import {
   sessionDisplayName,
 } from './cross-session'
 import { isSessionExcluded } from './session-router'
-import { buildSessionRoster } from './session-roster'
-import { loadCorpsCards, saveCorpsCards, upsertCorpsCard } from './corps'
+import { buildSessionRoster, type RosterRow } from './session-roster'
+import {
+  CORPS_DUTY_MAX,
+  CORPS_NAME_MAX,
+  loadCorpsCards,
+  saveCorpsCards,
+  upsertCorpsCard,
+  type CorpsCard,
+  type CorpsCards,
+} from './corps'
+import { generateWith, resolveDriverSource } from './driver'
 import type { AdvisorGroupService } from './service'
 
 type ScopedContext = Context & {
@@ -918,6 +927,14 @@ export function handleConfigRequest(
     }
 
     if (
+      req.method === 'POST' &&
+      (pathname === '/advisor-group/corps/generate' || pathname === '/advisor-group/corps/generate/')
+    ) {
+      await handleCorpsGenerate(ctx, service, req, res)
+      return
+    }
+
+    if (
       req.method === 'GET' &&
       (pathname === '/advisor-group/shadow' || pathname === '/advisor-group/shadow/')
     ) {
@@ -1011,6 +1028,65 @@ export function handleConfigRequest(
   }
 }
 
+interface CorpsRoster {
+  rows: RosterRow[]
+  /** Every visible session id, including rows past the 50-row display cap. */
+  visibleIds: Set<string>
+  filtered: boolean
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * The same visibility universe as list_sessions/ask_session: workspace-
+ * registered, not archived, not swarm-excluded; subagents only when enabled.
+ * `undefined` means the host exposed no session controller at all.
+ */
+async function collectCorpsRoster(
+  ctx: Context,
+  service: AdvisorGroupService,
+): Promise<CorpsRoster | undefined> {
+  const controller = getSessionController(ctx)
+  if (controller === undefined) return undefined
+  const listed = await controller.list({}, new AbortController().signal)
+  const swarm = service.getConfig().swarm
+  const registered = registeredSessionIds(ctx)
+  const archived = archivedSessionIds(ctx)
+  const exclude = Array.isArray(swarm.routingExclude) ? swarm.routingExclude : []
+  const includeSubagents = swarm.rosterIncludeSubagents === true
+  const visible = listed.items.filter(
+    (item) =>
+      !archived.has(item.sessionId) &&
+      (registered === undefined || registered.has(item.sessionId)) &&
+      !isSessionExcluded(exclude, {
+        sessionId: item.sessionId,
+        names: [sessionDisplayName(item)],
+      }) &&
+      (includeSubagents || item.origin !== 'subagent'),
+  )
+  const rows = buildSessionRoster(visible, {
+    limit: 50,
+    hideSubagents: !includeSubagents,
+  })
+  return {
+    rows,
+    visibleIds: new Set(visible.map((item) => item.sessionId)),
+    filtered: registered !== undefined,
+  }
+}
+
+function corpsOrphans(
+  cards: CorpsCards,
+  visibleIds: ReadonlySet<string>,
+): Array<{ sessionId: string } & CorpsCard> {
+  return Object.entries(cards)
+    .filter(([sessionId]) => !visibleIds.has(sessionId))
+    .map(([sessionId, card]) => ({ sessionId, ...card }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh'))
+}
+
 /** One panel read: the visible session roster plus every saved role card. */
 async function handleCorpsGet(
   ctx: Context,
@@ -1018,57 +1094,203 @@ async function handleCorpsGet(
   res: ServerResponse,
 ): Promise<void> {
   const cards = loadCorpsCards()
-  const orphansOf = (visibleIds: ReadonlySet<string>): Array<{ sessionId: string } & (typeof cards)[string]> =>
-    Object.entries(cards)
-      .filter(([sessionId]) => !visibleIds.has(sessionId))
-      .map(([sessionId, card]) => ({ sessionId, ...card }))
-      .sort((a, b) => a.name.localeCompare(b.name, 'zh'))
-  const controller = getSessionController(ctx)
-  if (controller === undefined) {
-    sendJson(res, 200, {
-      ok: true,
-      filtered: false,
-      sessions: [],
-      orphans: orphansOf(new Set()),
-      note: '宿主没有提供会话列表服务，当前只能看到已保存的角色卡。',
-    })
-    return
-  }
   try {
-    const listed = await controller.list({}, new AbortController().signal)
-    const swarm = service.getConfig().swarm
-    const registered = registeredSessionIds(ctx)
-    const archived = archivedSessionIds(ctx)
-    const exclude = Array.isArray(swarm.routingExclude) ? swarm.routingExclude : []
-    const includeSubagents = swarm.rosterIncludeSubagents === true
-    // Same visibility universe as list_sessions/ask_session: workspace-
-    // registered, not archived, not excluded, subagents only when enabled.
-    const visible = listed.items.filter(
-      (item) =>
-        !archived.has(item.sessionId) &&
-        (registered === undefined || registered.has(item.sessionId)) &&
-        !isSessionExcluded(exclude, {
-          sessionId: item.sessionId,
-          names: [sessionDisplayName(item)],
-        }) &&
-        (includeSubagents || item.origin !== 'subagent'),
-    )
-    const rows = buildSessionRoster(visible, {
-      limit: 50,
-      hideSubagents: !includeSubagents,
-    })
-    const sessions = rows.map((row) => ({ ...row, card: cards[row.sessionId] ?? null }))
+    const roster = await collectCorpsRoster(ctx, service)
+    if (roster === undefined) {
+      sendJson(res, 200, {
+        ok: true,
+        filtered: false,
+        sessions: [],
+        orphans: corpsOrphans(cards, new Set()),
+        note: '宿主没有提供会话列表服务，当前只能看到已保存的角色卡。',
+      })
+      return
+    }
     sendJson(res, 200, {
       ok: true,
-      filtered: registered !== undefined,
-      sessions,
+      filtered: roster.filtered,
+      sessions: roster.rows.map((row) => ({ ...row, card: cards[row.sessionId] ?? null })),
       // A card is "orphan" only when its session is outside the visible
-      // universe — not when it merely sits past the roster's 50-row display cap.
-      orphans: orphansOf(new Set(visible.map((item) => item.sessionId))),
+      // universe — not when it merely sits past the roster's display cap.
+      orphans: corpsOrphans(cards, roster.visibleIds),
     })
   } catch (error) {
     console.warn(
       '[dsh-advisor-group] corps 读取失败：',
+      error instanceof Error ? error.message : String(error),
+    )
+    sendJson(res, 500, {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+/** How many unassigned sessions one generation pass asks the model about. */
+const CORPS_GENERATE_LIMIT = 12
+
+const CORPS_GENERATE_SYSTEM = `你是 DSH 顾问团的名册编辑。根据每个会话的标题、工作目录和活跃提示，推断它最适合承担什么任务，为它起一个简短的中文身份姓名，并写一句职责。只输出 JSON，不要解释。`
+
+interface CorpsProposal {
+  sessionId: string
+  name: string
+  duty: string
+}
+
+/** Accept a bare JSON object, a fenced block, or an array; validate against the roster. */
+export function parseCorpsProposals(
+  text: string,
+  rows: readonly RosterRow[],
+  cards: CorpsCards,
+): CorpsProposal[] {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const raw = (fenced === null ? text : fenced[1]).trim()
+  const objectStart = raw.indexOf('{')
+  const objectEnd = raw.lastIndexOf('}')
+  const arrayStart = raw.indexOf('[')
+  const arrayEnd = raw.lastIndexOf(']')
+  // An array wrapper can contain objects; pick whichever opens first.
+  const arrayFirst = arrayStart >= 0 && (objectStart < 0 || arrayStart < objectStart)
+  const candidate =
+    arrayFirst && arrayEnd > arrayStart
+      ? raw.slice(arrayStart, arrayEnd + 1)
+      : objectStart >= 0 && objectEnd > objectStart
+        ? raw.slice(objectStart, objectEnd + 1)
+        : ''
+  if (candidate.length === 0) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(candidate)
+  } catch {
+    return []
+  }
+  const items = isPlainRecord(parsed) && Array.isArray(parsed.cards)
+    ? parsed.cards
+    : Array.isArray(parsed)
+      ? parsed
+      : []
+  const allowed = new Set(rows.map((row) => row.sessionId))
+  const usedNames = new Set(Object.values(cards).map((card) => card.name.trim().toLowerCase()))
+  const usedIds = new Set<string>()
+  const out: CorpsProposal[] = []
+  for (const item of items) {
+    if (!isPlainRecord(item)) continue
+    const sessionId = typeof item.sessionId === 'string' ? item.sessionId : ''
+    const name = typeof item.name === 'string' ? item.name.trim() : ''
+    const duty = typeof item.duty === 'string' ? item.duty.trim() : ''
+    if (!allowed.has(sessionId) || usedIds.has(sessionId)) continue
+    if (name.length === 0 || name.length > CORPS_NAME_MAX || duty.length > CORPS_DUTY_MAX) continue
+    const lower = name.toLowerCase()
+    if (usedNames.has(lower)) continue
+    usedNames.add(lower)
+    usedIds.add(sessionId)
+    out.push({ sessionId, name, duty })
+  }
+  return out
+}
+
+/**
+ * Ask the CURRENT conversation's main model for unassigned role cards. The
+ * panel then shows the proposals as drafts; nothing is saved until the user
+ * confirms each row. Existing cards are never overwritten.
+ */
+async function handleCorpsGenerate(
+  ctx: Context,
+  service: AdvisorGroupService,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  let sessionId = ''
+  try {
+    const parsed = JSON.parse(await readBody(req)) as { sessionId?: unknown }
+    sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId : ''
+  } catch (error) {
+    sendJson(res, 400, {
+      ok: false,
+      error: `请求格式不正确：${error instanceof Error ? error.message : String(error)}`,
+    })
+    return
+  }
+  if (sessionId.length === 0) {
+    sendJson(res, 400, { ok: false, error: '缺少 sessionId' })
+    return
+  }
+  try {
+    const roster = await collectCorpsRoster(ctx, service)
+    if (roster === undefined) {
+      sendJson(res, 400, { ok: false, error: '宿主没有提供会话列表服务，无法生成。' })
+      return
+    }
+    const cards = loadCorpsCards()
+    const unassigned = roster.rows
+      .filter((row) => cards[row.sessionId] === undefined)
+      .slice(0, CORPS_GENERATE_LIMIT)
+    if (unassigned.length === 0) {
+      sendJson(res, 200, { ok: true, proposals: [], note: '所有可见会话都已有角色卡。' })
+      return
+    }
+    const sessions = (ctx as unknown as {
+      sessions?: { get?: (id: string) => unknown }
+    }).sessions
+    const session = typeof sessions?.get === 'function' ? sessions.get(sessionId) : undefined
+    const source = resolveDriverSource(
+      session as never,
+      service.getConfig().discussion.driverModel,
+    )
+    if (source === undefined) {
+      sendJson(res, 400, {
+        ok: false,
+        error: '当前会话没有可用的主模型配置，无法生成角色卡。',
+      })
+      return
+    }
+    const prompt = [
+      '请为下列 DSH 会话各生成一张顾问团角色卡。',
+      '',
+      ...unassigned.map(
+        (row, index) =>
+          `${index + 1}. sessionId=${row.sessionId} | 标题=${row.name} | 目录=${row.cwd ?? '未知'} | ${row.hint}`,
+      ),
+      '',
+      '要求：',
+      '- 姓名简短，像同事的称呼，彼此不同，不要照抄标题；',
+      '- 职责一句话，说明最适合承担什么任务，不超过 30 个汉字；',
+      '- sessionId 必须原样照抄；',
+      '- 只输出 JSON：{"cards":[{"sessionId":"...","name":"...","duty":"..."}]}',
+    ].join('\n')
+    const text = await generateWith(
+      ctx,
+      source,
+      sessionId,
+      CORPS_GENERATE_SYSTEM,
+      prompt,
+      AbortSignal.timeout(90_000),
+      90_000,
+    )
+    if (text === undefined || text.trim().length === 0) {
+      sendJson(res, 502, { ok: false, error: '主模型没有返回内容。' })
+      return
+    }
+    const proposals = parseCorpsProposals(text, unassigned, cards)
+    if (proposals.length === 0) {
+      sendJson(res, 200, {
+        ok: false,
+        error: '主模型没有返回可用的角色卡，请重试。',
+        raw: text.slice(0, 500),
+      })
+      return
+    }
+    sendJson(res, 200, {
+      ok: true,
+      proposals,
+      ...(proposals.length < unassigned.length
+        ? { note: `只生成了 ${proposals.length} / ${unassigned.length} 张，可以再点一次补齐。` }
+        : {}),
+      model: { provider: source.provider, model: source.model },
+    })
+  } catch (error) {
+    console.warn(
+      '[dsh-advisor-group] corps 生成失败：',
       error instanceof Error ? error.message : String(error),
     )
     sendJson(res, 500, {
