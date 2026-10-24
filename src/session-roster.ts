@@ -37,6 +37,10 @@ export interface RosterRow {
   hint: string
   /** True when the host published a real title; false means the row uses the fallback name. */
   hasTitle: boolean
+  /** Advisor-corps identity, when assigned to this session. */
+  roleName?: string
+  /** Advisor-corps duty, when assigned to this session. */
+  duty?: string
   /** Accumulated-context proxy: bytes of this session's own log, when known. */
   sizeHint?: number
 }
@@ -393,7 +397,11 @@ export function renderRoster(rows: readonly RosterRow[], options?: { filtered?: 
   const head = `${options?.filtered === true ? '匹配' : '共'} ${rows.length} 个会话`
   const lines = rows.map((row) => {
     const flags = `${row.running ? ' · 运行中' : ''}${row.subagent ? ' · 子代理' : ''}`
-    return `- ${shortSessionName(row.name, row.cwd)} · ${row.sessionId} — ${row.hint}${flags}`
+    const corps =
+      row.roleName === undefined
+        ? ''
+        : ` · 顾问团「${row.roleName}」${row.duty !== undefined && row.duty.length > 0 ? `（${row.duty}）` : ''}`
+    return `- ${shortSessionName(row.name, row.cwd)} · ${row.sessionId} — ${row.hint}${flags}${corps}`
   })
   return [head, ...lines].join('\n')
 }

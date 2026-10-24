@@ -19,6 +19,15 @@ import { PROVIDER_PRESETS } from './providers/presets'
 import { subscribe } from './stream-channel'
 import { readShadowSamples } from './shadow'
 import { guardAdvisorPrompts, reportPromptGuardFindings } from './prompt-guard'
+import {
+  archivedSessionIds,
+  getSessionController,
+  registeredSessionIds,
+  sessionDisplayName,
+} from './cross-session'
+import { isSessionExcluded } from './session-router'
+import { buildSessionRoster } from './session-roster'
+import { loadCorpsCards, saveCorpsCards, upsertCorpsCard } from './corps'
 import type { AdvisorGroupService } from './service'
 
 type ScopedContext = Context & {
@@ -894,6 +903,22 @@ export function handleConfigRequest(
 
     if (
       req.method === 'GET' &&
+      (pathname === '/advisor-group/corps' || pathname === '/advisor-group/corps/')
+    ) {
+      await handleCorpsGet(ctx, service, res)
+      return
+    }
+
+    if (
+      req.method === 'POST' &&
+      (pathname === '/advisor-group/corps' || pathname === '/advisor-group/corps/')
+    ) {
+      await handleCorpsPost(req, res)
+      return
+    }
+
+    if (
+      req.method === 'GET' &&
       (pathname === '/advisor-group/shadow' || pathname === '/advisor-group/shadow/')
     ) {
       // Read-only classifier shadow samples (JSONL) — for threshold tuning.
@@ -983,6 +1008,113 @@ export function handleConfigRequest(
     }
 
     sendJson(res, 404, { ok: false, error: 'not found' })
+  }
+}
+
+/** One panel read: the visible session roster plus every saved role card. */
+async function handleCorpsGet(
+  ctx: Context,
+  service: AdvisorGroupService,
+  res: ServerResponse,
+): Promise<void> {
+  const cards = loadCorpsCards()
+  const orphansOf = (visibleIds: ReadonlySet<string>): Array<{ sessionId: string } & (typeof cards)[string]> =>
+    Object.entries(cards)
+      .filter(([sessionId]) => !visibleIds.has(sessionId))
+      .map(([sessionId, card]) => ({ sessionId, ...card }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh'))
+  const controller = getSessionController(ctx)
+  if (controller === undefined) {
+    sendJson(res, 200, {
+      ok: true,
+      filtered: false,
+      sessions: [],
+      orphans: orphansOf(new Set()),
+      note: '宿主没有提供会话列表服务，当前只能看到已保存的角色卡。',
+    })
+    return
+  }
+  try {
+    const listed = await controller.list({}, new AbortController().signal)
+    const swarm = service.getConfig().swarm
+    const registered = registeredSessionIds(ctx)
+    const archived = archivedSessionIds(ctx)
+    const exclude = Array.isArray(swarm.routingExclude) ? swarm.routingExclude : []
+    const includeSubagents = swarm.rosterIncludeSubagents === true
+    // Same visibility universe as list_sessions/ask_session: workspace-
+    // registered, not archived, not excluded, subagents only when enabled.
+    const visible = listed.items.filter(
+      (item) =>
+        !archived.has(item.sessionId) &&
+        (registered === undefined || registered.has(item.sessionId)) &&
+        !isSessionExcluded(exclude, {
+          sessionId: item.sessionId,
+          names: [sessionDisplayName(item)],
+        }) &&
+        (includeSubagents || item.origin !== 'subagent'),
+    )
+    const rows = buildSessionRoster(visible, {
+      limit: 50,
+      hideSubagents: !includeSubagents,
+    })
+    const sessions = rows.map((row) => ({ ...row, card: cards[row.sessionId] ?? null }))
+    sendJson(res, 200, {
+      ok: true,
+      filtered: registered !== undefined,
+      sessions,
+      // A card is "orphan" only when its session is outside the visible
+      // universe — not when it merely sits past the roster's 50-row display cap.
+      orphans: orphansOf(new Set(visible.map((item) => item.sessionId))),
+    })
+  } catch (error) {
+    console.warn(
+      '[dsh-advisor-group] corps 读取失败：',
+      error instanceof Error ? error.message : String(error),
+    )
+    sendJson(res, 500, {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+/** One panel write: upsert or delete a single role card. */
+async function handleCorpsPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const parsed = JSON.parse(await readBody(req)) as {
+      sessionId?: unknown
+      name?: unknown
+      duty?: unknown
+    }
+    const result = upsertCorpsCard(
+      loadCorpsCards(),
+      typeof parsed.sessionId === 'string' ? parsed.sessionId : '',
+      typeof parsed.name === 'string' ? parsed.name : '',
+      typeof parsed.duty === 'string' ? parsed.duty : '',
+    )
+    if (!result.ok) {
+      sendJson(res, result.code === 'duplicate-name' ? 409 : 400, {
+        ok: false,
+        error: result.error,
+        code: result.code,
+      })
+      return
+    }
+    try {
+      saveCorpsCards(result.cards)
+    } catch (error) {
+      sendJson(res, 500, {
+        ok: false,
+        error: `保存角色卡失败：${error instanceof Error ? error.message : String(error)}`,
+      })
+      return
+    }
+    sendJson(res, 200, { ok: true, cards: result.cards })
+  } catch (error) {
+    sendJson(res, 400, {
+      ok: false,
+      error: `请求格式不正确：${error instanceof Error ? error.message : String(error)}`,
+    })
   }
 }
 

@@ -3011,6 +3011,441 @@ function AdvisorGroupSettingsTab(): ReactNode {
   )
 }
 
+/* ------------------------- Advisor corps panel ------------------------- */
+
+interface CorpsCardData {
+  name: string
+  duty: string
+  updatedAt: number
+}
+
+interface CorpsSessionRow {
+  sessionId: string
+  name: string
+  cwd?: string
+  updatedAt: number
+  running: boolean
+  subagent: boolean
+  hint: string
+  hasTitle: boolean
+  card: CorpsCardData | null
+}
+
+interface CorpsOrphanRow extends CorpsCardData {
+  sessionId: string
+}
+
+interface CorpsPayload {
+  ok: boolean
+  filtered: boolean
+  sessions: CorpsSessionRow[]
+  orphans: CorpsOrphanRow[]
+  note?: string
+  error?: string
+}
+
+const corpsRootStyle: CSSProperties = {
+  boxSizing: 'border-box',
+  maxWidth: 920,
+  margin: '0 auto',
+  padding: '28px 24px 48px',
+  fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+  fontSize: 13,
+  color: 'inherit',
+}
+
+const corpsHeaderStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'flex-start',
+  justifyContent: 'space-between',
+  gap: 16,
+  marginBottom: 18,
+}
+
+const corpsTitleStyle: CSSProperties = {
+  margin: 0,
+  fontSize: 20,
+  fontWeight: 700,
+  letterSpacing: 0.2,
+}
+
+const corpsDescStyle: CSSProperties = {
+  margin: '6px 0 0',
+  fontSize: 12,
+  lineHeight: 1.6,
+  color: 'var(--dsw-alias-label-tertiary, var(--dsh-color-muted, #8b90a0))',
+}
+
+const corpsCardStyle: CSSProperties = {
+  border: '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  borderRadius: 12,
+  padding: '12px 14px',
+  marginBottom: 10,
+  background: 'var(--dsw-alias-bg-layer-2, transparent)',
+  display: 'grid',
+  gap: 9,
+}
+
+const corpsRowHeadStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  flexWrap: 'wrap',
+  minWidth: 0,
+}
+
+const corpsNameStyle: CSSProperties = {
+  fontWeight: 600,
+  fontSize: 13,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  maxWidth: '60%',
+}
+
+const corpsMetaStyle: CSSProperties = {
+  fontSize: 11,
+  color: 'var(--dsw-alias-label-tertiary, var(--dsh-color-muted, #8b90a0))',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+}
+
+const corpsBadgeStyle = (color: string): CSSProperties => ({
+  fontSize: 10,
+  lineHeight: '16px',
+  padding: '0 7px',
+  borderRadius: 999,
+  border: `1px solid ${color}`,
+  color,
+  flex: 'none',
+})
+
+const corpsFieldsStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'minmax(140px, 200px) minmax(200px, 1fr) auto',
+  gap: 8,
+  alignItems: 'end',
+}
+
+const corpsLabelStyle: CSSProperties = {
+  display: 'block',
+  fontSize: 11,
+  color: 'var(--dsw-alias-label-tertiary, var(--dsh-color-muted, #8b90a0))',
+  marginBottom: 4,
+}
+
+const corpsInputStyle: CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box',
+  padding: '5px 8px',
+  borderRadius: 6,
+  border: '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  background: 'transparent',
+  color: 'inherit',
+  font: 'inherit',
+}
+
+const corpsButtonStyle: CSSProperties = {
+  ...settingsFooterButtonStyle,
+  border: '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  background: 'transparent',
+  color: 'inherit',
+  padding: '5px 12px',
+  height: 30,
+  whiteSpace: 'nowrap',
+}
+
+const corpsSectionTitleStyle: CSSProperties = {
+  fontSize: 12,
+  fontWeight: 700,
+  margin: '20px 0 8px',
+  color: 'var(--dsw-alias-label-secondary, inherit)',
+}
+
+const corpsNoticeStyle: CSSProperties = {
+  fontSize: 12,
+  lineHeight: 1.6,
+  padding: '8px 10px',
+  borderRadius: 8,
+  marginBottom: 12,
+  border: '1px solid var(--dsw-alias-border-l2, var(--dsh-color-border, #3a3f4b))',
+  color: 'var(--dsw-alias-label-secondary, inherit)',
+}
+
+/**
+ * 「顾问团」 conversation view: one row per visible session, with a user-curated
+ * identity and duty. The role name is what `ask_session` can target later; the
+ * panel never changes a session's own title.
+ */
+function AdvisorCorpsView(): ReactNode {
+  const [data, setData] = useState<CorpsPayload | null>(null)
+  const [drafts, setDrafts] = useState<Record<string, { name: string; duty: string }>>({})
+  const [saving, setSaving] = useState('')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+
+  const applyPayload = (payload: CorpsPayload): void => {
+    setData(payload)
+    const next: Record<string, { name: string; duty: string }> = {}
+    for (const row of payload.sessions) {
+      next[row.sessionId] = { name: row.card?.name ?? '', duty: row.card?.duty ?? '' }
+    }
+    for (const row of payload.orphans) {
+      next[row.sessionId] = { name: row.name, duty: row.duty }
+    }
+    setDrafts(next)
+  }
+
+  const load = async (): Promise<void> => {
+    setError('')
+    try {
+      const res = await authedFetch('/advisor-group/corps')
+      const body = (await res.json()) as CorpsPayload
+      if (body.ok !== true) {
+        setError(body.error ?? '加载顾问团失败。')
+        return
+      }
+      applyPayload(body)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const persist = async (sessionId: string, name: string, duty: string): Promise<void> => {
+    setSaving(sessionId)
+    setError('')
+    setMessage('')
+    try {
+      const res = await authedFetch('/advisor-group/corps', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId, name, duty }),
+      })
+      const body = (await res.json()) as {
+        ok?: boolean
+        cards?: Record<string, CorpsCardData>
+        error?: string
+      }
+      if (body.ok !== true || body.cards === undefined) {
+        setError(body.error ?? '保存失败。')
+        return
+      }
+      const cards = body.cards
+      setData((prev) =>
+        prev === null
+          ? prev
+          : {
+              ...prev,
+              sessions: prev.sessions.map((row) => ({
+                ...row,
+                card: cards[row.sessionId] ?? null,
+              })),
+              orphans: Object.entries(cards)
+                .filter(([id]) => !prev.sessions.some((row) => row.sessionId === id))
+                .map(([id, card]) => ({ sessionId: id, ...card }))
+                .sort((a, b) => a.name.localeCompare(b.name, 'zh')),
+            },
+      )
+      setDrafts((prev) => ({
+        ...prev,
+        [sessionId]: {
+          name: cards[sessionId]?.name ?? '',
+          duty: cards[sessionId]?.duty ?? '',
+        },
+      }))
+      setMessage(name.trim() === '' ? '已移除角色卡。' : '已保存。')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSaving('')
+    }
+  }
+
+  const save = (sessionId: string): void => {
+    const draft = drafts[sessionId] ?? { name: '', duty: '' }
+    void persist(sessionId, draft.name, draft.duty)
+  }
+
+  const draftOf = (sessionId: string, fallback?: { name: string; duty: string }) =>
+    drafts[sessionId] ?? fallback ?? { name: '', duty: '' }
+
+  const fields = (
+    sessionId: string,
+    draft: { name: string; duty: string },
+    dirty: boolean,
+    label: string,
+    onSave: () => void,
+  ): ReactNode =>
+    createElement(
+      'div',
+      { style: corpsFieldsStyle },
+      createElement(
+        'div',
+        null,
+        createElement('label', { style: corpsLabelStyle }, '身份姓名'),
+        createElement('input', {
+          value: draft.name,
+          placeholder: '例如：老王',
+          maxLength: 40,
+          onChange: (event: { target: { value: string } }) =>
+            setDrafts((prev) => ({
+              ...prev,
+              [sessionId]: { ...draft, name: event.target.value },
+            })),
+          style: corpsInputStyle,
+        }),
+      ),
+      createElement(
+        'div',
+        null,
+        createElement('label', { style: corpsLabelStyle }, '主要负责'),
+        createElement('input', {
+          value: draft.duty,
+          placeholder: '例如：架构评审与代码质量',
+          maxLength: 200,
+          onChange: (event: { target: { value: string } }) =>
+            setDrafts((prev) => ({
+              ...prev,
+              [sessionId]: { ...draft, duty: event.target.value },
+            })),
+          style: corpsInputStyle,
+        }),
+      ),
+      createElement(
+        'button',
+        {
+          type: 'button',
+          disabled: saving === sessionId || !dirty,
+          onClick: onSave,
+          style: {
+            ...corpsButtonStyle,
+            cursor: dirty ? 'pointer' : 'default',
+            opacity: dirty ? 1 : 0.55,
+          },
+        },
+        saving === sessionId ? '保存中…' : label,
+      ),
+    )
+
+  return createElement(
+    'div',
+    { style: corpsRootStyle },
+    createElement(
+      'div',
+      { style: corpsHeaderStyle },
+      createElement(
+        'div',
+        null,
+        createElement('h2', { style: corpsTitleStyle }, '顾问团'),
+        createElement(
+          'p',
+          { style: corpsDescStyle },
+          '给每个可跨会话对话的会话分配一个身份姓名和职责。之后 ask_session 可以直接用姓名找它；原来的会话标题、目录名和 sessionId 仍然可用。',
+        ),
+      ),
+      createElement(
+        'button',
+        { type: 'button', onClick: () => void load(), style: corpsButtonStyle },
+        '刷新',
+      ),
+    ),
+    error.length > 0
+      ? createElement('div', { style: { ...corpsNoticeStyle, color: '#e11d48' } }, error)
+      : null,
+    message.length > 0
+      ? createElement('div', { style: { ...corpsNoticeStyle, color: '#16a34a' } }, message)
+      : null,
+    data === null
+      ? createElement('div', { style: corpsDescStyle }, '加载中…')
+      : data.note !== undefined
+        ? createElement('div', { style: corpsNoticeStyle }, data.note)
+        : null,
+    data !== null && data.filtered === false
+      ? createElement(
+          'div',
+          { style: corpsNoticeStyle },
+          '当前宿主未提供工作区登记信息，名单未按侧栏可见范围过滤。',
+        )
+      : null,
+    data !== null && data.sessions.length === 0
+      ? createElement('div', { style: corpsDescStyle }, '没有可见的会话。')
+      : null,
+    data !== null
+      ? data.sessions.map((row) => {
+          const draft = draftOf(row.sessionId, {
+            name: row.card?.name ?? '',
+            duty: row.card?.duty ?? '',
+          })
+          const dirty =
+            draft.name.trim() !== (row.card?.name ?? '') ||
+            draft.duty.trim() !== (row.card?.duty ?? '')
+          const assigned = row.card !== null
+          return createElement(
+            'div',
+            { key: row.sessionId, style: corpsCardStyle },
+            createElement(
+              'div',
+              { style: corpsRowHeadStyle },
+              createElement('span', { style: corpsNameStyle }, row.name),
+              row.running ? createElement('span', { style: corpsBadgeStyle('#16a34a') }, '运行中') : null,
+              row.subagent ? createElement('span', { style: corpsBadgeStyle('#8b90a0') }, '子代理') : null,
+              createElement(
+                'span',
+                { style: corpsBadgeStyle(assigned ? '#3b82f6' : '#8b90a0') },
+                assigned ? `顾问团 · ${row.card?.name}` : '未分配',
+              ),
+            ),
+            createElement(
+              'div',
+              { style: corpsMetaStyle },
+              `${row.cwd ?? '（未知目录）'} · ${row.sessionId}`,
+            ),
+            fields(row.sessionId, draft, dirty, assigned ? '保存' : '分配', () => save(row.sessionId)),
+          )
+        })
+      : null,
+    data !== null && data.orphans.length > 0
+      ? createElement(
+          'div',
+          null,
+          createElement(
+            'div',
+            { style: corpsSectionTitleStyle },
+            `未挂接的角色卡（${data.orphans.length}）`,
+          ),
+          createElement(
+            'div',
+            { style: corpsDescStyle },
+            '这些卡片对应的会话已归档、被排除、离开工作区或已不存在；可以删除，或保留给以后重新出现的会话用。',
+          ),
+          data.orphans.map((row) => {
+            const draft = draftOf(row.sessionId, { name: row.name, duty: row.duty })
+            const dirty =
+              draft.name.trim() !== row.name || draft.duty.trim() !== row.duty
+            return createElement(
+              'div',
+              { key: row.sessionId, style: corpsCardStyle },
+              createElement(
+                'div',
+                { style: corpsRowHeadStyle },
+                createElement('span', { style: corpsNameStyle }, row.name),
+                createElement('span', { style: corpsBadgeStyle('#f59e0b') }, '未挂接'),
+              ),
+              createElement('div', { style: corpsMetaStyle }, row.sessionId),
+              fields(row.sessionId, draft, dirty, '保存', () => save(row.sessionId)),
+            )
+          }),
+        )
+      : null,
+  )
+}
+
 export const name = 'dsh-advisor-group'
 
 export const inject = ['uiConversation', 'slots', 'locale']
@@ -3043,6 +3478,20 @@ export function apply(ctx: ClientContext): void {
         label: '顾问群',
       },
       AdvisorGroupSettingsTab,
+    ),
+  )
+
+  // Conversation tab: the advisor-corps role cards (one identity per visible
+  // session). The same labels appear in list_sessions and are valid targets.
+  ctx.slots.inject('conversation.view', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.view',
+        id: 'advisor-corps',
+        order: 30,
+        label: '顾问团',
+      },
+      AdvisorCorpsView,
     ),
   )
 }

@@ -54,6 +54,7 @@ import { Config, unwrapVolatileConfig, type Config as ConfigShape } from '../src
 import { registerAdvisorTools, renderAskRecords, resolveAskDefaults, visibleRosterSessions } from '../src/tools'
 import { askStoreDir, ASK_BOOT_ID, readAskRecord, writeAskRecord, type AskRecord } from '../src/ask-store'
 import { askStoreRoot } from '../src/cross-session'
+import { saveCorpsCards } from '../src/corps'
 import type { AdvisorGroupService } from '../src/service'
 
 /** Minimal tool surface the tests call: the mocked defineTool returns the options. */
@@ -373,5 +374,39 @@ describe('list_sessions degradation note', () => {
     const value = await run(swarmConfig(), 'list_sessions', {}, selfExec())
     expect(value.ok).toBe(true)
     expect(String(value.note)).toContain('未提供工作区登记')
+  })
+})
+
+describe('advisor corps targeting', () => {
+  let home: string
+  let savedHome: string | undefined
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'advisor-group-corps-'))
+    savedHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    captured.asks.length = 0
+  })
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  it('resolves an exact role name to its session before delivery', async () => {
+    saveCorpsCards({ peer: { name: '老王', duty: '架构评审', updatedAt: 1 } })
+    await run(swarmConfig(), 'ask_session', { target: '老王', question: '在吗？' }, selfExec())
+    expect(captured.asks).toHaveLength(1)
+    expect(captured.asks[0]).toMatchObject({ target: 'peer' })
+  })
+
+  it('shows the role name and duty in list_sessions', async () => {
+    saveCorpsCards({ peer: { name: '老王', duty: '架构评审', updatedAt: 1 } })
+    const value = await run(swarmConfig(), 'list_sessions', {}, selfExec())
+    const sessions = value.sessions as Array<Record<string, unknown>>
+    const peer = sessions.find((row) => row.sessionId === 'peer')
+    expect(peer?.roleName).toBe('老王')
+    expect(peer?.duty).toBe('架构评审')
   })
 })

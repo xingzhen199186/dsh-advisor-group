@@ -37,6 +37,7 @@ export function buildAdvisorPrompt(
     '   如果某项信息确实未知，明确写“该项背景未知”，不要留空 context，也不要让顾问在缺少背景的情况下猜测。',
     '6. 拿到顾问结论后：自行判断、综合并执行，不要原样复制整段顾问回复。',
     '7. 发起新咨询：插件会自动进行多轮深挖（默认 autoDeepen：每轮结束由驱动模型基于全部讨论生成更深入的追问，顾问按顺序 A→B→C 接力回答，直到 maxRounds 轮），并自动产出综合结论——你无需再手动 followUp；只有想追加一轮固定主题时才传 sessionId+followUp。',
+    '8. 跨会话提问（ask_session）时，可以先调用 list_sessions 查看「顾问团」的姓名与职责，再直接用姓名作为 target；原来的会话标题、目录名和 sessionId 仍然可用。',
   ]
 
   if (repeatPressure && repeatPressure.count >= 3) {

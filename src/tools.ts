@@ -34,6 +34,7 @@ import {
 } from './session-router'
 import type { ConsultSession, ConsultSummary } from './types'
 import type { Config } from './config'
+import { findCorpsSession, loadCorpsCards } from './corps'
 import { buildSessionRoster, renderRoster, shortSessionName, withSessionLogSizes, type RosterRow, type RosterSource } from './session-roster'
 import { listAskRecords, pruneAskRecords, readAskRecord, reconcileStaleAsk, writeAskRecord, type AskRecord } from './ask-store'
 import { askSessions } from './multi-ask'
@@ -375,7 +376,7 @@ export function registerAdvisorTools(
       target: {
         type: 'string',
         description:
-          'The target session, named the way the user names it: its exact title as shown in the session list (the session name in the sidebar), a natural partial name, or a full sessionId. A title or the workspace/directory name is usually enough (「极简遥控器」 matches sessions under I:\\极简遥控器\\…). One unique match is used directly; several matches return the candidates (running / most recently active first) and a miss returns the recent sessions — both for the USER to choose: never guess, and do NOT search session logs or directories for session ids.',
+          'The target session, named the way the user names it: its exact title as shown in the session list (the session name in the sidebar), a natural partial name, a full sessionId, or an exact advisor-corps role name (see list_sessions). A title or the workspace/directory name is usually enough (「极简遥控器」 matches sessions under I:\\极简遥控器\\…). An exact role name resolves to the session it is assigned to and takes precedence over a same-named title. One unique match is used directly; several matches return the candidates (running / most recently active first) and a miss returns the recent sessions — both for the USER to choose: never guess, and do NOT search session logs or directories for session ids.',
         // Optional on purpose: omit it (with routing enabled) to get candidates.
       },
       question: {
@@ -561,6 +562,10 @@ export function registerAdvisorTools(
       // model call, and this branch NEVER delivers. A candidate list is never
       // auto-picked: choosing the session stays the user's act.
       const targetText = typeof args.target === 'string' ? args.target.trim() : ''
+      // Advisor corps: an exact role name resolves to that session id before the
+      // ordinary title/cwd/id matcher runs. A card name that does not resolve
+      // falls through unchanged, so every previous spelling keeps working.
+      const corpsTarget = targetText.length > 0 ? findCorpsSession(loadCorpsCards(), targetText) : undefined
       if (targetText.length === 0 && swarm.routingEnabled !== false) {
         // Sessions no workspace registers (and swarm-excluded ones) are dropped
         // before recall, so they can never be a candidate and any alias pointing
@@ -625,7 +630,7 @@ export function registerAdvisorTools(
         currentSessionId: sessionId,
         senderName,
         currentEvents: readCurrentEvents(session),
-        target: typeof args.target === 'string' ? args.target : '',
+        target: corpsTarget ?? targetText,
         question,
         context,
         waitMs: answerMode.waitMs,
@@ -680,7 +685,7 @@ export function registerAdvisorTools(
         type: 'array',
         items: { type: 'string' },
         description:
-          'The sessions to ask, 1–8 entries, same spelling as ask_session (exact id, exact title, or a natural partial name). Duplicates collapse into one; unresolvable or excluded targets are skipped with a reason.',
+          'The sessions to ask, 1–8 entries, same spelling as ask_session (exact id, exact title, exact advisor-corps role name, or a natural partial name). Duplicates collapse into one; unresolvable or excluded targets are skipped with a reason.',
         required: true,
       },
       question: {
@@ -774,11 +779,15 @@ export function registerAdvisorTools(
       const swarm = service.getConfig().swarm
       const session = exec.agent?.session ?? getCurrentSessionFrom(exec)
       const sessionId = session?.id
+      const corpsCards = loadCorpsCards()
       return await askSessions(ctx, exec.signal, {
         currentSessionId: typeof sessionId === 'string' ? sessionId : '',
         currentEvents: readCurrentEvents(session),
         targets: Array.isArray(args.targets)
-          ? args.targets.map((target) => (typeof target === 'string' ? target : ''))
+          ? args.targets.map((target) => {
+              const text = typeof target === 'string' ? target : ''
+              return findCorpsSession(corpsCards, text) ?? text
+            })
           : [],
         question: typeof args.question === 'string' ? args.question : '',
         context: typeof args.context === 'string' ? args.context : undefined,
@@ -801,7 +810,7 @@ export function registerAdvisorTools(
   const listSessionsTool = defineTool({
     name: 'list_sessions',
     description:
-      'List the sessions this host knows: the title shown in the session list, its sessionId, working directory, how long ago it was active, and whether it is running. Use it when the user names a session but you are unsure which one they mean, or after ask_session returns target-not-found / target-ambiguous — show the rows to the user instead of digging session ids out of log files. Read-only: it never wakes a session and costs no model call.',
+      'List the sessions this host knows: the title shown in the session list, its sessionId, working directory, how long ago it was active, whether it is running, and its advisor-corps role name and duty when assigned. Use it when the user names a session but you are unsure which one they mean, when you want to address a member by role name, or after ask_session returns target-not-found / target-ambiguous — show the rows to the user instead of digging session ids out of log files. Read-only: it never wakes a session and costs no model call.',
     parameters: {
       query: {
         type: 'string',
@@ -837,6 +846,9 @@ export function registerAdvisorTools(
                 // Diagnostic only: whether the row carried a real title. It is
                 // deliberately absent from the rendered text.
                 hasTitle: { type: 'boolean', required: true },
+                // Advisor-corps identity, when this session has a card.
+                roleName: { type: 'string' },
+                duty: { type: 'string' },
                 // Accumulated-context proxy (log bytes), when the host layout
                 // let it be read; absent otherwise.
                 sizeHint: { type: 'number' },
@@ -906,7 +918,15 @@ export function registerAdvisorTools(
         })
         // Same short display names the rendered text uses, so the structured
         // rows never show a full path twice for a title-less session.
-        const sessions = rows.map((row) => ({ ...row, name: shortSessionName(row.name, row.cwd) }))
+        const corpsCards = loadCorpsCards()
+        const sessions = rows.map((row) => {
+          const card = corpsCards[row.sessionId]
+          return {
+            ...row,
+            name: shortSessionName(row.name, row.cwd),
+            ...(card === undefined ? {} : { roleName: card.name, duty: card.duty }),
+          }
+        })
         return {
           ok: true,
           count: sessions.length,
