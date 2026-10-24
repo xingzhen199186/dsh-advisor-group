@@ -11,10 +11,8 @@
 | Capability | What it helps you do |
 | --- | --- |
 | **Multi-model consultation (Advisor Group)** | For professional, high-risk, or uncertain questions, let expert advisors answer in sequence before a driver model synthesizes their conclusions. |
-| **Cross-session collaboration (global swarm)** | Ask another existing session and reuse the code it read, the investigation it completed, and the decisions it settled instead of starting over. |
+| **Cross-session collaboration (global swarm)** | Ask another existing session and reuse the code it read, the investigation it completed, and the decisions it settled instead of starting over. Beyond this session's subagent capability, it lets the model write across projects. |
 | **Advisor Corps role cards** | Assign a name and duty to a session. You can then say “ask 小明” without remembering its title or sessionId. |
-
-> **Version note**: this page tracks the current `main` and npm `0.1.5`; Advisor Corps role cards, batch asks through `ask_sessions`, automatic answer copy-back, and the related wait-state improvements are all included. See [Releases](https://github.com/xingzhen199186/dsh-advisor-group/releases) and [CHANGELOG](CHANGELOG.md) for published versions.
 
 ## Compatibility and installation
 
