@@ -3184,6 +3184,8 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
   const [drafts, setDrafts] = useState<Record<string, { name: string; duty: string }>>({})
   const [saving, setSaving] = useState('')
   const [generating, setGenerating] = useState(false)
+  const [batchSaving, setBatchSaving] = useState(false)
+  const [batchProgress, setBatchProgress] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
 
@@ -3323,6 +3325,77 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
   const draftOf = (sessionId: string, fallback?: { name: string; duty: string }) =>
     drafts[sessionId] ?? fallback ?? { name: '', duty: '' }
 
+  /** Every row whose draft differs from what is saved (sessions + orphans). */
+  const dirtyTargets = (): Array<{ sessionId: string; name: string; duty: string }> => {
+    if (data === null) return []
+    const targets: Array<{ sessionId: string; name: string; duty: string }> = []
+    for (const row of data.sessions) {
+      const savedName = row.card?.name ?? ''
+      const savedDuty = row.card?.duty ?? ''
+      const draft = draftOf(row.sessionId, { name: savedName, duty: savedDuty })
+      if (draft.name.trim() !== savedName || draft.duty.trim() !== savedDuty) {
+        targets.push({ sessionId: row.sessionId, name: draft.name, duty: draft.duty })
+      }
+    }
+    for (const row of data.orphans) {
+      const draft = draftOf(row.sessionId, { name: row.name, duty: row.duty })
+      if (draft.name.trim() !== row.name || draft.duty.trim() !== row.duty) {
+        targets.push({ sessionId: row.sessionId, name: draft.name, duty: draft.duty })
+      }
+    }
+    return targets
+  }
+  const dirtyCount = dirtyTargets().length
+
+  const saveAll = async (): Promise<void> => {
+    const targets = dirtyTargets()
+    if (targets.length === 0 || batchSaving) return
+    setBatchSaving(true)
+    setBatchProgress(`0 / ${targets.length}`)
+    setError('')
+    setMessage('')
+    let saved = 0
+    let removed = 0
+    let failed = false
+    try {
+      for (const [index, target] of targets.entries()) {
+        setBatchProgress(`${index + 1} / ${targets.length}`)
+        // Sequential on purpose: every POST rewrites the whole card map, so
+        // parallel writes would lose each other.
+        const res = await authedFetch('/advisor-group/corps', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: target.sessionId,
+            name: target.name,
+            duty: target.duty,
+          }),
+        })
+        const body = (await res.json()) as {
+          ok?: boolean
+          cards?: Record<string, CorpsCardData>
+          error?: string
+        }
+        if (body.ok !== true || body.cards === undefined) {
+          setError(`第 ${index + 1} 条保存失败：${body.error ?? '未知错误'}`)
+          failed = true
+          break
+        }
+        saved += 1
+        if (target.name.trim() === '') removed += 1
+      }
+      if (!failed) {
+        await load()
+        setMessage(`已保存 ${saved} 条${removed > 0 ? `，其中移除 ${removed} 条` : ''}。`)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBatchSaving(false)
+      setBatchProgress('')
+    }
+  }
+
   const fields = (
     sessionId: string,
     draft: { name: string; duty: string },
@@ -3369,7 +3442,7 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
         'button',
         {
           type: 'button',
-          disabled: saving === sessionId || !dirty,
+          disabled: saving === sessionId || batchSaving || !dirty,
           onClick: onSave,
           style: {
             ...corpsButtonStyle,
@@ -3394,12 +3467,31 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
         createElement(
           'p',
           { style: corpsDescStyle },
-          '角色卡对整个 DSH 全局生效。给每个可跨会话对话的会话分配一个身份姓名和职责；之后 ask_session 可以直接用姓名找它，原来的会话标题、目录名和 sessionId 仍然可用。生成时使用当前打开会话的主模型，只补还没有卡的会话，已有卡不会被覆盖。',
+          '角色卡对整个 DSH 全局生效。给每个可跨会话对话的会话分配一个身份姓名和职责；之后 ask_session 可以直接用姓名找它，原来的会话标题、目录名和 sessionId 仍然可用。生成时使用当前打开会话的主模型，只补还没有卡的会话，已有卡不会被覆盖。改完可以逐条保存，也可以一次保存全部更改。',
         ),
       ),
       createElement(
         'div',
-        { style: { display: 'flex', gap: 8, flexShrink: 0 } },
+        { style: { display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap' } },
+        createElement(
+          'button',
+          {
+            type: 'button',
+            disabled: batchSaving || generating || dirtyCount === 0,
+            onClick: () => void saveAll(),
+            style: {
+              ...corpsButtonStyle,
+              background:
+                dirtyCount > 0 ? 'var(--dsw-alias-label-primary, #e6e9f0)' : 'transparent',
+              color:
+                dirtyCount > 0 ? 'var(--dsw-alias-bg-layer-3, #151821)' : 'inherit',
+              opacity: dirtyCount > 0 ? 1 : 0.55,
+            },
+          },
+          batchSaving
+            ? `保存中 ${batchProgress}`
+            : `保存全部更改${dirtyCount > 0 ? `（${dirtyCount}）` : ''}`,
+        ),
         createElement(
           'button',
           {
@@ -3451,6 +3543,8 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
             draft.name.trim() !== (row.card?.name ?? '') ||
             draft.duty.trim() !== (row.card?.duty ?? '')
           const assigned = row.card !== null
+          const rowLabel =
+            draft.name.trim() === '' ? (assigned ? '移除' : '加入顾问团') : '保存'
           return createElement(
             'div',
             { key: row.sessionId, style: corpsCardStyle },
@@ -3471,7 +3565,7 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
               { style: corpsMetaStyle },
               `${row.cwd ?? '（未知目录）'} · ${row.sessionId}`,
             ),
-            fields(row.sessionId, draft, dirty, assigned ? '保存' : '分配', () => save(row.sessionId)),
+            fields(row.sessionId, draft, dirty, rowLabel, () => save(row.sessionId)),
           )
         })
       : null,
@@ -3503,7 +3597,13 @@ function AdvisorCorpsView(props: { sessionId?: string }): ReactNode {
                 createElement('span', { style: corpsBadgeStyle('#f59e0b') }, '未挂接'),
               ),
               createElement('div', { style: corpsMetaStyle }, row.sessionId),
-              fields(row.sessionId, draft, dirty, '保存', () => save(row.sessionId)),
+              fields(
+                row.sessionId,
+                draft,
+                dirty,
+                draft.name.trim() === '' ? '移除' : '保存',
+                () => save(row.sessionId),
+              ),
             )
           }),
         )
