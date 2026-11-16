@@ -29,6 +29,18 @@ function ctxWithSchemas(execute?: () => Promise<ToolExecutionResult>): Context {
   } as unknown as Context
 }
 
+/** Current DSH: provider registration marks the batch-executor contract. */
+function ctxWithBatchSchemas(execute: (input: unknown) => Promise<unknown>): Context {
+  return {
+    tools: {
+      schemas: () => SCHEMAS,
+      execute,
+      resolve: async () => undefined,
+      setExecutor: () => () => undefined,
+    },
+  } as unknown as Context
+}
+
 describe('advisor tool scope resolution', () => {
   it('readonly keeps only the whitelisted read-only tools', () => {
     const schemas = resolveAdvisorToolSchemas(ctxWithSchemas(), undefined, 'readonly')
@@ -237,6 +249,43 @@ describe('advisor tool execution bridge', () => {
     expect(input.signal).toBeDefined()
   })
 
+  it('executes on current hosts as a one-call raw batch and unwraps its result', async () => {
+    let received: unknown
+    const agent = { id: 'agent-1' }
+    const ctx = ctxWithBatchSchemas(async (input) => {
+      received = input
+      return {
+        results: [{
+          callId: 'call_1',
+          result: { isError: false, content: [{ type: 'text', text: '文件内容' }], value: null },
+        }],
+        additionalContexts: [],
+        concluded: false,
+      }
+    })
+    const text = await executeAdvisorTool(
+      ctx,
+      agent,
+      { id: 'call_1', name: 'read', argumentsJson: '{"file_path":"package.json"}' },
+      new AbortController().signal,
+    )
+    expect(text).toBe('文件内容')
+    const input = received as {
+      calls: Array<{ type: string; id: string; name: string; arguments: string }>
+      agent: unknown
+      signal: AbortSignal
+    }
+    expect(input.calls).toEqual([{
+      type: 'tool-call',
+      id: 'call_1',
+      name: 'read',
+      arguments: '{"file_path":"package.json"}',
+    }])
+    expect(input.agent).toBe(agent)
+    expect(input.signal).toBeDefined()
+    expect((input as { callId?: unknown }).callId).toBeUndefined()
+  })
+
   it('returns a readable error for invalid JSON arguments and for execution failures', async () => {
     const text = await executeAdvisorTool(
       ctxWithSchemas(async () => ({ isError: false, content: [], value: null }) as unknown as ToolExecutionResult),
@@ -245,6 +294,29 @@ describe('advisor tool execution bridge', () => {
       undefined,
     )
     expect(text).toContain('不是合法 JSON')
+  })
+
+  it('surfaces the wrapped cause chain when the host rejects a tool invocation', async () => {
+    const cause = Object.assign(new Error('unknown tool "web_search"'), { code: 'UNKNOWN_TOOL' })
+    const wrapper = Object.assign(new Error('Tool batch execution failed'), { cause })
+    const ctx = ctxWithBatchSchemas(async () => {
+      throw wrapper
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const text = await executeAdvisorTool(
+        ctx,
+        undefined,
+        { id: 'c', name: 'web_search', argumentsJson: '{}' },
+        undefined,
+      )
+      expect(text).toContain('Tool batch execution failed')
+      expect(text).toContain('unknown tool "web_search"')
+      expect(text).toContain('UNKNOWN_TOOL')
+      expect(warn.mock.calls.some((args) => String(args[0]).includes('agent=none'))).toBe(true)
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 

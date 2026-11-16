@@ -151,6 +151,54 @@ export function summarizeToolResult(result: ToolExecutionResult): string {
 }
 
 /**
+ * Render an error together with its `cause` chain. DSH wraps a failed tool
+ * invocation in `ToolBatchExecutionError` ("Tool batch execution failed") and
+ * keeps the actionable reason in `cause`; showing only the outer message makes
+ * every advisor tool failure undiagnosable. Bounded so a card row stays short.
+ */
+export function describeToolExecutionError(error: unknown): string {
+  const parts: string[] = []
+  const seen = new Set<unknown>()
+  let current: unknown = error
+  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth += 1) {
+    if (seen.has(current)) break
+    seen.add(current)
+    if (current instanceof Error) {
+      const code = (current as { code?: unknown }).code
+      const message = current.message || current.name || 'Error'
+      const prefix = current.name && current.name !== 'Error' && current.name !== message ? `${current.name}: ` : ''
+      const suffix = typeof code === 'string' && code.length > 0 ? ` [${code}]` : ''
+      parts.push(`${prefix}${message}${suffix}`)
+    } else {
+      parts.push(String(current))
+    }
+    current = (current as { cause?: unknown }).cause
+  }
+  const text = parts
+    .map((part) => part.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' ← ')
+  return text.length > 600 ? `${text.slice(0, 600)}…` : text
+}
+
+interface AdvisorToolBatchResult {
+  readonly results: readonly { readonly callId: string; readonly result: ToolExecutionResult }[]
+}
+
+interface AdvisorToolsExecuteService {
+  execute?: (input: unknown) => Promise<ToolExecutionResult | AdvisorToolBatchResult>
+  /** Present only on the executor-provider API, whose execute() takes a batch. */
+  resolve?: unknown
+  setExecutor?: unknown
+}
+
+function isAdvisorToolBatchResult(
+  value: ToolExecutionResult | AdvisorToolBatchResult,
+): value is AdvisorToolBatchResult {
+  return Array.isArray((value as AdvisorToolBatchResult).results)
+}
+
+/**
  * Execute one tool via the official pipeline (scoped dispatch when `agent` is
  * provided). Returns the model-facing text; never throws.
  */
@@ -160,9 +208,7 @@ export async function executeAdvisorTool(
   call: AdvisorToolCall,
   signal?: AbortSignal,
 ): Promise<string> {
-  const tools = (ctx as unknown as {
-    tools?: { execute?: (input: unknown) => Promise<ToolExecutionResult> }
-  }).tools
+  const tools = (ctx as unknown as { tools?: AdvisorToolsExecuteService }).tools
   if (!tools?.execute) {
     return '（顾问工具执行不可用：当前环境未提供工具执行服务）'
   }
@@ -173,16 +219,41 @@ export async function executeAdvisorTool(
     return '（工具参数不是合法 JSON）'
   }
   try {
+    const executionSignal = withTimeout(TOOL_EXEC_TIMEOUT_MS, signal)
+    // DSH 0.2.2 delegates execute() to a batch ToolExecutor. Passing the older
+    // single-call shape leaves `calls` undefined and every invocation fails in
+    // the scheduler before reaching the tool. The provider-registration methods
+    // are the runtime capability marker; 0.2.1 and older keep the legacy path.
+    if (typeof tools.resolve === 'function' && typeof tools.setExecutor === 'function') {
+      const batch = await tools.execute({
+        calls: [{ type: 'tool-call', id: call.id, name: call.name, arguments: call.argumentsJson }],
+        ...(agent === undefined ? {} : { agent }),
+        signal: executionSignal,
+      })
+      if (!isAdvisorToolBatchResult(batch)) {
+        return '（工具执行失败：宿主批次接口返回了无法识别的结果）'
+      }
+      const settled = batch.results.find((item) => item.callId === call.id) ?? batch.results[0]
+      if (!settled) return '（工具执行失败：宿主没有返回该次调用的结果）'
+      return summarizeToolResult(settled.result)
+    }
     const result = await tools.execute({
       callId: call.id as never,
       name: call.name,
       arguments: args,
       ...(agent === undefined ? {} : { agent }),
-      signal: withTimeout(TOOL_EXEC_TIMEOUT_MS, signal),
+      signal: executionSignal,
     })
+    if (isAdvisorToolBatchResult(result)) {
+      return '（工具执行失败：旧版工具接口返回了意外的批次结果）'
+    }
     return summarizeToolResult(result)
   } catch (error) {
-    return `（工具执行失败：${error instanceof Error ? error.message : String(error)}）`
+    const detail = describeToolExecutionError(error)
+    console.warn(
+      `[dsh-advisor-group] 顾问工具执行失败（${call.name}，agent=${agent === undefined ? 'none' : 'provided'}）：${detail}`,
+    )
+    return `（工具执行失败：${detail}）`
   }
 }
 
