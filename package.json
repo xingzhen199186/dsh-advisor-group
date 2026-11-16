@@ -1,6 +1,6 @@
 {
   "name": "dsh-advisor-group",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "让一个会话既能向其他模型借智慧，也能向其他会话借记忆。遇到专业、长尾世界知识、高风险或不确定的问题，主模型召集多位专家顾问模型，在复古 CRT 聊天组卡片中进行会诊；遇到别的会话已经知道的事，跨会话去问，复用已有上下文，无需从头再查。",
   "repository": {
     "type": "git",
@@ -65,7 +65,7 @@
     "vitest": "^3.2.7"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/cordis": ">=4.0.4 <4.2.0",
     "@deepseek-ai/dsh-client-locale": ">=0.1.7-rc.2 <0.3.0",
     "@deepseek-ai/dsh-client-ui-chat": ">=0.1.7-rc.2 <0.3.0",
     "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.7-rc.2 <0.3.0",
@@ -77,7 +77,7 @@
     "@deepseek-ai/dsh-session": ">=0.1.7-rc.2 <0.3.0",
     "@deepseek-ai/dsh-settings": ">=0.1.7-rc.2 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.1.7-rc.2 <0.3.0",
-    "@deepseek-ai/schemastery": "~3.18.4",
+    "@deepseek-ai/schemastery": ">=3.18.4 <3.20.0",
     "react": "^18.0.0 || ^19.0.0"
   },
   "dsh": {

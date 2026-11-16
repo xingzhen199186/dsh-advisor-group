@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.6] - 2026-11-16
+
+### Fixed
+
+- **Advisor tool calling on DSH 0.2.2**: the host now delegates `ctx.tools.execute()` to the scoped batch executor, so the legacy single-call shape left `calls` undefined and every advisor tool invocation failed before reaching the tool (`Tool batch execution failed`) on 0.2.2 hosts. `executeAdvisorTool` detects the batch-executor API at runtime, sends one raw `tool-call` batch, and unwraps the settled result; older hosts keep the single-call path. A failure now renders the complete `cause` chain and logs the tool name and agent presence server-side.
+- **Peer ranges for current hosts**: `@deepseek-ai/cordis` widened from `~4.0.4` to `>=4.0.4 <4.2.0` and `@deepseek-ai/schemastery` from `~3.18.4` to `>=3.18.4 <3.20.0`, so an install on DSH 0.2.2 (Cordis 4.1.0 / Schemastery 3.19.0) resolves the host copies instead of nesting incompatible ones.
+
+### Changed
+
+- **Compatibility baseline**: both READMEs now name `0.2.2-rc.3` as the current development baseline, runtime-verified on the desktop app; the declarations still admit `>=0.1.7-rc.2 <0.3.0`.
+
 ## [0.1.5] - 2026-10-24
 
 ### Added

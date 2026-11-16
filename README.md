@@ -18,7 +18,7 @@
 
 | 项目 | 说明 |
 | --- | --- |
-| DSH | 当前开发基线为 `0.2.1-rc.3`；声明可安装的版本范围（peer）为 `>=0.1.7-rc.2 <0.3.0` |
+| DSH | 当前开发基线为 `0.2.2-rc.3`（桌面端实跑验证）；声明可安装的版本范围（peer）为 `>=0.1.7-rc.2 <0.3.0` |
 | Node.js | 从源码构建时需要 `^22.19.0 || >=24.0.0` |
 | 使用端 | DSH Web 与桌面端，共用同一份客户端代码包 |
 
@@ -46,8 +46,8 @@ npm run build
 npm pack
 
 # 以 npm pack 实际生成的文件名为准
-# 当前 package.json 版本为 0.1.5，因此文件名如下：
-dsh plugin --profile web add ./dsh-advisor-group-0.1.5.tgz
+# 当前 package.json 版本为 0.1.6，因此文件名如下：
+dsh plugin --profile web add ./dsh-advisor-group-0.1.6.tgz
 ```
 
 桌面端安装源码包时，在 **Plugins → Add plugin** 中填写这个 `.tgz` 文件的绝对路径。安装后重启相应的 DSH 端。

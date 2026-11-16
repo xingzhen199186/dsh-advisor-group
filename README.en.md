@@ -18,7 +18,7 @@
 
 | Item | Details |
 | --- | --- |
-| DSH | The current development baseline is `0.2.1-rc.3`; the declared peer range is `>=0.1.7-rc.2 <0.3.0` |
+| DSH | The current development baseline is `0.2.2-rc.3` (runtime-verified on the desktop app); the declared peer range is `>=0.1.7-rc.2 <0.3.0` |
 | Node.js | Required for source builds: `^22.19.0 || >=24.0.0` |
 | Applications | DSH Web and the desktop app, sharing the same client bundle |
 
@@ -46,8 +46,8 @@ npm run build
 npm pack
 
 # Use the actual filename printed by npm pack.
-# The current package.json version is 0.1.5, producing:
-dsh plugin --profile web add ./dsh-advisor-group-0.1.5.tgz
+# The current package.json version is 0.1.6, producing:
+dsh plugin --profile web add ./dsh-advisor-group-0.1.6.tgz
 ```
 
 For a source-built desktop installation, enter the `.tgz` file's absolute path under **Plugins → Add plugin**. Restart the corresponding DSH application after installation.
